@@ -1,5 +1,6 @@
 # Local runtime and credentials
 runtime/
+/_runtime/
 .env
 .env.*
 !.env.example

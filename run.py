@@ -4,8 +4,10 @@ import argparse
 import json
 import os
 import shutil
+import sys
 
 BASE=Path(__file__).resolve().parent
+sys.path.insert(0, str(BASE))
 
 def initialize(root):
     root.mkdir(parents=True,exist_ok=True)
