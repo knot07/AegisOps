@@ -6,7 +6,7 @@
 
 ## 下载与启动
 
-1. 从 GitHub Releases 下载文件名含 `windows-x64-portable` 的 ZIP，不要选 GitHub 自动生成的 Source code ZIP。
+1. 从 GitHub Releases 下载 `AegisOps-2026.11.06-Windows-x64.zip`，不要选 Linux 或 Source 包。
 2. 完整解压到自己的本地目录，建议 `C:\AegisOps` 或 `D:\AegisOps`。不要直接在压缩包内运行，不建议放入需要管理员权限的 Program Files。
 3. 双击 `start.cmd`。如果提示缺少 Microsoft Visual C++ x64 运行库，先运行包内 `_runtime\vc_redist.x64.exe` 完成微软官方安装（此步骤可能需要管理员权限），再重新启动。等待控制台提示 `Service ready`，浏览器会自动打开 `http://127.0.0.1:5200`。
 4. 首次进入自行设置管理员账号和密码。没有预置账号，也没有预置模型密钥。

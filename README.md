@@ -100,11 +100,19 @@ flowchart LR
 
 ## 快速部署
 
+只需按用途选择一个包，手册和校验清单已包含在包内：
+
+| 用途 | 下载 | 开始使用 |
+| --- | --- | --- |
+| Linux 部署 | [Linux.zip](https://github.com/knot07/AegisOps/releases/download/v2026.11.06/AegisOps-2026.11.06-Linux.zip) | 解压后阅读 `README.md`，执行 `bash install.sh` |
+| Windows 使用 | [Windows-x64.zip](https://github.com/knot07/AegisOps/releases/download/v2026.11.06/AegisOps-2026.11.06-Windows-x64.zip) | 完整解压后双击 `start.cmd` |
+| 二次开发 | [Source.zip](https://github.com/knot07/AegisOps/releases/download/v2026.11.06/AegisOps-2026.11.06-Source.zip) | 完整源码，需要安装依赖并构建 |
+
 ### Windows 便携版
 
-Windows 10 / 11 x64 用户可在 [Releases](https://github.com/knot07/AegisOps/releases/tag/v2026.11.06) 下载 **windows-x64-portable.zip**，完整解压后双击 `start.cmd`。包内提供 Python、Node、Git for Windows、依赖和前端，启动基础服务无需额外安装 Docker、WSL 或开发环境。
+Windows 10 / 11 x64 用户选择上表的 **Windows-x64.zip**，完整解压后双击 `start.cmd`。包内提供 Python、Node、Git for Windows、依赖和前端，启动基础服务无需额外安装 Docker、WSL 或开发环境。
 
-如果电脑缺少 Microsoft Visual C++ x64 运行库，按提示运行包内的微软官方安装程序。首次打开系统后自行设置管理员，再配置自己的模型和设备连接。完整说明见 [Windows 部署手册](WINDOWS.md)，实际测试范围见发行附件中的验证记录。
+如果电脑缺少 Microsoft Visual C++ x64 运行库，按提示运行包内的微软官方安装程序。首次打开系统后自行设置管理员，再配置自己的模型和设备连接。完整说明见 [Windows 部署手册](WINDOWS.md)，实际测试范围见包内验证记录。
 
 ### 方式一：Docker Compose
 
@@ -137,7 +145,7 @@ bash install.sh
 
 到 [Releases](https://github.com/knot07/AegisOps/releases/latest) 下载干净部署包并解压，按随附手册部署。部署包包含已构建的主界面；从源码构建时会生成前端资源。
 
-以上方式首次安装均需要联网下载依赖或基础镜像，发行版不是离线镜像包。
+Linux 安装与源码构建需要联网下载依赖或基础镜像。Windows 便携包已提供运行时及依赖；外部模型和设备功能仍需要相应连接。
 
 ## 首次使用
 
