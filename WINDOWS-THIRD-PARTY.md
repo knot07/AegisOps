@@ -10,6 +10,7 @@ The portable distribution includes unmodified third-party runtimes and Python/np
 | npm | Included with Node runtime | `_runtime/node/node_modules/npm/LICENSE` and bundled dependency licenses |
 | Git for Windows | 2.56.0.windows.2 | GPLv2; `_runtime/git/LICENSE.txt`; corresponding upstream source: https://github.com/git-for-windows/git/tree/v2.56.0.windows.2 |
 | esbuild | 0.27.2, Windows x64 | MIT; `webui/node_modules/esbuild/LICENSE.md`; https://github.com/evanw/esbuild/tree/v0.27.2 |
+| Microsoft Visual C++ x64 Redistributable | Official signed installer | `_runtime/vc_redist.x64.exe`; https://aka.ms/vs/17/release/vc_redist.x64.exe ; Microsoft installer license terms apply |
 
 Pinned Python package versions are listed in `requirements.windows.lock`. The npm dependency tree is specified in `webui/package-lock.json`. Package-level license files and metadata accompany the installed dependencies.
 

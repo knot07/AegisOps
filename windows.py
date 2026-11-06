@@ -1,6 +1,7 @@
 """AegisOps native Windows foreground launcher. No global installation required."""
 from pathlib import Path
 import argparse
+import ctypes
 import json
 import os
 import shutil
@@ -29,6 +30,11 @@ def main():
     git = BASE / '_runtime/git/cmd/git.exe'
     if not git.is_file():
         raise RuntimeError('Bundled Git is missing. Extract the complete Windows portable ZIP first.')
+    try:
+        ctypes.WinDLL('msvcp140.dll')
+        ctypes.WinDLL('concrt140.dll')
+    except OSError:
+        raise RuntimeError('Microsoft Visual C++ x64 runtime is missing. Run _runtime\\vc_redist.x64.exe, complete the Microsoft installer, then run start.cmd again.')
     os.environ['PATH'] = os.pathsep.join([str(node.parent),str(python.parent),str(git.parent),os.environ.get('PATH','')])
     os.environ['PYTHONUTF8'] = '1'
     os.environ['PYTHONUNBUFFERED'] = '1'

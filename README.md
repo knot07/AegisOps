@@ -104,7 +104,7 @@ flowchart LR
 
 Windows 10 / 11 x64 用户可在 [Releases](https://github.com/knot07/AegisOps/releases/tag/v2026.11.06) 下载 **windows-x64-portable.zip**，完整解压后双击 `start.cmd`。包内提供 Python、Node、Git for Windows、依赖和前端，启动基础服务无需额外安装 Docker、WSL 或开发环境。
 
-首次打开自行设置管理员，再配置自己的模型和设备连接。完整说明见 [Windows 部署手册](WINDOWS.md)，实际测试范围见发行附件中的验证记录。
+如果电脑缺少 Microsoft Visual C++ x64 运行库，按提示运行包内的微软官方安装程序。首次打开系统后自行设置管理员，再配置自己的模型和设备连接。完整说明见 [Windows 部署手册](WINDOWS.md)，实际测试范围见发行附件中的验证记录。
 
 ### 方式一：Docker Compose
 

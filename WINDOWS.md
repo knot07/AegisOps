@@ -8,7 +8,7 @@
 
 1. 从 GitHub Releases 下载文件名含 `windows-x64-portable` 的 ZIP，不要选 GitHub 自动生成的 Source code ZIP。
 2. 完整解压到自己的本地目录，建议 `C:\AegisOps` 或 `D:\AegisOps`。不要直接在压缩包内运行，不建议放入需要管理员权限的 Program Files。
-3. 双击 `start.cmd`，等待控制台提示 `Service ready`。浏览器会自动打开 `http://127.0.0.1:5200`。
+3. 双击 `start.cmd`。如果提示缺少 Microsoft Visual C++ x64 运行库，先运行包内 `_runtime\vc_redist.x64.exe` 完成微软官方安装（此步骤可能需要管理员权限），再重新启动。等待控制台提示 `Service ready`，浏览器会自动打开 `http://127.0.0.1:5200`。
 4. 首次进入自行设置管理员账号和密码。没有预置账号，也没有预置模型密钥。
 5. 登录后到模型清单填写自己的接口地址、模型标识及 API Key，保存、测试并设置默认模型。使用设备研判功能时还需配置设备连接。
 
@@ -61,6 +61,7 @@
 | 问题 | 处理 |
 | --- | --- |
 | 双击即报缺少运行时 | 检查是否下载了 Windows portable 包并完整解压，确认 `_runtime\python\python.exe` 存在 |
+| 提示 Microsoft Visual C++ runtime is missing | 运行包内 `_runtime\vc_redist.x64.exe`，完成微软运行库安装后重试 |
 | 端口被占用 | 使用 `start.cmd --port 5201` |
 | 页面没有自动打开 | 手动打开控制台显示的地址；检查日志与 `start.cmd --check` 输出 |
 | 场景页面尚未显示 | 等待首轮编译完成后刷新，检查日志中构建错误 |
