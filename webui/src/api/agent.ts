@@ -1,0 +1,119 @@
+import client from './client';
+
+export interface Agent {
+  /** Server-computed ownership of the selected definition, never a writable setting. */
+  group_readonly?: boolean;
+  group?: string | null;
+  name: string;
+  /** Chinese display name; canonical `name` remains the stable identifier. */
+  nameCn?: string;
+  description?: string;
+  /** Chinese UI label; English \`description\` is used for delegation/tooling. */
+  descriptionCn?: string;
+  mode: string;
+  native?: boolean;
+  hidden?: boolean;
+  topP?: number;
+  temperature?: number;
+  color?: string;
+  permission: any[];
+  model?: {
+    modelID: string;
+    providerID: string;
+  };
+  prompt?: string;
+  /** The registering package seals the prompt: the API omits it and refuses edits and deletion. */
+  promptProtected?: boolean;
+  options: Record<string, any>;
+  delegatable?: boolean;
+  steps?: number;
+  skills: string[];
+  tools: string[];
+  tags?: string[];
+}
+
+export interface BackgroundTask {
+  id: string;
+  status: string;
+  description: string;
+  prompt: string;
+  agent: string;
+  parentSessionId?: string;
+  parentMessageId?: string;
+  sessionId?: string;
+  error?: string;
+  output?: string;
+  createdAt: number;
+  startedAt?: number;
+  completedAt?: number;
+}
+
+export const agentAPI = {
+  list: () =>
+    client.get<Agent[]>('/api/agent'),
+
+  refresh: () =>
+    client.post<{ count: number }>('/api/agent/refresh'),
+
+  get: (name: string) =>
+    client.get<Agent>(`/api/agent/${name}`),
+
+  create: (data: {
+    name: string;
+    nameCn?: string;
+    description?: string;
+    descriptionCn?: string;
+    prompt: string;
+    temperature?: number;
+    color?: string;
+    mode?: string;
+    model?: { modelID: string; providerID: string };
+    delegatable?: boolean;
+    skills?: string[];
+    tools?: string[];
+  }) =>
+    client.post<Agent>('/api/agent', data),
+
+  update: (name: string, data: {
+    group?: string | null;
+    nameCn?: string;
+    description?: string;
+    descriptionCn?: string;
+    prompt?: string;
+    temperature?: number;
+    color?: string;
+    model?: { modelID: string; providerID: string };
+    delegatable?: boolean;
+    skills?: string[];
+    tools?: string[];
+  }) =>
+    client.put<Agent>(`/api/agent/${name}`, data),
+
+  updateModel: (name: string, model: { modelID: string; providerID: string } | null, temperature?: number) =>
+    client.put<Agent>(`/api/agent/${name}/model`, { model, temperature }),
+
+  setDelegatable: (name: string, delegatable: boolean) =>
+    client.patch<Agent>(`/api/agent/${name}/delegatable`, { delegatable }),
+
+  delete: (name: string) =>
+    client.delete(`/api/agent/${name}`),
+
+  test: (name: string, testPrompt?: string) =>
+    client.post<{ sessionId: string; status: string }>(
+      `/api/agent/${name}/test`,
+      { test_prompt: testPrompt ?? 'Hello, this is a test message.' },
+    ),
+};
+
+// Background tasks are managed under a dedicated route to avoid
+// conflicting with /api/agent/{name} path parameters.
+export const backgroundTaskAPI = {
+  list: () =>
+    client.get<BackgroundTask[]>('/api/background-task'),
+
+  get: (taskId: string) =>
+    client.get<BackgroundTask>(`/api/background-task/${taskId}`),
+
+  cancel: (taskId: string) =>
+    client.post(`/api/background-task/${taskId}/cancel`),
+};

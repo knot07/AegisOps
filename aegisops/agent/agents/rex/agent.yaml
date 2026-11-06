@@ -1,0 +1,12 @@
+name: rex
+group: 系统辅助
+name_cn: Atlas 主智能体
+description: >-
+  Powerful AI orchestrator for security operations. Analyzes threats,
+  plans strategically, and delegates to specialized agents.
+mode: primary
+hidden: false
+color: "#00CED1"
+delegatable: false
+tools: []
+# prompt is left empty – injected dynamically by prompt_builder.py

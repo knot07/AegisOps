@@ -1,0 +1,376 @@
+"""
+Permission routes for AegisOps TUI compatibility
+
+Provides /permission endpoints for handling tool permission requests.
+
+AegisOps expects:
+- GET /permission - List pending permissions
+- POST /permission/{id}/reply - Reply to a permission request
+"""
+
+from typing import Dict, List, Any, Optional, Literal
+from datetime import datetime
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import BaseModel
+
+from aegisops.auth.context import AuthUser
+from aegisops.server.auth import require_admin, require_user
+from aegisops.session.policy import SessionPolicy
+from aegisops.session.session import Session
+from aegisops.utils.log import Log
+from aegisops.utils.id import Identifier
+from aegisops.permission.next import PermissionNext
+
+
+router = APIRouter()
+log = Log.create(service="permission-routes")
+
+
+class PermissionRule(BaseModel):
+    """Permission rule for tool access"""
+    permission: str  # "read", "write", "bash", etc.
+    patterns: List[str]  # Path patterns
+    always: List[str]  # Always allowed patterns
+
+
+class PermissionRequest(BaseModel):
+    """Permission request from a tool"""
+    id: str
+    sessionID: str
+    messageID: str
+    toolID: str
+    permission: str
+    patterns: List[str]
+    always: List[str]
+    metadata: Dict[str, Any]
+    time: Dict[str, int]  # {"created": timestamp}
+
+
+class PermissionReplyRequest(BaseModel):
+    """Request to reply to a permission"""
+    allow: bool
+    always: bool = False  # Remember this decision
+    response: Optional[
+        Literal[
+            "trust_tool_network",
+            "trust_network_target",
+        ]
+    ] = None
+
+
+_NETWORK_TRUST_RESPONSES = {
+    "trust_tool_network",
+    "trust_network_target",
+}
+
+
+def _network_confirm_options(metadata: Dict[str, Any]) -> set[str]:
+    """Return the explicit network trust responses the policy extension offers."""
+    raw_options = metadata.get("network_confirm_options")
+    if not isinstance(raw_options, list):
+        return set()
+    return {
+        str(option).strip().lower()
+        for option in raw_options
+        if str(option).strip().lower() in _NETWORK_TRUST_RESPONSES
+    }
+
+
+def _is_network_confirmation(metadata: Dict[str, Any]) -> bool:
+    return isinstance(metadata.get("network_confirm_options"), list)
+
+
+class PermissionRuleInfo(BaseModel):
+    """Durable permission rule exposed to the WebUI."""
+    id: str
+    permission: str
+    action: Literal["allow", "deny"]
+    pattern: str = "*"
+    createdAt: Optional[int] = None
+
+
+class PermissionRuleCreateRequest(BaseModel):
+    """Create a durable permission rule (permission-level, pattern must be '*')."""
+    permission: str
+    action: Literal["allow", "deny"]
+    pattern: str = "*"
+
+
+class PermissionInfo(BaseModel):
+    """Permission info for API response"""
+    id: str
+    sessionID: str
+    messageID: str
+    toolID: str
+    permission: str
+    patterns: List[str]
+    always: List[str]
+    metadata: Dict[str, Any]
+    time: Dict[str, int]
+
+
+def create_permission_request(
+    session_id: str,
+    message_id: str,
+    tool_id: str,
+    permission: str,
+    patterns: List[str],
+    always: List[str],
+    metadata: Dict[str, Any] = None,
+) -> PermissionInfo:
+    """Create a new permission request"""
+    perm_id = Identifier.ascending("permission")
+    now = int(datetime.now().timestamp() * 1000)
+    
+    perm_info = {
+        "id": perm_id,
+        "sessionID": session_id,
+        "messageID": message_id,
+        "toolID": tool_id,
+        "permission": permission,
+        "patterns": patterns,
+        "always": always,
+        "metadata": metadata or {},
+        "time": {"created": now},
+    }
+    
+    log.info("permission.created", {"id": perm_id, "permission": permission})
+    
+    return PermissionInfo(**perm_info)
+
+
+def get_permission(permission_id: str) -> Optional[dict]:
+    """Get a permission request by ID"""
+    pending = PermissionNext._pending.get(permission_id)  # Compatibility helper
+    if not pending or pending.get("info") is None:
+        return None
+    info = pending["info"]
+    return {
+        "id": info.id,
+        "sessionID": info.session_id,
+        "messageID": info.metadata.get("messageID", ""),
+        "toolID": (info.tool or {}).get("name", info.permission),
+        "permission": info.permission,
+        "patterns": info.patterns,
+        "always": info.always,
+        "metadata": info.metadata,
+        "time": info.time,
+    }
+
+
+async def remove_permission(permission_id: str) -> bool:
+    """Remove a permission request"""
+    if permission_id not in PermissionNext._pending:
+        return False
+    await PermissionNext.reply(permission_id, "deny")
+    return True
+
+
+async def _can_access_permission_session(
+    session_id: str,
+    user: AuthUser,
+    *,
+    write: bool,
+) -> bool:
+    session = await Session.get_by_id(session_id)
+    if session is None:
+        return False
+    return SessionPolicy.can_write(session, user) if write else SessionPolicy.can_read(session, user)
+
+
+async def _require_permission_session_access(
+    session_id: str,
+    user: AuthUser,
+    *,
+    write: bool,
+) -> None:
+    if not await _can_access_permission_session(session_id, user, write=write):
+        detail = "Only the session owner can reply to permissions" if write else "Permission not found"
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=detail)
+
+
+@router.get(
+    "",
+    response_model=List[PermissionInfo],
+    summary="List permissions",
+    description="Get all pending permission requests"
+)
+async def list_permissions(
+    user: AuthUser = Depends(require_user),
+) -> List[PermissionInfo]:
+    """
+    List all pending permission requests.
+    
+    AegisOps TUI uses this to display permission prompts.
+    """
+    pending_infos = await PermissionNext.list_pending_infos()
+    result: List[PermissionInfo] = []
+    for info in pending_infos:
+        if not await _can_access_permission_session(info.session_id, user, write=False):
+            continue
+        result.append(PermissionInfo(
+            id=info.id,
+            sessionID=info.session_id,
+            messageID=info.metadata.get("messageID", ""),
+            toolID=(info.tool or {}).get("name", info.permission),
+            permission=info.permission,
+            patterns=info.patterns,
+            always=info.always,
+            metadata=info.metadata,
+            time=info.time,
+        ))
+    return result
+
+
+# Durable rules. Fixed paths, so they are registered before /{permission_id}.
+@router.get(
+    "/rules",
+    response_model=List[PermissionRuleInfo],
+    summary="List permission rules",
+    description="Durable allow/deny rules (the store an 'always' reply writes to)",
+)
+async def list_permission_rules(
+    user: AuthUser = Depends(require_user),
+) -> List[PermissionRuleInfo]:
+    rules = await PermissionNext.list_permanent_rules()
+    return [
+        PermissionRuleInfo(id=permission, permission=permission, action=action)
+        for permission, action in sorted(rules.items())
+        if action in ("allow", "deny")
+    ]
+
+
+@router.post(
+    "/rules",
+    response_model=PermissionRuleInfo,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create permission rule",
+)
+async def create_permission_rule(
+    request: PermissionRuleCreateRequest,
+    _admin: AuthUser = Depends(require_admin),
+) -> PermissionRuleInfo:
+    permission = request.permission.strip()
+    if not permission:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="permission is required")
+    if request.pattern.strip() != "*":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Durable rules apply to the whole permission; pattern must be '*'",
+        )
+    await PermissionNext.set_permanent_rule(permission, request.action)
+    log.info("permission.rule.created", {"permission": permission, "action": request.action})
+    return PermissionRuleInfo(id=permission, permission=permission, action=request.action)
+
+
+@router.delete(
+    "/rules/{permission}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete permission rule",
+)
+async def delete_permission_rule(
+    permission: str,
+    _admin: AuthUser = Depends(require_admin),
+) -> None:
+    if not await PermissionNext.delete_permanent_rule(permission):
+        raise HTTPException(status_code=404, detail="Permission rule not found")
+    log.info("permission.rule.deleted", {"permission": permission})
+
+
+@router.get(
+    "/{permission_id}",
+    response_model=PermissionInfo,
+    summary="Get permission",
+    description="Get a specific permission request"
+)
+async def get_permission_by_id(
+    permission_id: str,
+    user: AuthUser = Depends(require_user),
+) -> PermissionInfo:
+    """Get a specific permission request"""
+    info = await PermissionNext.get_pending_info(permission_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Permission not found")
+    await _require_permission_session_access(info.session_id, user, write=False)
+    return PermissionInfo(
+        id=info.id,
+        sessionID=info.session_id,
+        messageID=info.metadata.get("messageID", ""),
+        toolID=(info.tool or {}).get("name", info.permission),
+        permission=info.permission,
+        patterns=info.patterns,
+        always=info.always,
+        metadata=info.metadata,
+        time=info.time,
+    )
+
+
+@router.post(
+    "/{permission_id}/reply",
+    summary="Reply to permission",
+    description="Reply to a permission request (allow or deny)"
+)
+async def reply_permission(
+    permission_id: str,
+    request: PermissionReplyRequest,
+    user: AuthUser = Depends(require_user),
+) -> Dict[str, bool]:
+    """
+    Reply to a permission request.
+    
+    Args:
+        permission_id: The permission request ID
+        request: The reply (allow/deny)
+    
+    Returns:
+        {"success": true}
+    """
+    info = await PermissionNext.get_pending_info(permission_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Permission not found")
+    await _require_permission_session_access(info.session_id, user, write=True)
+    
+    log.info("permission.reply", {
+        "id": permission_id,
+        "allow": request.allow,
+        "always": request.always,
+    })
+    
+    network_options = _network_confirm_options(info.metadata)
+    if request.response:
+        if not request.allow or request.response not in network_options:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Network trust response is not allowed for this permission request",
+            )
+        # Keep the extension-defined reply verb intact.  The extension applies
+        # subject-scoped trust rules; AegisOps must not reinterpret a network
+        # grant as `always`.
+        reply = request.response
+    elif _is_network_confirmation(info.metadata) and request.always:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Network confirmations require an explicit trust response",
+        )
+    elif request.always:
+        if SessionPolicy.is_admin(user):
+            reply = "always" if request.allow else "never"
+        else:
+            reply = "allow_session" if request.allow else "deny_session"
+    else:
+        reply = "allow" if request.allow else "deny"
+    await PermissionNext.reply(permission_id, reply, session_id=info.session_id)
+    
+    return {"success": True}
+
+
+# Export helper functions for use in other modules
+__all__ = [
+    "router",
+    "create_permission_request",
+    "get_permission",
+    "remove_permission",
+    "PermissionInfo",
+    "PermissionReplyRequest",
+]

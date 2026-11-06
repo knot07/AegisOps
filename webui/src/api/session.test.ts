@@ -1,0 +1,177 @@
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+
+const mockGet = vi.fn();
+const mockPost = vi.fn();
+const mockPatch = vi.fn();
+const mockDelete = vi.fn();
+
+vi.mock('./client', () => ({
+  default: {
+    get: (...args: unknown[]) => mockGet(...args),
+    post: (...args: unknown[]) => mockPost(...args),
+    patch: (...args: unknown[]) => mockPatch(...args),
+    delete: (...args: unknown[]) => mockDelete(...args),
+    defaults: { baseURL: '' },
+  },
+}));
+
+describe('sessionApi message actions', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockGet.mockResolvedValue({ data: { sessionID: 'session-1', items: [] } });
+    mockPatch.mockResolvedValue({ data: { ok: true } });
+    mockPost.mockResolvedValue({ data: { ok: true } });
+    mockDelete.mockResolvedValue({ data: { ok: true } });
+  });
+
+  it('updates a message part through the patch endpoint', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.updateMessagePart('session-1', 'msg-1', 'part-1', {
+      id: 'part-1',
+      messageID: 'msg-1',
+      sessionID: 'session-1',
+      type: 'text',
+      text: 'edited text',
+    });
+
+    expect(mockPatch).toHaveBeenCalledWith(
+      '/api/session/session-1/message/msg-1/part/part-1',
+      expect.objectContaining({
+        id: 'part-1',
+        messageID: 'msg-1',
+        sessionID: 'session-1',
+        type: 'text',
+        text: 'edited text',
+      }),
+    );
+  });
+
+  it('calls the resend endpoint with timeout disabled', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.resendMessage('session-1', 'msg-1', 'part-9', 'updated prompt');
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/session-1/message/msg-1/resend',
+      { text: 'updated prompt', partID: 'part-9' },
+      { timeout: 0 },
+    );
+  });
+
+  it('calls the regenerate endpoint with timeout disabled', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.regenerateMessage('session-1', 'msg-2');
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/session-1/message/msg-2/regenerate',
+      {},
+      { timeout: 0 },
+    );
+  });
+
+  it('calls prompt queue endpoints', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.listPromptQueue('session-1');
+    await sessionApi.enqueuePrompt('session-1', {
+      parts: [{ type: 'text', text: 'queued prompt' }],
+      agent: 'rex',
+    });
+    await sessionApi.updateQueuedPrompt('session-1', 'queue-1', 'edited prompt');
+    await sessionApi.removeQueuedPrompt('session-1', 'queue-1');
+    await sessionApi.runQueuedPromptNow('session-1', 'queue-2');
+
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/prompt_queue');
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/session-1/prompt_queue',
+      { parts: [{ type: 'text', text: 'queued prompt' }], agent: 'rex' },
+    );
+    expect(mockPatch).toHaveBeenCalledWith(
+      '/api/session/session-1/prompt_queue/queue-1',
+      { text: 'edited prompt' },
+    );
+    expect(mockDelete).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-1');
+    expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-2/run_now');
+  });
+
+  it('uses Session-scoped Context endpoints without accepting host paths', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.getContext('session-1');
+    await sessionApi.readContextFile('session-1', 'resource-1');
+    await sessionApi.addContextFolder('session-1', '/srv/research', 'Research');
+    await sessionApi.listContextRoot('session-1', 'root-1', { path: 'papers' });
+
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context', { params: { limit: 100 }, signal: undefined });
+    expect(mockGet).toHaveBeenCalledWith('/api/session/session-1/context/files/resource-1/content', { signal: undefined });
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/session-1/context/folders',
+      { path: '/srv/research', displayName: 'Research' },
+    );
+    expect(mockGet).toHaveBeenCalledWith(
+      '/api/session/session-1/context/roots/root-1/list',
+      { params: { path: 'papers', offset: 0, limit: 100 }, signal: undefined },
+    );
+    expect(sessionApi.contextFileDownloadUrl('session-1', 'resource-1')).toBe(
+      '/api/session/session-1/context/files/resource-1/download',
+    );
+  });
+
+  it('forwards context cursors, bounded page sizes, and cancellation', async () => {
+    const { sessionApi } = await import('./session');
+    const controller = new AbortController();
+    const page = { sessionID: 'session-1', hasMore: true, nextBefore: 'msg-older' };
+    mockGet.mockResolvedValue({ data: page });
+
+    expect(await sessionApi.getContext('session-1', { before: 'msg-100', limit: 500 }, controller.signal)).toBe(page);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context', {
+      params: { before: 'msg-100', limit: 200 }, signal: controller.signal,
+    });
+    await sessionApi.getContext('session-1', { limit: 12 });
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context', {
+      params: { limit: 12 }, signal: undefined,
+    });
+  });
+
+  it('returns metadata and forwards preview read cancellation', async () => {
+    const { sessionApi } = await import('./session');
+    const signal = new AbortController().signal;
+    const metadata = { resourceID: 'resource-1', fileKey: 'stable-file' };
+    mockGet.mockResolvedValue({ data: metadata });
+    expect(await sessionApi.getContextFile('session-1', 'resource-1', signal)).toBe(metadata);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/files/resource-1/metadata', { signal });
+    await sessionApi.readContextFile('session-1', 'resource-1', signal);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/files/resource-1/content', { signal });
+    await sessionApi.readContextRootFile('session-1', 'root-1', 'papers/a.md', signal);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/roots/root-1/content', {
+      params: { path: 'papers/a.md' }, signal,
+    });
+  });
+
+  it('preserves empty raw-entry directory pages and their offsets', async () => {
+    const { sessionApi } = await import('./session');
+    const signal = new AbortController().signal;
+    const page = { items: [], hasMore: true, nextOffset: 400 };
+    mockGet.mockResolvedValue({ data: page });
+    expect(await sessionApi.listContextRoot('session-1', 'root-1', { path: 'papers', offset: 200, limit: 500 }, signal)).toBe(page);
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/roots/root-1/list', {
+      params: { path: 'papers', offset: 200, limit: 200 }, signal,
+    });
+    await sessionApi.listContextRoot('session-1', 'root-1');
+    expect(mockGet).toHaveBeenLastCalledWith('/api/session/session-1/context/roots/root-1/list', {
+      params: { path: '', offset: 0, limit: 100 }, signal: undefined,
+    });
+  });
+
+  it('calls archive and restore endpoints', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.archive('session-1');
+    await sessionApi.restore('session-1');
+
+    expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/archive');
+    expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/restore');
+  });
+});

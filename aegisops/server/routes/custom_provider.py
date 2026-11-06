@@ -1,0 +1,836 @@
+"""
+Custom provider & model management — aegisops.json backed.
+
+Custom provider = OpenAI-compatible endpoint stored in aegisops.json with npm="@ai-sdk/openai-compatible".
+Custom model    = model entry in aegisops.json under its provider's "models" dict.
+
+All custom providers use the "custom-" ID prefix to distinguish from built-in providers.
+Model unique name format: "{provider_id}/{model_id}"
+"""
+
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any, List, Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field, StrictBool
+
+from aegisops.config.config import Config
+from aegisops.config.config_writer import ConfigWriter
+from aegisops.provider.base_url import BaseURLValidationError, validate_provider_base_url
+from aegisops.provider.credential import get_api_key
+from aegisops.provider.provider import (
+    BaseProvider,
+    ModelCapabilities,
+    ModelInfo,
+    Provider,
+    ProviderConfig,
+)
+from aegisops.provider.sdk.openai_compatible import OpenAICompatibleProvider
+from aegisops.server.auth import require_admin
+from aegisops.server.config_mutation import serialized_config_mutation
+from aegisops.server.routes.provider import _get_inline_provider_api_key
+from aegisops.utils.log import Log
+
+
+class CustomProvider(OpenAICompatibleProvider):
+    """A user-created custom provider backed by aegisops.json.
+
+    Properly subclasses OpenAICompatibleProvider instead of monkey-patching
+    the get_models method at runtime.
+    """
+
+    def __init__(self, provider_id: str, name: str):
+        super().__init__()
+        self.id = provider_id
+        self.name = name
+        self._custom_models: List[ModelInfo] = []
+
+    def get_models(self) -> List[ModelInfo]:
+        return list(self._custom_models)
+
+router = APIRouter()
+log = Log.create(service="routes.custom")
+
+FALLBACK_CONTEXT_WINDOW = 128000
+FALLBACK_MAX_OUTPUT_TOKENS = 8192
+MODELS_DEV_URL = "https://models.dev/api.json"
+MODELS_DEV_TIMEOUT_SEC = 5.0
+MODELS_DEV_CACHE_TTL_SEC = 3600.0
+
+_models_dev_cache: Optional[dict[str, Any]] = None
+_models_dev_cache_time = 0.0
+
+_MODELS_DEV_PROVIDER_ALIASES = {
+    "alibaba": "alibaba",
+    "anthropic": "anthropic",
+    "bailian": "alibaba",
+    "cerebras": "cerebras",
+    "cohere": "cohere",
+    "dashscope": "alibaba",
+    "deepinfra": "deepinfra",
+    "deepseek": "deepseek",
+    "gemini": "google",
+    "google": "google",
+    "groq": "groq",
+    "huggingface": "huggingface",
+    "kilocode": "kilo",
+    "kimi-coding": "kimi-for-coding",
+    "kimi-coding-cn": "kimi-for-coding",
+    "mistral": "mistral",
+    "minimax": "minimax",
+    "minimax-cn": "minimax-cn",
+    "nvidia": "nvidia",
+    "ollama-cloud": "ollama-cloud",
+    "opencode-go": "opencode-go",
+    "opencode-zen": "opencode",
+    "openai": "openai",
+    "openai-codex": "openai",
+    "openrouter": "openrouter",
+    "perplexity": "perplexity",
+    "qwen": "alibaba",
+    "qwen-oauth": "alibaba",
+    "siliconflow": "siliconflow",
+    "stepfun": "stepfun",
+    "together": "togetherai",
+    "togetherai": "togetherai",
+    "xai": "xai",
+    "xiaomi": "xiaomi",
+    "zai": "zai",
+}
+
+
+@dataclass
+class ResolvedModelLimits:
+    context_window: int
+    max_output_tokens: int
+    source: str
+
+
+# ==================== Request / Response ====================
+
+
+class CreateProviderReq(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    base_url: str = Field(..., min_length=1)
+    api_key: Optional[str] = Field(None)
+    description: Optional[str] = Field(None)
+    skip_catalog_bootstrap: bool = False
+
+
+class ProviderResp(BaseModel):
+    id: str
+    name: str
+    base_url: str
+    description: Optional[str] = None
+    created_at: str
+
+
+class CreateModelReq(BaseModel):
+    model_id: str = Field(..., min_length=1)
+    name: str = Field(..., min_length=1)
+    context_window: Optional[int] = Field(None, ge=1024)
+    max_output_tokens: Optional[int] = Field(None, ge=1)
+    supports_vision: StrictBool = False
+    supports_tools: StrictBool = True
+    supports_streaming: StrictBool = True
+    supports_reasoning: StrictBool = True
+    input_price: float = Field(0.0, ge=0)
+    output_price: float = Field(0.0, ge=0)
+    cache_read_price: Optional[float] = Field(None, ge=0)
+    currency: str = "USD"
+
+
+class ModelResp(BaseModel):
+    id: str
+    provider_id: str
+    model_id: str
+    unique_name: str  # "provider_id/model_id"
+    name: str
+    context_window: int
+    max_output_tokens: int
+    input_price: float
+    output_price: float
+    cache_read_price: Optional[float] = None
+    currency: str
+    created_at: str
+
+
+# ==================== Provider CRUD ====================
+
+
+@router.get("/providers", response_model=List[ProviderResp])
+async def list_providers():
+    """List all custom providers from aegisops.json."""
+    results: List[ProviderResp] = []
+    for pid in ConfigWriter.list_provider_ids():
+        if not pid.startswith("custom-"):
+            continue
+        raw = ConfigWriter.get_provider_raw(pid)
+        if raw is None:
+            continue
+        options = raw.get("options", {})
+        results.append(ProviderResp(
+            id=pid,
+            name=raw.get("name", pid),
+            base_url=options.get("baseURL", ""),
+            description=raw.get("description"),
+            created_at=raw.get("created_at", ""),
+        ))
+    return results
+
+
+def _validate_custom_provider_id(pid: str) -> None:
+    """Reject ids that cannot be routed or that look like path traversal."""
+    if (
+        "/" in pid
+        or "\\" in pid
+        or ".." in pid
+        or any(ch.isspace() or ord(ch) < 32 for ch in pid)
+    ):
+        raise HTTPException(422, "Provider name must not contain '/', '\\', '..' or whitespace")
+
+
+@router.post("/providers", response_model=ProviderResp, status_code=201)
+@serialized_config_mutation
+async def create_provider(body: CreateProviderReq, _admin: object = Depends(require_admin)):
+    """Create a custom OpenAI-compatible provider in aegisops.json."""
+    pid = "custom-" + body.name.lower().replace(" ", "-").replace("_", "-")
+    _validate_custom_provider_id(pid)
+    try:
+        base_url = validate_provider_base_url(body.base_url)
+    except BaseURLValidationError as exc:
+        raise HTTPException(422, str(exc)) from exc
+
+    # Check if already exists
+    if ConfigWriter.get_provider_raw(pid) is not None:
+        raise HTTPException(409, f"Provider '{pid}' already exists")
+
+    now = datetime.now(UTC).isoformat()
+
+    # Build provider config for aegisops.json
+    config_dict = ConfigWriter.build_provider_config(
+        pid,
+        npm="@ai-sdk/openai-compatible",
+        base_url=base_url,
+    )
+    config_dict["name"] = body.name
+    if body.description:
+        config_dict["description"] = body.description
+    config_dict["created_at"] = now
+
+    # Write to aegisops.json
+    if body.skip_catalog_bootstrap:
+        config_dict["model_sync"] = "manual"
+    ConfigWriter.add_provider(pid, config_dict)
+
+    # Save API key to .secret.json using the LLM provider convention (_llm_key)
+    # so it matches the {secret:<pid>_llm_key} reference written by build_provider_config.
+    try:
+        from aegisops.security import get_secret_manager
+        secrets = get_secret_manager()
+        secrets.set(f"{pid}_llm_key", body.api_key or "not-needed")
+    except Exception as e:
+        log.warning("custom_provider.secret_save_failed", {"id": pid, "error": str(e)})
+
+    # Register in runtime
+    _register_provider(pid, body.name, base_url, body.api_key)
+
+    log.info("custom_provider.created", {"id": pid})
+    return ProviderResp(
+        id=pid, name=body.name, base_url=base_url,
+        description=body.description, created_at=now,
+    )
+
+
+@router.delete("/providers/{provider_id}", status_code=204)
+@serialized_config_mutation
+async def delete_provider(provider_id: str, _admin: object = Depends(require_admin)):
+    """Delete a custom provider from aegisops.json."""
+    if not provider_id.startswith("custom-"):
+        # Built-in providers are removed via DELETE /api/provider/{id}/credentials.
+        raise HTTPException(400, "Only custom-* providers can be deleted here")
+    raw = ConfigWriter.get_provider_raw(provider_id)
+    if raw is None:
+        raise HTTPException(404, "Not found")
+
+    ConfigWriter.clear_default_models_for_provider(provider_id)
+
+    # Remove from aegisops.json
+    ConfigWriter.remove_provider(provider_id)
+
+    # Remove API key from .secret.json (both naming conventions for compatibility)
+    try:
+        from aegisops.security import get_secret_manager
+        secrets = get_secret_manager()
+        secrets.delete(f"{provider_id}_llm_key")
+        secrets.delete(f"{provider_id}_api_key")  # legacy / backward compat
+        secrets.delete(f"{provider_id}_base_url")  # legacy
+    except Exception:
+        pass
+
+    # Remove from runtime
+    Provider._providers.pop(provider_id, None)
+
+    log.info("custom_provider.deleted", {"id": provider_id})
+
+
+# ==================== Model CRUD ====================
+
+
+@router.get("/models/{provider_id}", response_model=List[ModelResp])
+async def list_models(provider_id: str):
+    """List models for a custom provider from aegisops.json."""
+    raw = ConfigWriter.get_provider_raw(provider_id)
+    if raw is None:
+        raise HTTPException(404, f"Provider '{provider_id}' not found")
+
+    models = raw.get("models", {})
+    now_str = raw.get("created_at", "")
+    results: List[ModelResp] = []
+    for model_id, mcfg in models.items():
+        results.append(ModelResp(
+            id=model_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            unique_name=f"{provider_id}/{model_id}",
+            name=mcfg.get("name", model_id),
+            context_window=mcfg.get("context_window", FALLBACK_CONTEXT_WINDOW),
+            max_output_tokens=mcfg.get("max_output_tokens", FALLBACK_MAX_OUTPUT_TOKENS),
+            input_price=mcfg.get("input_price", 0.0),
+            output_price=mcfg.get("output_price", 0.0),
+            cache_read_price=mcfg.get("cache_read_price"),
+            currency=mcfg.get("currency", "USD"),
+            created_at=mcfg.get("created_at", now_str),
+        ))
+    return results
+
+
+@router.post("/models/{provider_id}", response_model=ModelResp, status_code=201)
+@serialized_config_mutation
+async def create_model(provider_id: str, body: CreateModelReq, _admin: object = Depends(require_admin)):
+    """Add a model to a provider in aegisops.json."""
+    raw = ConfigWriter.get_provider_raw(provider_id)
+    if raw is None:
+        raise HTTPException(404, f"Provider '{provider_id}' not found")
+
+    models = raw.get("models", {})
+    existing_model = models.get(body.model_id)
+    limits = await _resolve_model_limits(provider_id, body, raw)
+    price_fields = ("input_price", "output_price", "cache_read_price", "currency")
+    if existing_model is not None:
+        # Omission preserves both explicit overrides and the absence of an
+        # override, so editing a name does not replace catalog tiers with zero.
+        pricing_config = {key: existing_model[key] for key in price_fields if key in existing_model}
+        pricing_config.update({
+            key: getattr(body, key) for key in price_fields if key in body.model_fields_set
+        })
+    else:
+        # New custom models retain the existing zero-price defaults.
+        pricing_config = {key: getattr(body, key) for key in price_fields}
+
+    now = datetime.now(UTC).isoformat()
+    model_config = {
+        # Editing the common form fields must retain provider-specific metadata
+        # which this form cannot represent (reasoning replay, input limits, etc.).
+        **(existing_model or {}),
+        "name": body.name,
+        "context_window": limits.context_window,
+        "max_output_tokens": limits.max_output_tokens,
+        "supports_vision": body.supports_vision,
+        "supports_tools": body.supports_tools,
+        "supports_streaming": body.supports_streaming,
+        "supports_reasoning": body.supports_reasoning,
+        **pricing_config,
+        "created_at": existing_model.get("created_at", now) if existing_model else now,
+    }
+
+    # Write to aegisops.json (upsert — create or update)
+    ConfigWriter.add_model(provider_id, body.model_id, model_config)
+
+    # Add/update runtime
+    _add_model_to_runtime(
+        provider_id,
+        body,
+        context_window=limits.context_window,
+        max_output_tokens=limits.max_output_tokens,
+        model_config=model_config,
+    )
+
+    # Capture first-model eligibility from the config before the upsert.
+    if not models:
+        await _maybe_promote_first_model_to_default(provider_id, body.model_id)
+
+    action = "updated" if existing_model else "created"
+    log.info(f"custom_model.{action}", {
+        "unique": f"{provider_id}/{body.model_id}",
+        "limits_source": limits.source,
+        "context_window": limits.context_window,
+        "max_output_tokens": limits.max_output_tokens,
+    })
+    return ModelResp(
+        id=body.model_id, provider_id=provider_id, model_id=body.model_id,
+        unique_name=f"{provider_id}/{body.model_id}", name=body.name,
+        context_window=limits.context_window,
+        max_output_tokens=limits.max_output_tokens,
+        input_price=pricing_config.get("input_price") or 0.0,
+        output_price=pricing_config.get("output_price") or 0.0,
+        cache_read_price=pricing_config.get("cache_read_price"),
+        currency=pricing_config.get("currency") or "USD", created_at=now,
+    )
+
+
+@router.delete("/models/{provider_id}/{model_id:path}", status_code=204)
+@serialized_config_mutation
+async def delete_model(provider_id: str, model_id: str, _admin: object = Depends(require_admin)):
+    """Remove a model from a provider in aegisops.json."""
+    from aegisops.server.routes.model import _delete_model_inventory
+
+    removed = await _delete_model_inventory(provider_id, model_id)
+    if not removed:
+        raw = ConfigWriter.get_provider_raw(provider_id)
+        if raw is None:
+            raise HTTPException(404, f"Provider '{provider_id}' not found")
+        raise HTTPException(404, f"Model '{model_id}' not found for provider '{provider_id}'")
+
+    log.info("custom_model.deleted", {"unique": f"{provider_id}/{model_id}"})
+
+
+# ==================== Runtime helpers ====================
+
+
+async def _maybe_promote_first_model_to_default(provider_id: str, model_id: str) -> None:
+    """Complete first-model setup without replacing a user's existing default.
+
+    Called under the create route's configuration mutation lock. Credential
+    checks match onboarding status, including the no-auth placeholder.
+    """
+    try:
+        # Resolve both structured defaults and the legacy `model` setting.
+        if await Config.resolve_default_llm():
+            return
+        if not (get_api_key(provider_id) or _get_inline_provider_api_key(provider_id)):
+            return
+        ConfigWriter.set_default_model("llm", provider_id, model_id)
+        log.info("custom_model.auto_default", {"unique": f"{provider_id}/{model_id}"})
+    except Exception as exc:
+        # The model is already saved; optional default setup must not reject it.
+        log.warning("custom_model.auto_default_failed", {
+            "unique": f"{provider_id}/{model_id}",
+            "error": str(exc),
+        })
+
+
+def _coerce_positive_int(value: Any) -> Optional[int]:
+    """Return value as a positive int, or None when it is not usable."""
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def _extract_limits_from_model(model: Any) -> tuple[Optional[int], Optional[int]]:
+    """Extract context/max-output limits from model metadata objects or dicts."""
+    if model is None:
+        return None, None
+
+    if isinstance(model, dict):
+        context = _coerce_positive_int(model.get("context_window"))
+        max_output = _coerce_positive_int(model.get("max_output_tokens"))
+        limits = model.get("limits")
+        if isinstance(limits, dict):
+            context = context or _coerce_positive_int(limits.get("context_window"))
+            max_output = max_output or _coerce_positive_int(
+                limits.get("max_output_tokens")
+            )
+        return context, max_output
+
+    limits = getattr(model, "limits", None)
+    context = _coerce_positive_int(getattr(limits, "context_window", None))
+    max_output = _coerce_positive_int(getattr(limits, "max_output_tokens", None))
+
+    capabilities = getattr(model, "capabilities", None)
+    context = context or _coerce_positive_int(
+        getattr(capabilities, "context_window", None)
+    )
+    max_output = max_output or _coerce_positive_int(
+        getattr(capabilities, "max_tokens", None)
+    )
+    return context, max_output
+
+
+def _merge_missing_limits(
+    context_window: Optional[int],
+    max_output_tokens: Optional[int],
+    candidate_context: Optional[int],
+    candidate_max_output: Optional[int],
+) -> tuple[Optional[int], Optional[int]]:
+    """Fill missing limit values from a candidate source."""
+    if context_window is None and candidate_context is not None:
+        context_window = candidate_context
+    if max_output_tokens is None and candidate_max_output is not None:
+        max_output_tokens = candidate_max_output
+    return context_window, max_output_tokens
+
+
+def _resolve_catalog_limits(
+    provider_id: str,
+    model_id: str,
+    raw_provider: dict[str, Any],
+) -> tuple[Optional[int], Optional[int]]:
+    """Resolve limits from existing provider config, catalog, or runtime models."""
+    raw_models = raw_provider.get("models", {})
+    if isinstance(raw_models, dict):
+        context, max_output = _extract_limits_from_model(raw_models.get(model_id))
+        if context is not None or max_output is not None:
+            return context, max_output
+
+    try:
+        from aegisops.provider.model_catalog import get_provider_model_definitions
+
+        for model_def in get_provider_model_definitions(provider_id):
+            if model_def.id == model_id:
+                return _extract_limits_from_model(model_def)
+    except Exception as exc:
+        log.debug("custom_model.catalog_limits_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+
+    try:
+        model = Provider.resolve_model(provider_id, model_id)
+        return _extract_limits_from_model(model)
+    except Exception as exc:
+        log.debug("custom_model.runtime_limits_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+    return None, None
+
+
+def _models_dev_provider_id(provider_id: str, model_id: str = "") -> Optional[str]:
+    """Map a AegisOps provider id to the models.dev provider id when known."""
+    normalized = provider_id.lower().removeprefix("custom-")
+    if normalized in _MODELS_DEV_PROVIDER_ALIASES:
+        return _MODELS_DEV_PROVIDER_ALIASES[normalized]
+    if ":" in model_id:
+        prefix = model_id.split(":", 1)[0].lower()
+        return _MODELS_DEV_PROVIDER_ALIASES.get(prefix)
+    return None
+
+
+async def _fetch_models_dev() -> Optional[dict[str, Any]]:
+    """Fetch models.dev metadata with a short timeout and in-memory cache."""
+    global _models_dev_cache, _models_dev_cache_time
+    now = time.monotonic()
+    if (
+        _models_dev_cache is not None
+        and now - _models_dev_cache_time < MODELS_DEV_CACHE_TTL_SEC
+    ):
+        return _models_dev_cache
+
+    try:
+        import httpx
+        import asyncio
+
+        async def _get() -> Any:
+            async with httpx.AsyncClient(timeout=MODELS_DEV_TIMEOUT_SEC) as client:
+                response = await client.get(MODELS_DEV_URL)
+                response.raise_for_status()
+                return response.json()
+
+        # httpx's timeout is per phase (connect/read/...); bound the whole
+        # request so model creation never waits longer than the advertised
+        # MODELS_DEV_TIMEOUT_SEC.
+        data = await asyncio.wait_for(_get(), timeout=MODELS_DEV_TIMEOUT_SEC)
+    except Exception as exc:
+        log.warning("custom_model.models_dev_fetch_failed", {"error": str(exc)})
+        return _models_dev_cache
+
+    if not isinstance(data, dict):
+        log.warning("custom_model.models_dev_invalid_payload", {})
+        return _models_dev_cache
+
+    _models_dev_cache = data
+    _models_dev_cache_time = now
+    return data
+
+
+async def _resolve_models_dev_limits(
+    provider_id: str,
+    model_id: str,
+) -> tuple[Optional[int], Optional[int]]:
+    """Resolve model limits from models.dev, returning empty values on failure."""
+    models_dev_provider = _models_dev_provider_id(provider_id, model_id)
+    if not models_dev_provider:
+        return None, None
+
+    data = await _fetch_models_dev()
+    if not data:
+        return None, None
+
+    provider_data = data.get(models_dev_provider)
+    if not isinstance(provider_data, dict):
+        return None, None
+    models = provider_data.get("models")
+    if not isinstance(models, dict):
+        return None, None
+
+    model_candidates = [model_id]
+    if ":" in model_id:
+        model_candidates.append(model_id.split(":", 1)[1])
+
+    entry = None
+    for model_candidate in model_candidates:
+        entry = models.get(model_candidate)
+        if isinstance(entry, dict):
+            break
+        model_lower = model_candidate.lower()
+        for candidate_id, candidate in models.items():
+            if candidate_id.lower() == model_lower and isinstance(candidate, dict):
+                entry = candidate
+                break
+        if isinstance(entry, dict):
+            break
+    if not isinstance(entry, dict):
+        return None, None
+
+    limits = entry.get("limit")
+    if not isinstance(limits, dict):
+        return None, None
+    return (
+        _coerce_positive_int(limits.get("context")),
+        _coerce_positive_int(limits.get("output")),
+    )
+
+
+async def _resolve_model_limits(
+    provider_id: str,
+    body: CreateModelReq,
+    raw_provider: dict[str, Any],
+) -> ResolvedModelLimits:
+    """Resolve model limits using explicit values, local metadata, models.dev, fallback."""
+    context_window = body.context_window
+    max_output_tokens = body.max_output_tokens
+    if context_window is not None and max_output_tokens is not None:
+        return ResolvedModelLimits(context_window, max_output_tokens, "explicit")
+
+    source = "explicit"
+    catalog_context, catalog_max_output = _resolve_catalog_limits(
+        provider_id,
+        body.model_id,
+        raw_provider,
+    )
+    before = (context_window, max_output_tokens)
+    context_window, max_output_tokens = _merge_missing_limits(
+        context_window,
+        max_output_tokens,
+        catalog_context,
+        catalog_max_output,
+    )
+    if before != (context_window, max_output_tokens):
+        source = "catalog"
+
+    if context_window is None or max_output_tokens is None:
+        models_dev_context, models_dev_max_output = await _resolve_models_dev_limits(
+            provider_id,
+            body.model_id,
+        )
+        before = (context_window, max_output_tokens)
+        context_window, max_output_tokens = _merge_missing_limits(
+            context_window,
+            max_output_tokens,
+            models_dev_context,
+            models_dev_max_output,
+        )
+        if before != (context_window, max_output_tokens):
+            source = "models_dev"
+
+    before = (context_window, max_output_tokens)
+    context_window, max_output_tokens = _merge_missing_limits(
+        context_window,
+        max_output_tokens,
+        FALLBACK_CONTEXT_WINDOW,
+        FALLBACK_MAX_OUTPUT_TOKENS,
+    )
+    if before != (context_window, max_output_tokens):
+        source = "fallback"
+
+    return ResolvedModelLimits(
+        context_window=context_window or FALLBACK_CONTEXT_WINDOW,
+        max_output_tokens=max_output_tokens or FALLBACK_MAX_OUTPUT_TOKENS,
+        source=source,
+    )
+
+
+def _register_provider(
+    pid: str, name: str, base_url: str, api_key: Optional[str] = None
+):
+    """Register a custom provider in the runtime Provider registry."""
+    if Provider.get(pid):
+        return
+    p = CustomProvider(provider_id=pid, name=name)
+    p._base_url = base_url
+    p._api_key = api_key or "not-needed"
+    p.configure(ProviderConfig(
+        provider_id=pid,
+        api_key=api_key or "not-needed",
+        base_url=base_url,
+    ))
+    Provider.register(p)
+
+
+def _add_model_to_runtime(
+    provider_id: str,
+    body: CreateModelReq,
+    *,
+    context_window: Optional[int] = None,
+    max_output_tokens: Optional[int] = None,
+    model_config: Optional[dict[str, Any]] = None,
+):
+    """Add (or upsert) a model in the runtime Provider registry.
+
+    Works for both CustomProvider (_custom_models) and DynamicOpenAIProvider
+    / OpenAICompatibleProvider (_config_models).
+    """
+    price_fields = ("input_price", "output_price", "cache_read_price", "currency")
+    pricing_config = (
+        {key: getattr(body, key) for key in price_fields}
+        if model_config is None
+        else {key: model_config[key] for key in price_fields if key in model_config}
+    )
+    _pricing = None
+    if any(pricing_config.get(key) is not None for key in price_fields[:3]):
+        _pricing = {
+            "input": float(pricing_config.get("input_price") or 0.0),
+            "output": float(pricing_config.get("output_price") or 0.0),
+            "currency": pricing_config.get("currency") or "USD",
+        }
+        if pricing_config.get("cache_read_price") is not None:
+            _pricing["cache_read"] = float(pricing_config["cache_read_price"])
+    mi = ModelInfo(
+        id=body.model_id,
+        name=body.name,
+        provider_id=provider_id,
+        capabilities=ModelCapabilities(
+            supports_streaming=body.supports_streaming,
+            supports_tools=body.supports_tools,
+            supports_vision=body.supports_vision,
+            supports_reasoning=body.supports_reasoning,
+            max_tokens=(
+                max_output_tokens
+                or body.max_output_tokens
+                or FALLBACK_MAX_OUTPUT_TOKENS
+            ),
+            context_window=(
+                context_window
+                or body.context_window
+                or FALLBACK_CONTEXT_WINDOW
+            ),
+        ),
+        pricing=_pricing,
+    )
+    mi._explicit_keys = {
+        "name", "context_window", "max_output_tokens",
+        "supports_streaming", "supports_tools", "supports_vision",
+        "supports_reasoning",
+        *pricing_config.keys(),
+    }
+    Provider._models[body.model_id] = mi
+    p = Provider.get(provider_id)
+    if p:
+        # CustomProvider (custom-* providers) uses _custom_models
+        if hasattr(p, "_custom_models"):
+            p._custom_models = [m for m in p._custom_models if m.id != body.model_id]
+            p._custom_models.append(mi)
+        # DynamicOpenAIProvider (siliconflow, minimax, openai-compatible, etc.) uses _config_models
+        if hasattr(p, "_config_models"):
+            p._config_models = [m for m in p._config_models if m.id != body.model_id]
+            p._config_models.append(mi)
+
+
+async def load_custom_providers_on_startup():
+    """Load custom providers from aegisops.json into runtime.
+
+    Reads all providers with npm="@ai-sdk/openai-compatible" and id starting
+    with "custom-" from aegisops.json, registers them in the Provider runtime.
+    """
+    from aegisops.security import get_secret_manager
+
+    secrets = get_secret_manager()
+    provider_ids = ConfigWriter.list_provider_ids()
+    loaded_providers = 0
+    loaded_models = 0
+
+    for pid in provider_ids:
+        raw = ConfigWriter.get_provider_raw(pid)
+        if raw is None:
+            continue
+
+        # Only process custom providers here; built-in providers are
+        # handled by apply_config via the standard Config path.
+        if not pid.startswith("custom-"):
+            continue
+
+        npm = raw.get("npm", "")
+        if npm != "@ai-sdk/openai-compatible":
+            continue
+
+        options = raw.get("options", {})
+        base_url = options.get("baseURL", "")
+        name = raw.get("name", pid)
+
+        # Get API key: try current convention (_llm_key) then legacy (_api_key)
+        api_key = secrets.get(f"{pid}_llm_key") or secrets.get(f"{pid}_api_key") or "not-needed"
+
+        _register_provider(pid, name, base_url, api_key)
+        loaded_providers += 1
+
+        # Load models from aegisops.json
+        models = raw.get("models", {})
+        for model_id, mcfg in models.items():
+            # Skip models marked as disabled (soft-deleted)
+            if mcfg.get("disabled"):
+                continue
+            _input_price = mcfg.get("input_price")
+            _output_price = mcfg.get("output_price")
+            _cache_read_price = mcfg.get("cache_read_price")
+            _pricing = None
+            if (
+                _input_price is not None
+                or _output_price is not None
+                or _cache_read_price is not None
+            ):
+                _pricing = {
+                    "input": float(_input_price or 0.0),
+                    "output": float(_output_price or 0.0),
+                    "currency": mcfg.get("currency", "USD"),
+                }
+                if _cache_read_price is not None:
+                    _pricing["cache_read"] = float(_cache_read_price)
+            mi = ModelInfo(
+                id=model_id,
+                name=mcfg.get("name", model_id),
+                provider_id=pid,
+                capabilities=ModelCapabilities(
+                    supports_streaming=mcfg.get("supports_streaming", True),
+                    supports_tools=mcfg.get("supports_tools", True),
+                    supports_vision=mcfg.get("supports_vision", False),
+                    supports_reasoning=mcfg.get("supports_reasoning", True),
+                    max_tokens=mcfg.get("max_output_tokens", 4096),
+                    context_window=mcfg.get("context_window", 128000),
+                ),
+                pricing=_pricing,
+            )
+            mi._explicit_keys = set(mcfg.keys())
+            Provider._models[model_id] = mi
+            p = Provider.get(pid)
+            if p and hasattr(p, "_custom_models"):
+                p._custom_models.append(mi)
+            loaded_models += 1
+
+    log.info("custom.loaded", {"providers": loaded_providers, "models": loaded_models})

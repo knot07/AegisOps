@@ -1,0 +1,172 @@
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from aegisops.agent.agent import AgentInfo
+from aegisops.config.config import Config, ConfigInfo
+from aegisops.hooks.pipeline import HookPipeline
+from aegisops.provider.provider import ChatMessage, StreamChunk
+from aegisops.session.message import Message, MessageRole
+from aegisops.session.runner import SessionRunner
+from aegisops.session.session import Session
+
+
+class _ProviderStub:
+    async def chat_stream(self, **kwargs):  # noqa: ANN003
+        del kwargs
+        yield StreamChunk(
+            delta="hook payload ok",
+            finish_reason="stop",
+            usage={"prompt_tokens": 12, "completion_tokens": 3, "total_tokens": 15},
+        )
+
+
+async def _run_call_llm_with_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    provider_factory=None,
+) -> tuple[dict, dict]:
+    session = await Session.create(project_id="test_project_hook_payloads", directory="/test/hooks")
+    user_msg = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content="hello",
+    )
+    assistant_msg = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+        parentID=user_msg.id,
+        modelID="test-model",
+        providerID="test-provider",
+        agent="rex",
+    )
+
+    runner = SessionRunner(
+        session=session,
+        provider_id="test-provider",
+        model_id="test-model",
+        agent_name="rex",
+    )
+    runner._step = 3
+
+    captured_before: list[dict] = []
+    captured_after: list[dict] = []
+
+    async def fake_run_llm_before(input_data, output_data=None):  # noqa: ANN001, ANN202
+        del output_data
+        captured_before.append(input_data)
+        return SimpleNamespace(input=input_data, output={})
+
+    async def fake_run_llm_after(input_data, output_data=None):  # noqa: ANN001, ANN202
+        captured_after.append({"input": input_data, "output": output_data or {}})
+        return SimpleNamespace(input=input_data, output=output_data or {})
+
+    monkeypatch.setattr(HookPipeline, "has_stage_handlers", AsyncMock(return_value=True))
+    monkeypatch.setattr(HookPipeline, "run_llm_before", fake_run_llm_before)
+    monkeypatch.setattr(HookPipeline, "run_llm_after", fake_run_llm_after)
+    monkeypatch.setattr(Config, "get", AsyncMock(return_value=ConfigInfo()))
+
+    result = await runner._call_llm(
+        provider=provider_factory(runner) if provider_factory else _ProviderStub(),
+        messages=[
+            ChatMessage(role="system", content="system prompt"),
+            ChatMessage(role="user", content="user prompt"),
+        ],
+        tools=[
+            {
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "description": "Read a file",
+                    "parameters": {"type": "object"},
+                },
+            }
+        ],
+        agent=AgentInfo(name="rex"),
+        assistant_msg=assistant_msg,
+    )
+
+    assert result.action == "stop"
+    assert result.content == "hook payload ok"
+
+    assert len(captured_before) == 1
+    assert len(captured_after) == 1
+    return captured_before[0], captured_after[0]
+
+
+@pytest.mark.asyncio
+async def test_execution_activity_tracks_stream_and_parallel_tools_without_content(monkeypatch):
+    import json
+    from aegisops.session.streaming.stream_processor import StreamProcessor
+    from aegisops.tool.registry import ToolResult
+
+    processors = []
+    original_init = StreamProcessor.__init__
+
+    def initialize(self, *args, **kwargs):
+        original_init(self, *args, **kwargs)
+        processors.append(self)
+
+    monkeypatch.setattr(StreamProcessor, "__init__", initialize)
+
+    class Provider:
+        def __init__(self, runner):
+            self.runner = runner
+
+        async def chat_stream(self, **kwargs):
+            activity = self.runner.execution_activity
+            assert activity["state"] == "waiting_model"
+            assert activity["request_started_at"] is not None
+            yield StreamChunk(delta="hook payload ok")
+            assert activity["state"] == "streaming_model"
+            processor = processors[-1]
+            await processor.tool_start_callback("bash", {"command": "secret"})
+            await processor.tool_start_callback("bash", {"command": "secret"})
+            assert activity["active_tools"] == {"bash": 2}
+            await processor.tool_end_callback("bash", ToolResult(success=True, output="secret"))
+            assert activity["active_tools"] == {"bash": 1}
+            await processor.tool_end_callback("bash", ToolResult(success=True, output="secret"))
+            assert activity["active_tools"] == {}
+            assert "secret" not in json.dumps(activity)
+
+    await _run_call_llm_with_hooks(monkeypatch, provider_factory=Provider)
+
+
+@pytest.mark.asyncio
+async def test_call_llm_uses_full_hook_payloads_by_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before_input, after_capture = await _run_call_llm_with_hooks(monkeypatch)
+
+    # callerID / callerType: who the call is made for (aegisops.session.caller).
+    assert set(before_input) == {
+        "sessionID",
+        "messageID",
+        "workspace",
+        "agent",
+        "step",
+        "model",
+        "request",
+        "callerID",
+        "callerType",
+    }
+    assert before_input["request"]["messages"][0]["role"] == "system"
+    assert before_input["request"]["tools"][0]["function"]["name"] == "read"
+    assert before_input["request"]["messageCount"] == 2
+    assert before_input["request"]["toolCount"] == 1
+    assert "messageSummaries" not in before_input["request"]
+    assert "toolSummaries" not in before_input["request"]
+
+    after_input = after_capture["input"]
+    assert set(after_input) == {
+        "sessionID",
+        "messageID",
+        "workspace",
+        "agent",
+        "step",
+        "model",
+        "callerID",
+        "callerType",
+    }
+    assert "request" not in after_input

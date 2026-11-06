@@ -1,0 +1,842 @@
+from __future__ import annotations
+
+import asyncio
+import base64
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from aegisops.command.command import Command, CommandDef
+from aegisops.command.direct import DirectCommandResult
+from aegisops.input.dispatcher import dispatch_user_input, parse_slash_command
+from aegisops.input.events import UserInputEvent
+from aegisops.input.output import CallbackOutputSink
+
+
+class TestParseSlashCommand:
+    def test_resolves_alias_to_canonical_name(self):
+        parsed = parse_slash_command("/reset")
+        assert parsed is not None
+        assert parsed.command_name == "reset"
+        assert parsed.canonical_name == "new"
+
+    def test_reads_structured_arguments_from_metadata(self):
+        parsed = parse_slash_command(
+            '/bug {"scope":"acp"}',
+            {"commandArgumentsJson": {"scope": "acp"}},
+        )
+        assert parsed is not None
+        assert parsed.args == '{"scope":"acp"}'
+        assert parsed.args_json == {"scope": "acp"}
+
+    def test_removed_restart_command_no_longer_resolves(self):
+        parsed = parse_slash_command("/restart")
+        assert parsed is not None
+        assert parsed.command_name == "restart"
+        assert parsed.command_def is None
+
+    def test_goal_command_resolves(self):
+        parsed = parse_slash_command("/goal fix tests")
+        assert parsed is not None
+        assert parsed.command_name == "goal"
+        assert parsed.canonical_name == "goal"
+        assert parsed.args == "fix tests"
+        assert parsed.command_def is not None
+        assert parsed.command_def.execution_kind == "direct"
+
+
+class TestDispatchUserInput:
+    @pytest.mark.asyncio
+    async def test_direct_command_uses_direct_response(self):
+        direct = []
+        llm = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/help",
+            parts=[{"type": "text", "text": "/help"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "direct"
+        assert direct and "Available / commands:" in direct[0]
+        assert not llm
+
+    @pytest.mark.asyncio
+    async def test_direct_command_forwards_foreground_status(self):
+        direct = []
+        statuses = []
+
+        async def run_command(*_args, status_callback=None, **_kwargs):
+            await status_callback("dreaming", "Dreaming...")
+            await status_callback("idle", None)
+            return DirectCommandResult(handled=True, text="Dream completed")
+
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append([], (prompt, display)),
+            command_status=lambda _event, status, message: _append(
+                statuses,
+                (status, message),
+            ),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/dream",
+            parts=[{"type": "text", "text": "/dream"}],
+        )
+
+        with patch(
+            "aegisops.command.handler.run_direct_command",
+            new=AsyncMock(side_effect=run_command),
+        ):
+            result = await dispatch_user_input(event, sink)
+
+        assert result.action == "direct"
+        assert direct == ["Dream completed"]
+        assert statuses == [
+            ("dreaming", "Dreaming..."),
+            ("idle", None),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_webui_direct_response_is_excluded_from_model_context(
+        self,
+        monkeypatch,
+    ):
+        from aegisops.server.routes import session as session_routes
+
+        created_messages = AsyncMock()
+        context_usage_update = AsyncMock()
+        published_events = []
+
+        async def fake_persist(
+            _session_id,
+            write,
+            *,
+            expected_generation=None,
+            expected_agent=None,
+        ):
+            del expected_generation, expected_agent
+            return await write()
+
+        async def fake_dispatch(event, sink):
+            await sink.publish_direct_response(
+                event,
+                "Available Tools\n" + ("x" * 16_000),
+            )
+
+        async def fake_publish(event_type, properties):
+            published_events.append((event_type, properties))
+
+        monkeypatch.setattr(
+            "aegisops.input.dispatcher.dispatch_user_input",
+            fake_dispatch,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.create",
+            created_messages,
+        )
+        monkeypatch.setattr(
+            "aegisops.server.routes.event.publish_event",
+            fake_publish,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_persist_active_session_write",
+            fake_persist,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_publish_context_usage_update",
+            context_usage_update,
+        )
+        monkeypatch.setattr(
+            session_routes.Session,
+            "lifecycle_generation",
+            lambda _session_id: 0,
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_direct_context",
+            text="/tools",
+            display_text="/tools",
+        )
+
+        await session_routes._dispatch_sse_input(
+            "ses_direct_context",
+            SimpleNamespace(id="ses_direct_context"),
+            event,
+            "/tmp/project",
+        )
+
+        assert created_messages.await_count == 2
+        assert all(
+            call.kwargs["ignored"] is True
+            for call in created_messages.await_args_list
+        )
+        text_part_events = [
+            properties["part"]
+            for event_type, properties in published_events
+            if event_type == "message.part.updated"
+        ]
+        assert len(text_part_events) == 2
+        assert all(part["ignored"] is True for part in text_part_events)
+        context_usage_update.assert_awaited_once()
+        assert "provider_id" not in context_usage_update.await_args.kwargs
+        assert "model_id" not in context_usage_update.await_args.kwargs
+
+    @pytest.mark.asyncio
+    async def test_clear_uses_history_callback_without_direct_response(self):
+        direct = []
+        llm = []
+        clear_history_calls = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+            clear_history=lambda: _append(clear_history_calls, "cleared"),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/clear",
+            parts=[{"type": "text", "text": "/clear"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "direct"
+        assert clear_history_calls == ["cleared"]
+        assert not direct
+        assert not llm
+
+    @pytest.mark.asyncio
+    async def test_clear_is_allowed_on_channel_surface(self):
+        direct = []
+        llm = []
+        clear_history_calls = []
+        sink = CallbackOutputSink(
+            "channel",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+            clear_history=lambda: _append(clear_history_calls, "cleared"),
+        )
+        event = UserInputEvent(
+            source_type="wecom",
+            sessionID="ses_test",
+            text="/clear",
+            parts=[{"type": "text", "text": "/clear"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "direct"
+        assert clear_history_calls == ["cleared"]
+        assert not direct
+        assert not llm
+
+    @pytest.mark.asyncio
+    async def test_llm_command_routes_raw_slash_text(self):
+        direct = []
+        llm = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/bug investigate routing",
+            parts=[{"type": "text", "text": "/bug investigate routing"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "llm"
+        assert llm == [("/bug investigate routing", "/bug investigate routing")]
+        assert not direct
+
+    @pytest.mark.asyncio
+    async def test_removed_restart_command_falls_back_to_llm(self):
+        direct = []
+        llm = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/restart",
+            parts=[{"type": "text", "text": "/restart"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "llm"
+        assert llm == [("/restart", "/restart")]
+        assert not direct
+
+    @pytest.mark.asyncio
+    async def test_known_command_rejected_on_wrong_surface(self):
+        direct = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append([], (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/model anthropic/claude-sonnet-4-5",
+            parts=[{"type": "text", "text": "/model anthropic/claude-sonnet-4-5"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "rejected"
+        assert "当前入口不可用" in direct[0]
+
+    @pytest.mark.asyncio
+    async def test_command_rejects_attachments_when_not_allowed(self):
+        direct = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append([], (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/help",
+            parts=[
+                {"type": "text", "text": "/help"},
+                {"type": "file", "url": "file:///tmp/demo.txt"},
+            ],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "rejected"
+        assert "不支持附件" in direct[0]
+
+    @pytest.mark.asyncio
+    async def test_goal_requires_existing_session(self):
+        direct = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append([], (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            text="/goal fix tests",
+            parts=[{"type": "text", "text": "/goal fix tests"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "rejected"
+        assert "需要先有一个会话" in direct[0]
+
+    @pytest.mark.asyncio
+    async def test_goal_set_runs_llm_without_direct_ack(self, monkeypatch):
+        direct = []
+        llm = []
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append(llm, (prompt, display)),
+        )
+        monkeypatch.setattr(
+            "aegisops.command.direct.GoalManager.set_goal",
+            AsyncMock(return_value=SimpleNamespace(objective="fix tests", max_turns=20)),
+        )
+        monkeypatch.setattr(
+            "aegisops.command.direct.GoalManager.goal_prompt",
+            MagicMock(return_value="goal prompt"),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_goal_dispatch",
+            text="/goal fix tests",
+            parts=[{"type": "text", "text": "/goal fix tests"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "llm"
+        assert direct == []
+        assert llm == [("goal prompt", "/goal fix tests")]
+
+    @pytest.mark.asyncio
+    async def test_channel_unsafe_command_is_rejected(self):
+        Command.register(
+            CommandDef(
+                name="channel-unsafe-test",
+                description="unsafe",
+                template="unsafe",
+                hidden=True,
+                execution_kind="direct",
+                allow_attachments=False,
+                visible_surfaces=("channel",),
+                channel_safe=False,
+            )
+        )
+        direct = []
+        sink = CallbackOutputSink(
+            "channel",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append([], (prompt, display)),
+        )
+        event = UserInputEvent(
+            source_type="wecom",
+            sessionID="ses_test",
+            text="/channel-unsafe-test",
+            parts=[{"type": "text", "text": "/channel-unsafe-test"}],
+        )
+
+        result = await dispatch_user_input(event, sink)
+
+        assert result.action == "rejected"
+        assert "不支持在渠道会话中执行" in direct[0]
+
+
+class TestSessionRoutesUseDispatcher:
+    @pytest.mark.asyncio
+    async def test_prompt_async_applies_dedicated_directory_before_instance_bootstrap(
+        self,
+        monkeypatch,
+        tmp_path,
+    ):
+        from aegisops.server.routes import session as session_routes
+
+        hostile = tmp_path / "hostile"
+        isolated = tmp_path / "isolated"
+        hostile.mkdir()
+        isolated.mkdir()
+        session = SimpleNamespace(
+            id="ses_prebootstrap",
+            directory=str(hostile),
+            agent="dedicated-agent",
+            metadata={},
+        )
+        prepared = SimpleNamespace(
+            id=session.id,
+            directory=str(isolated),
+            agent="dedicated-agent",
+            metadata={
+                "_dedicated_agent_policy": {
+                    "agent": "dedicated-agent",
+                    "version": 1,
+                }
+            },
+        )
+        agent = SimpleNamespace(
+            name="dedicated-agent",
+            mode="primary",
+            hidden=False,
+            tags=[],
+            require_dedicated_session=True,
+        )
+        prepare = AsyncMock(return_value=prepared)
+        bootstrapped_directories = []
+
+        async def fake_provide(*, directory, init, fn):
+            del init, fn
+            bootstrapped_directories.append(directory)
+
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(return_value=session),
+        )
+        monkeypatch.setattr(
+            "aegisops.agent.registry.Agent.get",
+            AsyncMock(return_value=agent),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.agent_policy.prepare_session_for_agent",
+            prepare,
+        )
+        monkeypatch.setattr("aegisops.project.instance.Instance.provide", fake_provide)
+
+        response = await session_routes.send_session_message_async(
+            session.id,
+            session_routes.PromptRequest(
+                parts=[{"type": "text", "text": "scan"}],
+                agent=agent.name,
+            ),
+        )
+        await asyncio.sleep(0)
+
+        assert response["status"] == "accepted"
+        prepare.assert_awaited_once_with(session, agent)
+        assert bootstrapped_directories == [str(isolated.resolve())]
+
+    @pytest.mark.asyncio
+    async def test_dispatch_claims_bound_dedicated_agent_before_input(
+        self,
+        monkeypatch,
+    ):
+        from aegisops.server.routes import session as session_routes
+
+        session = SimpleNamespace(id="ses_dedicated", agent="dedicated-agent")
+        agent = SimpleNamespace(name="dedicated-agent", require_dedicated_session=True)
+        prepare = AsyncMock(return_value=session)
+        dispatch = AsyncMock()
+        monkeypatch.setattr(
+            "aegisops.agent.registry.Agent.get",
+            AsyncMock(return_value=agent),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.agent_policy.prepare_session_for_agent",
+            prepare,
+        )
+        monkeypatch.setattr(
+            "aegisops.input.dispatcher.dispatch_user_input",
+            dispatch,
+        )
+
+        await session_routes._dispatch_sse_input(
+            session.id,
+            session,
+            UserInputEvent(
+                source_type="webui",
+                sessionID=session.id,
+                text="scan this tree",
+                parts=[{"type": "text", "text": "scan this tree"}],
+            ),
+            "/tmp/project",
+        )
+
+        prepare.assert_awaited_once_with(session, agent)
+        dispatch.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_goal_mode_publishes_active_goal_before_llm(self, monkeypatch):
+        from aegisops.input.events import UserInputEvent
+        from aegisops.server.routes import session as session_routes
+
+        order = []
+        goal_state = SimpleNamespace(
+            status="active",
+            objective="fix tests",
+            last_reason=None,
+        )
+
+        async def publish(event_type, _properties):
+            if event_type == "session.goal.updated":
+                order.append("goal")
+
+        async def process(*_args, **_kwargs):
+            order.append("llm")
+
+        monkeypatch.setattr(
+            "aegisops.command.direct.GoalManager.set_goal",
+            AsyncMock(return_value=goal_state),
+        )
+        monkeypatch.setattr(
+            "aegisops.command.direct.GoalManager.goal_prompt",
+            MagicMock(return_value="goal prompt"),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.goal.GoalManager.get",
+            AsyncMock(return_value=goal_state),
+        )
+        monkeypatch.setattr(
+            "aegisops.server.routes.event.publish_event",
+            publish,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_process_session_message",
+            process,
+        )
+
+        await session_routes._dispatch_sse_input(
+            "ses_goal_mode",
+            SimpleNamespace(id="ses_goal_mode"),
+            UserInputEvent(
+                source_type="webui",
+                sessionID="ses_goal_mode",
+                text="/goal fix tests",
+                parts=[{"type": "text", "text": "fix tests"}],
+                display_text="fix tests",
+                executionMode="goal",
+            ),
+            "/tmp/project",
+        )
+
+        assert order == ["goal", "llm"]
+
+    @pytest.mark.asyncio
+    async def test_prompt_async_routes_through_dispatcher(self, monkeypatch):
+        from aegisops.server.routes import session as session_routes
+
+        dispatch_mock = AsyncMock()
+        session_id = "ses_dispatcher"
+
+        async def fake_provide(*, directory, init, fn):
+            await fn()
+
+        monkeypatch.setattr(session_routes, "_dispatch_sse_input", dispatch_mock)
+        monkeypatch.setattr("aegisops.project.instance.Instance.provide", fake_provide)
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory="/tmp/project",
+                )
+            ),
+        )
+        request = session_routes.PromptRequest(
+            parts=[{"type": "text", "text": "/bug investigate"}],
+        )
+
+        resp = await session_routes.send_session_message_async(session_id, request)
+        assert resp["status"] == "accepted"
+        await asyncio.sleep(0)
+        dispatch_mock.assert_awaited_once()
+        event = dispatch_mock.await_args.args[2]
+        assert event.text == "/bug investigate"
+
+    @pytest.mark.asyncio
+    async def test_command_route_routes_through_dispatcher(self, monkeypatch):
+        from aegisops.server.routes import session as session_routes
+
+        dispatch_mock = AsyncMock()
+        session_id = "ses_dispatcher"
+
+        async def fake_provide(*, directory, init, fn):
+            await fn()
+
+        monkeypatch.setattr(session_routes, "_dispatch_sse_input", dispatch_mock)
+        monkeypatch.setattr("aegisops.project.instance.Instance.provide", fake_provide)
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory="/tmp/project",
+                )
+            ),
+        )
+        request = session_routes.CommandRequest(command="bug", arguments="investigate")
+
+        resp = await session_routes.send_session_command(session_id, request)
+        assert resp["status"] == "accepted"
+        await asyncio.sleep(0)
+        dispatch_mock.assert_awaited_once()
+        event = dispatch_mock.await_args.args[2]
+        assert event.text == "/bug investigate"
+        assert event.display_text == "/bug investigate"
+
+
+class TestPromptQueueRoutes:
+    def test_materialize_queued_data_url_returns_readable_file_uri(self, monkeypatch, tmp_path):
+        from aegisops.server.routes import session as session_routes
+        from aegisops.session.utils.file_extractor import read_file_part_bytes
+
+        monkeypatch.setattr(
+            "aegisops.workspace.manager.WorkspaceManager.get_instance",
+            lambda: (_ for _ in ()).throw(PermissionError("workspace access denied")),
+        )
+        monkeypatch.setattr(
+            "aegisops.config.config.Config.get_data_path",
+            staticmethod(lambda: tmp_path),
+        )
+        data_url = "data:image/png;base64," + base64.b64encode(b"png-bytes").decode()
+
+        url = session_routes._materialize_data_url_part(
+            "ses_windows_uri",
+            data_url,
+            "image/png",
+            "screenshot.png",
+        )
+
+        assert url.startswith("file://")
+        assert read_file_part_bytes(url) == b"png-bytes"
+
+    def test_session_upload_path_rejects_traversal(self, monkeypatch, tmp_path):
+        from aegisops.server.routes import session as session_routes
+
+        monkeypatch.setattr(
+            "aegisops.config.config.Config.get_data_path",
+            staticmethod(lambda: tmp_path),
+        )
+
+        with pytest.raises(ValueError, match="Invalid session ID"):
+            session_routes._session_uploads_dir("../outside")
+
+    @pytest.mark.asyncio
+    async def test_prompt_async_queues_when_session_running_without_creating_message(
+        self, monkeypatch, tmp_path
+    ):
+        from aegisops.server.routes import session as session_routes
+        from aegisops.session.interaction_queue import InteractionQueue
+
+        session_id = "ses_prompt_queue_running"
+        await InteractionQueue.clear(session_id)
+
+        message_create = AsyncMock()
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
+        )
+        monkeypatch.setattr("aegisops.session.session_loop.SessionLoop.is_running", lambda _sid: True)
+        monkeypatch.setattr("aegisops.session.message.Message.create", message_create)
+        monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
+
+        request = session_routes.PromptRequest(parts=[{"type": "text", "text": "second question"}])
+
+        resp = await session_routes.send_session_message_async(session_id, request)
+
+        assert resp["status"] == "queued"
+        assert resp["queueID"]
+        items = await InteractionQueue.list(session_id)
+        assert len(items) == 1
+        assert items[0].parts[0]["text"] == "second question"
+        message_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_prompt_queue_rejects_when_full(self, monkeypatch, tmp_path):
+        from fastapi import HTTPException
+
+        from aegisops.server.routes import session as session_routes
+        from aegisops.session.interaction_queue import InteractionQueue, MAX_QUEUE_SIZE
+
+        session_id = "ses_prompt_queue_full"
+        await InteractionQueue.clear(session_id)
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
+        )
+        monkeypatch.setattr("aegisops.session.session_loop.SessionLoop.is_running", lambda _sid: True)
+        monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
+
+        for idx in range(MAX_QUEUE_SIZE):
+            await InteractionQueue.enqueue(
+                session_id,
+                parts=[{"type": "text", "text": f"queued {idx}"}],
+            )
+
+        request = session_routes.PromptRequest(parts=[{"type": "text", "text": "overflow"}])
+        with pytest.raises(HTTPException) as exc_info:
+            await session_routes.send_session_message_async(session_id, request)
+
+        assert exc_info.value.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_run_now_aborts_and_schedules_drain(self, monkeypatch, tmp_path):
+        from aegisops.server.routes import session as session_routes
+        from aegisops.session.interaction_queue import InteractionQueue
+
+        session_id = "ses_prompt_queue_run_now"
+        await InteractionQueue.clear(session_id)
+        item = await InteractionQueue.enqueue(
+            session_id,
+            parts=[{"type": "text", "text": "run this now"}],
+        )
+
+        abort_mock = AsyncMock(return_value=True)
+        wait_mock = AsyncMock()
+        drain_mock = AsyncMock()
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
+        )
+        monkeypatch.setattr("aegisops.session.session_loop.SessionLoop.is_running", lambda _sid: True)
+        monkeypatch.setattr(session_routes, "abort_session", abort_mock)
+        monkeypatch.setattr(session_routes, "_wait_for_session_idle", wait_mock)
+        monkeypatch.setattr(session_routes, "_schedule_prompt_queue_drain", drain_mock)
+        monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
+        # 路由已收紧鉴权：run_now 现在要求 http_request，并做 require_user + 写权限校验
+        session_stub = SimpleNamespace(id=session_id, directory=str(tmp_path), status="active")
+        monkeypatch.setattr(
+            session_routes,
+            "_get_session_by_id_unfiltered",
+            AsyncMock(return_value=session_stub),
+        )
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: SimpleNamespace(id="usr_admin", role="admin"))
+        monkeypatch.setattr(session_routes, "_require_session_write_access", lambda _session, _user: None)
+
+        resp = await session_routes.run_prompt_queue_item_now(session_id, item.id, SimpleNamespace())
+
+        assert resp["status"] == "accepted"
+        abort_mock.assert_awaited_once_with(session_id)
+        wait_mock.assert_awaited_once_with(session_id)
+        drain_mock.assert_awaited_once_with(session_id, str(tmp_path.resolve()))
+
+    @pytest.mark.asyncio
+    async def test_scheduled_drain_retries_until_session_idle(self, monkeypatch):
+        from aegisops.server.routes import session as session_routes
+        from aegisops.session.interaction_queue import InteractionQueue
+
+        session_id = "ses_prompt_queue_retry"
+        await InteractionQueue.clear(session_id)
+        await InteractionQueue.enqueue(
+            session_id,
+            parts=[{"type": "text", "text": "run after idle"}],
+        )
+
+        running_states = [True, True, False]
+        dispatch_mock = AsyncMock()
+        original_sleep = asyncio.sleep
+
+        async def fake_provide(*, directory, init, fn):
+            await fn()
+
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+        )
+        monkeypatch.setattr("aegisops.project.instance.Instance.provide", fake_provide)
+        monkeypatch.setattr(session_routes, "_dispatch_sse_input", dispatch_mock)
+        monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
+        monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+        monkeypatch.setattr(
+            "aegisops.session.session_loop.SessionLoop.is_running",
+            lambda _sid: running_states.pop(0) if running_states else False,
+        )
+
+        await session_routes._schedule_prompt_queue_drain(session_id, "/tmp/project")
+        await original_sleep(0)
+        await original_sleep(0)
+
+        dispatch_mock.assert_awaited_once()
+        assert await InteractionQueue.list(session_id) == []
+
+
+async def _append(target: list, value):
+    target.append(value)

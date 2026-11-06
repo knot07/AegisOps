@@ -1,0 +1,319 @@
+{
+  "pageTitle": "任务中心",
+  "pageDescription": "管理任务队列、定时任务和已发布的 API 服务",
+  "health": {
+    "degraded": "任务服务异常，系统正在重试。任务列表可能尚未更新，请避免重复提交。",
+    "unavailable": "任务服务尚未就绪，请稍后重试。",
+    "unknown": "暂时无法确认任务服务状态，正在重试。",
+    "pendingResults": "有 {{count}} 个任务已执行结束，正在保存结果。"
+  },
+  "createTask": "创建任务",
+  "tabs": {
+    "queued": "任务队列",
+    "scheduled": "定时任务",
+    "services": "API 服务"
+  },
+  "status": {
+    "pending": "待处理",
+    "queued": "队列中",
+    "running": "运行中",
+    "completed": "已完成",
+    "failed": "失败",
+    "cancelled": "已取消"
+  },
+  "priority": {
+    "urgent": "紧急",
+    "high": "高",
+    "normal": "普通",
+    "low": "低"
+  },
+  "source": {
+    "user_conversation": "用户",
+    "scheduled_trigger": "定时任务",
+    "system_evolution": "系统"
+  },
+  "cron": {
+    "everyMinute": "每分钟",
+    "everyNMinutes": "每 {{n}} 分钟",
+    "atMinuteOfHour": "每小时第 {{min}} 分钟",
+    "everyNHours": "每 {{n}} 小时（整点后 {{min}} 分钟）",
+    "everyDayAt": "每天 {{time}}",
+    "weekdaysAt": "工作日 {{time}}",
+    "weekendsAt": "周末 {{time}}",
+    "everyDaysAt": "每{{days}} {{time}}",
+    "monthlyAt": "每月 {{dom}} 日 {{time}}",
+    "yearlyAt": "每年 {{month}} 月 {{dom}} 日 {{time}}"
+  },
+  "dow": {
+    "0": "周日",
+    "1": "周一",
+    "2": "周二",
+    "3": "周三",
+    "4": "周四",
+    "5": "周五",
+    "6": "周六",
+    "7": "周日"
+  },
+  "time": {
+    "justNow": "刚刚",
+    "minutesAgo": "{{n}} 分钟前",
+    "hoursAgo": "{{n}} 小时前",
+    "daysAgo": "{{n}} 天前"
+  },
+  "cronPresets": {
+    "everyMinute": "每分钟",
+    "every5Minutes": "每 5 分钟",
+    "every15Minutes": "每 15 分钟",
+    "every30Minutes": "每 30 分钟",
+    "everyHour": "每小时",
+    "every2Hours": "每 2 小时",
+    "every6Hours": "每 6 小时",
+    "every12Hours": "每 12 小时",
+    "daily0000": "每天 00:00",
+    "daily0800": "每天 08:00",
+    "daily0900": "每天 09:00",
+    "daily1200": "每天 12:00",
+    "daily1800": "每天 18:00",
+    "weekdaysAt0900": "工作日 09:00",
+    "mondayAt0900": "每周一 09:00",
+    "monthly1At0000": "每月 1 日 00:00",
+    "custom": "自定义…"
+  },
+  "queued": {
+    "filterNamePlaceholder": "搜索任务名称",
+    "filterExecutionTime": "任务执行时间范围",
+    "filterStartTime": "执行开始时间下限",
+    "filterEndTime": "执行开始时间上限",
+    "filterAllPriorities": "全部优先级",
+    "filterSearch": "搜索",
+    "filterReset": "重置",
+    "filterTimeHint": "按实际开始时间筛选，使用本地时区；包含结束分钟，未开始的任务不参与时间筛选。",
+    "filterInvalidTime": "请输入有效的执行时间",
+    "filterInvalidRange": "开始时间不能晚于结束时间",
+    "filterEmptyTitle": "没有符合条件的任务",
+    "filterEmptyDescription": "请调整筛选条件或点击重置",
+    "filterAll": "全部",
+    "filterCompleted": "已完成",
+    "filterFailed": "失败",
+    "selectedCount": "已选 {{count}} 项",
+    "batchCancel": "批量取消",
+    "batchDelete": "批量删除",
+    "emptyTitle": "暂无任务队列",
+    "emptyDescription": "在对话中告诉 Agent「帮我安排一个任务」，即可加入任务队列",
+    "colStatus": "状态",
+    "colSource": "来源",
+    "colName": "任务名称",
+    "colMode": "执行方式",
+    "colPriority": "优先级",
+    "colTime": "执行时间",
+    "pagination": "共 {{total}} 条，第 {{page}}/{{totalPages}} 页",
+    "detailWaiting": "等待执行中...",
+    "detailNoRecord": "暂无执行记录",
+    "workflowId": "Workflow ID",
+    "workflowInput": "输入参数",
+    "workflowResult": "执行结果",
+    "workflowError": "错误信息",
+    "workflowJsonFormat": "JSON format",
+    "actionCancel": "取消",
+    "actionRetry": "重试",
+    "actionResume": "在原会话继续",
+    "heldForVerification": "这次运行在动作效果没确认的情况下中断了，不会自动重跑。请先核对下面这些调用是否已经生效，再选择在原会话继续或重试。",
+    "actionRerun": "重跑",
+    "actionDelete": "删除",
+    "confirmDelete": "确定要删除这个任务吗？",
+    "confirmBatchCancel": "确定要取消 {{count}} 个任务吗？",
+    "confirmBatchCancelBtn": "取消任务",
+    "confirmBatchDelete": "确定要删除 {{count}} 个任务吗？",
+    "actionFailed": "操作失败"
+  },
+  "scheduled": {
+    "emptyTitle": "暂无定时任务",
+    "emptyDescription": "在对话中告诉 Agent「每天9点帮我执行…」，即可创建定时任务",
+    "colStatus": "状态",
+    "colName": "任务名称",
+    "colFrequency": "执行频率",
+    "colNextRun": "下次执行",
+    "colMode": "执行方式",
+    "colPriority": "优先级",
+    "colActions": "操作",
+    "statusEnabled": "启用中",
+    "statusDisabled": "已停用",
+    "runOnce": "一次性执行",
+    "totalCount": "共 {{count}} 个定时任务",
+    "confirmDelete": "确定要删除这个定时任务吗？",
+    "toggleEnable": "点击启用",
+    "toggleDisable": "点击停用",
+    "actionFailed": "操作失败",
+    "deleteFailed": "删除失败"
+  },
+  "services": {
+    "filterAll": "全部",
+    "filterRunning": "运行中",
+    "filterStopped": "已停止",
+    "emptyTitle": "暂无 API 服务",
+    "emptyDescription": "在工作流详情页「发布」标签中发布工作流为 API 服务",
+    "publishedAt": "{{date}} 发布",
+    "serviceDriver": "服务驱动",
+    "driverLocal": "Local",
+    "driverDocker": "Docker",
+    "showKey": "显示",
+    "hideKey": "隐藏",
+    "quickCall": "快速调用（curl）",
+    "restartService": "重启服务",
+    "restarting": "重启中...",
+    "stopService": "停止服务",
+    "stopping": "停止中...",
+    "openInNewTab": "在新标签打开",
+    "loadFailed": "加载失败",
+    "restartFailed": "重启失败",
+    "stopFailed": "停止失败",
+    "serviceRestarted": "服务已重启",
+    "serviceStopped": "服务已停止"
+  },
+  "form": {
+    "titleLabel": "标题 *",
+    "titlePlaceholder": "输入任务标题",
+    "descLabel": "描述",
+    "descPlaceholder": "任务描述（可选）",
+    "priorityLabel": "优先级",
+    "typeLabel": "类型",
+    "scheduleKindLabel": "调度",
+    "modeLabel": "执行模式",
+    "scheduleConfig": "调度配置",
+    "frequencyLabel": "执行频率 *",
+    "freqRecurringLabel": "执行频率",
+    "execTimeLabel": "执行时间 *",
+    "runOnce": "一次性执行",
+    "recurring": "循环执行",
+    "selectFrequency": "请选择频率",
+    "customOption": "自定义…",
+    "customCronLabel": "自定义 Cron 表达式",
+    "timezoneLabel": "时区",
+    "cronDescLabel": "周期描述",
+    "cronDescHint": "（展示用，留空则自动生成）",
+    "cronDescPlaceholder": "例：每天早上9点",
+    "additionalInfoLabel": "任务补充信息",
+    "additionalInfoHint": "（Agent 执行时的具体指令，可选）",
+    "additionalInfoPlaceholder": "例：查询 threatbook.cn 的威胁情报，生成详细报告",
+    "rexAssist": "Atlas 协助",
+    "queueOption": "任务队列",
+    "scheduledOption": "定时任务",
+    "immediateOption": "立即执行",
+    "onceAtTimeOption": "指定时间",
+    "recurringOption": "循环执行",
+    "runOnceType": "一次性定时任务",
+    "recurringType": "定时任务（循环）",
+    "selectWorkflow": "请选择 Workflow",
+    "editTitle": "编辑定时任务",
+    "createTitle": "创建任务",
+    "agentName": "Agent 名称",
+    "workflowParamsLabel": "Workflow 参数",
+    "workflowParamsHint": "（JSON 对象，会作为 workflow inputs 传入）",
+    "workflowParamsPlaceholder": "{\n  \"keyword\": \"example\"\n}",
+    "workflowParamsInvalid": "Workflow 参数必须是合法的 JSON 对象",
+    "urgentLabel": "紧急",
+    "highLabel": "高",
+    "normalLabel": "普通",
+    "lowLabel": "低",
+    "timezoneShanghai": "Asia/Shanghai（北京时间 UTC+8）",
+    "workflowIdPlaceholder": "输入 Workflow ID"
+  },
+  "taskSheet": {
+    "entityType": "任务",
+    "saveFailed": "保存失败",
+    "createFailed": "创建失败",
+    "extractTimeout": "提取超时。请在对话中让 Atlas 输出 JSON 格式的配置，然后再试。",
+    "selfContainedHint": "定时任务执行时会创建全新的 Atlas 会话，不再继承父 session；请把执行上下文直接写在描述或任务补充信息里。",
+    "recentRuns": "最近运行",
+    "recentRunsEmpty": "暂无运行记录",
+    "recentRunsLoading": "正在加载运行记录...",
+    "create": {
+      "emptyStateTitle": "暂无创建对话",
+      "guidePanelTitle": "Atlas 辅助创建任务",
+      "guidePanelDesc": "选择一个引导或案例，Atlas 会先确认任务目标、执行对象、调度方式和输出要求，再整理成可创建的任务配置。",
+      "guideSectionTitle": "创建引导",
+      "caseSectionTitle": "创建案例",
+      "guideActions": [
+        {
+          "label": "创建定时任务",
+          "description": "从目标、执行对象、频率、时区和输出要求开始配置。",
+          "prompt": "请引导我创建一个 AegisOps 定时任务。先不要直接输出最终 JSON，先用 question 工具一次只问一个最关键问题，帮我确认任务目标、执行模式（Agent 或 Workflow）、具体执行指令、调度方式（立即、指定时间或循环）、时区、优先级和输出要求；我确认后再整理成可提取到表单的任务配置。"
+        },
+        {
+          "label": "梳理执行指令",
+          "description": "把模糊需求整理成 Agent 可直接执行的 userPrompt。",
+          "prompt": "请帮我梳理这个任务的执行指令。请一次只问一个问题，确认任务目标、输入来源、处理步骤、输出格式、失败时怎么处理，以及哪些上下文必须写进任务说明里；最后整理成适合填入任务补充信息的文本。"
+        },
+        {
+          "label": "选择调度频率",
+          "description": "确认一次性、每日、每周、工作日或自定义 Cron。",
+          "prompt": "请帮我选择这个任务的调度频率。请先确认业务时区、是否需要立即执行或指定时间执行、是否是循环任务、执行窗口和节假日/周末规则；确认后给出 scheduleKind、runAt 或 cron、timezone 和 cronDescription。"
+        },
+        {
+          "label": "选择执行方式",
+          "description": "判断应该交给 Agent 还是已有 Workflow 执行。",
+          "prompt": "请帮我判断这个任务应该用 Agent 还是 Workflow 执行。请先确认任务是否需要固定流程、结构化输入、可重复节点和稳定输出；如果适合 Agent，请推荐 agentName 和 userPrompt；如果适合 Workflow，请确认 workflowID 和 context JSON。"
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "每日安全日报",
+          "description": "每天固定时间收集安全数据并输出日报。",
+          "prompt": "我想创建一个每日安全日报定时任务，每天早上 9 点执行，汇总过去 24 小时的安全告警、重点资产风险和处置建议，并输出 Markdown 报告。请引导我确认 Agent/Workflow、数据来源、输出格式、时区和失败处理。"
+        },
+        {
+          "label": "IOC 定期复查",
+          "description": "定期查询 IOC 信誉变化并输出变化摘要。",
+          "prompt": "我想创建一个 IOC 定期复查任务，用于每天检查一批 IP、域名、URL 或哈希的威胁情报变化，并输出新增风险和处置建议。请引导我确认输入来源、执行 Agent 或 Workflow、调度频率、输出格式和告警阈值。"
+        },
+        {
+          "label": "每周资产巡检",
+          "description": "每周检查资产状态、暴露面和异常变化。",
+          "prompt": "我想创建一个每周资产巡检任务，用于检查重点资产的暴露面、风险状态和异常变化，并生成巡检摘要。请引导我确认巡检范围、执行方式、频率、Workflow 参数或 Agent 指令，以及报告格式。"
+        }
+      ]
+    },
+    "edit": {
+      "emptyStateTitle": "暂无编辑对话",
+      "guidePanelTitle": "Atlas 辅助修改任务",
+      "guidePanelDesc": "选择一个编辑入口，Atlas 会基于当前任务配置，引导你调整执行指令、调度频率、执行方式和输出要求。",
+      "guideSectionTitle": "编辑引导",
+      "caseSectionTitle": "编辑案例",
+      "guideActions": [
+        {
+          "label": "优化当前任务",
+          "description": "先诊断当前配置，再确认需要修改的字段。",
+          "prompt": "请帮我修改当前任务「{{name}}」。请先基于当前配置做一个简短诊断，不要直接修改；再用 question 工具一次只问一个最关键问题，帮我确认要调整的执行指令、调度时间、执行方式、优先级和输出要求。确认后输出可提取到表单的 JSON 配置摘要。"
+        },
+        {
+          "label": "调整调度时间",
+          "description": "修改执行时间、周期、时区或展示描述。",
+          "prompt": "请帮我调整当前任务「{{name}}」的调度时间。请确认时区、执行周期、是否需要一次性执行、避开哪些时间窗口，以及 cronDescription 应该如何展示；确认后整理成可提取的调度字段。"
+        },
+        {
+          "label": "改写执行指令",
+          "description": "让 Agent 或 Workflow 获取更完整的上下文。",
+          "prompt": "请帮我改写当前任务「{{name}}」的任务补充信息。请先检查当前指令是否说明目标、输入、步骤、输出格式和失败处理，再逐步确认缺失信息；确认后整理成更清晰的 userPrompt。"
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "降低频率",
+          "description": "减少任务执行压力，改成更合适的周期。",
+          "prompt": "我想降低当前任务「{{name}}」的执行频率，避免过于频繁。请帮我根据任务目标推荐新的 cron、timezone 和展示描述，并说明影响。"
+        },
+        {
+          "label": "改成 Workflow",
+          "description": "把自由 Agent 指令切换成固定 Workflow 执行。",
+          "prompt": "我想评估当前任务「{{name}}」是否应该改成 Workflow 执行。请帮我确认固定流程、输入参数、workflowID、context JSON 和输出要求，并整理成可提取配置。"
+        }
+      ]
+    }
+  },
+  "dashboard": {
+    "completedWeek": "7日内完成",
+    "scheduledActive": "已启动定时任务",
+    "running": "进行中",
+    "failedWeek": "7日内失败"
+  }
+}

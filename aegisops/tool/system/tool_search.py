@@ -1,0 +1,205 @@
+"""
+Tool search / discovery helper.
+
+Lets the model discover candidate tools and emit auditable discovery events.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from aegisops.session.callable_state import add_session_callable_tools
+from aegisops.tool.catalog import normalize_tool_search_query, search_tool_catalog
+from aegisops.tool.registry import (
+    ParameterType,
+    ToolCategory,
+    ToolContext,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
+)
+DESCRIPTION = """Search available tools by task intent, keyword, category, or exact names.
+
+Use this tool when you need to discover a tool that is not already exposed in
+the current turn. Search by user goal, capability, or keyword.
+If you already know the needed tool names, prefer one exact batch query such as
+`select:websearch,webfetch,skill` instead of multiple separate searches.
+IMPORTANT: search query must be in English.
+"""
+
+
+async def _isolated_search_tools(ctx: ToolContext) -> Optional[List[Any]]:
+    """Use the same declared-tool intersection and policy projection as calls."""
+    from aegisops.agent.registry import Agent
+    from aegisops.session.callable_schema import list_session_callable_tool_infos
+    from aegisops.session.execution_mode import is_tool_allowed
+    from aegisops.session.runtime_controls import runtime_controls
+
+    agent_name = getattr(ctx, "agent", "rex")
+    agent = await Agent.get(agent_name)
+    if agent is None:
+        raise ValueError(f"Tool discovery requires an available agent: {agent_name}")
+    if agent.prompt_profile != "isolated":
+        return None
+    extra = getattr(ctx, "extra", None) or {}
+    result = await list_session_callable_tool_infos(
+        session_id=ctx.session_id,
+        declared_tool_names=agent.tools or [],
+        strict_declared_tools=True,
+        agent=agent.name,
+        step=int((extra.get("execution_context") or {}).get("step") or 0),
+    )
+    # Before-LLM hooks can narrow schemas after the policy projection. Respect
+    # the executing caller's final ceiling instead of restoring hidden tools.
+    turn_names = extra.get("turn_callable_tool_names")
+    turn_ceiling = set(turn_names) if isinstance(turn_names, (list, tuple, set)) else None
+    controls = runtime_controls.get()
+    return [
+        tool for tool in result.tool_infos
+        if (turn_ceiling is None or tool.name in turn_ceiling)
+        and is_tool_allowed(extra.get("execution_mode"), tool.name)
+        and (controls is None or not controls.denial(tool.name))
+    ]
+
+
+async def _build_device_tool_hints(matches: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Build per-tool device discovery hints for device-backed tools only."""
+    device_tools = [
+        match for match in matches
+        if (match.get("source") or "").lower() == "device" and match.get("name")
+    ]
+    if not device_tools:
+        return {}
+
+    try:
+        from aegisops.tool.device.store import list_devices, list_groups
+
+        devices = await list_devices()
+        groups = await list_groups()
+    except Exception:
+        return {}
+
+    group_names = {group.id: group.name for group in groups}
+    tool_hints: Dict[str, Dict[str, Any]] = {}
+
+    for match in device_tools:
+        storage_key = str(match.get("provider") or "")
+        candidates = []
+        enabled_candidates = []
+
+        for device in devices:
+            if device.storage_key != storage_key:
+                continue
+            candidate = {
+                "device_id": device.id,
+                "name": device.name,
+                "group_id": device.group_id,
+                "group_name": group_names.get(device.group_id, device.group_id),
+                "enabled": bool(device.enabled),
+            }
+            candidates.append(candidate)
+            if device.enabled:
+                enabled_candidates.append(candidate)
+
+        if not enabled_candidates:
+            ambiguity = "none"
+        elif len(enabled_candidates) == 1:
+            ambiguity = "single"
+        else:
+            ambiguity = "multiple"
+
+        tool_hints[str(match["name"])] = {
+            "toolSetId": storage_key,
+            "requiresDeviceId": len(enabled_candidates) != 1,
+            "ambiguity": ambiguity,
+            "candidateDevices": enabled_candidates or candidates,
+        }
+
+    return tool_hints
+
+@ToolRegistry.register_function(
+    name="tool_search",
+    group="检索",
+    description=DESCRIPTION,
+    category=ToolCategory.SYSTEM,
+    parameters=[
+        ToolParameter(
+            name="query",
+            type=ParameterType.STRING,
+            description=(
+                "Search query describing the capability or task intent. "
+                "Use select:tool_a,tool_b to expose multiple known tools in one call."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="category",
+            type=ParameterType.STRING,
+            description="Optional category filter such as file, search, code, terminal, system, browser, custom",
+            required=False,
+        ),
+        ToolParameter(
+            name="limit",
+            type=ParameterType.INTEGER,
+            description="Maximum number of matching tools to return",
+            required=False,
+            default=8,
+        ),
+    ],
+)
+async def tool_search(
+    ctx: ToolContext,
+    query: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: int = 8,
+) -> ToolResult:
+    limit = max(1, min(8 if limit is None else limit, 20))
+    allowed_tools = await _isolated_search_tools(ctx)
+    matches, matched_tags = search_tool_catalog(
+        query, category=category, limit=limit, tool_infos=allowed_tools,
+    )
+    # Isolated agents do not acquire host device inventories through discovery.
+    device_hints = await _build_device_tool_hints(matches) if allowed_tools is None else {}
+    enriched_matches: List[Dict[str, Any]] = []
+    for match in matches:
+        enriched = dict(match)
+        hint = device_hints.get(str(match.get("name", "")))
+        if hint:
+            enriched.update(hint)
+        enriched_matches.append(enriched)
+    normalized_query = normalize_tool_search_query(query or "")
+    discovered_tool_names = sorted({str(match["name"]) for match in enriched_matches})
+    await add_session_callable_tools(ctx.session_id, discovered_tool_names)
+    if ctx.event_publish_callback:
+        await ctx.event_publish_callback("runtime.tool_discovery", {
+            "sessionID": ctx.session_id,
+            "query": query or "",
+            "normalizedQuery": normalized_query,
+            "category": category,
+            "returnedToolCount": len(matches),
+            "discoveredToolCount": len(discovered_tool_names),
+            "discoveredToolNames": discovered_tool_names,
+            # Legacy aliases retained for existing consumers.
+            "callableToolCount": len(discovered_tool_names),
+            "callableToolNames": discovered_tool_names,
+            "matchedTags": matched_tags,
+            "deviceAwareToolCount": len(device_hints),
+        })
+
+    return ToolResult(
+        success=True,
+        output={
+            "query": query or "",
+            "normalizedQuery": normalized_query,
+            "category": category,
+            "count": len(matches),
+            "matchedTags": matched_tags,
+            "callableToolNames": discovered_tool_names,
+            "callableToolCount": len(discovered_tool_names),
+            "deviceAwareToolCount": len(device_hints),
+            # Legacy compatibility keys.
+            "discoveredToolNames": discovered_tool_names,
+            "discoveredToolCount": len(discovered_tool_names),
+            "matches": enriched_matches,
+        },
+    )

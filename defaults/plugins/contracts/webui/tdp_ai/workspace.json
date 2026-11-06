@@ -1,0 +1,34 @@
+{
+  "id": "tdp_ai",
+  "version": "1.0.0",
+  "title": "TDP AI 研判",
+  "icon": "ShieldCheck",
+  "order": 10,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "ai",
+  "sections": [
+    {
+      "id": "production",
+      "label": "AI 研判",
+      "pageIds": [
+        "ai"
+      ],
+      "defaultPageId": "ai",
+      "contentPadding": "none",
+      "flat": true,
+      "icon": "ShieldCheck"
+    },
+    {
+      "id": "demo",
+      "label": "演示环境",
+      "pageIds": [
+        "ai-demo"
+      ],
+      "defaultPageId": "ai-demo",
+      "contentPadding": "none",
+      "flat": true,
+      "icon": "FlaskConical"
+    }
+  ]
+}

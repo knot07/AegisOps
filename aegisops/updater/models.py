@@ -1,0 +1,60 @@
+"""
+Updater data models
+"""
+
+from typing import Literal
+from pydantic import BaseModel
+
+from aegisops.updater.deploy import DeployMode
+
+UpdateStage = Literal[
+    "checking",
+    "reporting",
+    "fetching",
+    "backing_up",
+    "applying",
+    "syncing",
+    "downgrading",
+    "restarting",
+    "done",
+    "error",
+]
+
+
+class VersionInfo(BaseModel):
+    current_version: str
+    latest_version: str | None = None
+    # A release an extension's update channel ships can carry the core and a
+    # component of its own, each versioned apart from the release itself.
+    current_core_version: str | None = None
+    latest_core_version: str | None = None
+    current_bundle_version: str | None = None
+    latest_bundle_version: str | None = None
+    current_component_version: str | None = None
+    latest_component_version: str | None = None
+    # ``aegisops`` is this project's own releases; anything else is an update
+    # channel an extension registered (aegisops.updater.channels).
+    channel: str = "aegisops"
+    has_update: bool = False
+    release_notes: str | None = None
+    release_url: str | None = None
+    zipball_url: str | None = None
+    tarball_url: str | None = None
+    bundle_sha256: str | None = None
+    bundle_format: Literal["zip", "tar.gz"] | None = None
+    error: str | None = None
+    deploy_mode: DeployMode = "source"
+    update_allowed: bool = True
+
+
+class UpdateProgress(BaseModel):
+    stage: UpdateStage
+    message: str
+    success: bool | None = None
+    bundle_filename: str | None = None
+    component_filename: str | None = None
+    downloaded_bytes: int | None = None
+    total_bytes: int | None = None
+    percent: int | None = None
+    # Restart stage only: lets the upgrade dialog read error details from the handoff.
+    progress_token: str | None = None

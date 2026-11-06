@@ -1,0 +1,126 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>御枢 · AegisOps 部署与操作手册</title><style>body{margin:0;background:#f5f7f8;color:#27352f;font:16px/1.8 system-ui,"Microsoft YaHei",sans-serif}main{max-width:960px;margin:32px auto;background:white;padding:40px;border-radius:16px}h1,h2,h3{color:#177c59;line-height:1.4}h2{margin-top:40px;border-bottom:1px solid #e0ebe5;padding-bottom:10px}pre{overflow:auto;background:#eef5f1;padding:18px;border-radius:8px;font-size:14px}code{font-family:Consolas,monospace}table{border-collapse:collapse;width:100%;font-size:14px}td,th{padding:12px;border:1px solid #dce7e0;text-align:left}a{color:#177c59}@media(max-width:640px){main{margin:0;padding:20px;border-radius:0}table{display:block;overflow:auto}}@media print{main{margin:0;max-width:none;padding:0}body{background:white}pre{white-space:pre-wrap}}</style><main><h1>御枢 · AegisOps 部署与操作手册</h1>
+<p>版本：2026.11.06 · 干净部署版</p>
+<h2>1. 交付内容</h2>
+<p>包含主系统源码、已构建的 Web 界面、插件广场本地目录、告警研判与漏洞运营两个场景、研判工作流以及部署脚本。包含普通调度与实验性的 Super-agent 调度，可在对话输入区切换。</p>
+<p>不包含当前环境的用户账号、密码、会话、漏洞、资产、业务数据库、模型密钥、设备凭据、定时任务及私有 MCP 连接。首次使用需创建管理员并配置模型和业务连接。原有设备地址不会自动迁移。</p>
+<p>这是源码部署包，首次安装需要联网下载 Python、npm 依赖及基础镜像，并非离线镜像包。模型服务、设备和外部系统的可用性取决于新环境的网络及凭据。</p>
+<h2>2. 环境与部署方式</h2>
+<p>推荐在 Linux 上使用 Docker Engine 与 Compose v2；Windows 使用 Docker Desktop 的 Linux 容器模式，或在 WSL2 Ubuntu 内原生部署。原生部署要求 Python 3.12、venv、Node.js 22、npm、Git。建议至少 4 核 CPU、8 GB 内存和 10 GB 可用磁盘；大模型服务另行提供。</p>
+<p>解压后进入包含 <code>compose.yaml</code> 的 <code>AegisOps</code> 目录。所有后续命令均在该目录执行。</p>
+<h3>2.1 Docker Compose</h3>
+<pre><code class="language-sh">docker compose up -d --build
+docker compose logs -f --tail=100
+</code></pre>
+<p>访问 <code>http://127.0.0.1:5200</code>。默认只向本机开放，在本机完成管理员创建后再开放局域网。</p>
+<p>局域网部署可在 <code>compose.yaml</code> 同目录新建 <code>.env</code>：</p>
+<pre><code class="language-ini">AEGISOPS_BIND_ADDRESS=0.0.0.0
+AEGISOPS_PORT=5200
+</code></pre>
+<p>然后执行 <code>docker compose up -d</code>，其他终端访问 <code>http://服务器IP:5200</code>。如端口被占用，可把 <code>AEGISOPS_PORT</code> 改为其他空闲端口。服务器防火墙需要允许对应端口；公网访问应在反向代理层配置 HTTPS。</p>
+<pre><code class="language-sh">docker compose ps
+docker compose restart
+docker compose down
+</code></pre>
+<p>业务数据保存在命名卷 <code>aegisops-data</code> 中，实际卷名通常带 Compose 项目前缀。<code>docker compose down</code> 保留数据；不要使用 <code>down -v</code>，后者会删除数据卷。变更部署目录名时注意 Compose 项目名也可能变化，应明确复用原来的卷。</p>
+<h3>2.2 Linux / WSL 原生部署</h3>
+<p>Ubuntu 需先准备 Python 3.12 和 venv、Node.js 22、npm、Git。根据系统版本安装对应软件；不要用系统中其他 Python 主次版本代替 3.12。</p>
+<pre><code class="language-sh">bash install.sh
+.venv/bin/python run.py --host 127.0.0.1 --port 5200
+</code></pre>
+<p>前台启动后保持终端运行，按 Ctrl+C 停止。需要局域网访问时使用 <code>--host 0.0.0.0</code>。数据目录默认为项目内 <code>runtime/</code>；也可指定独立目录：</p>
+<pre><code class="language-sh">.venv/bin/python run.py --host 0.0.0.0 --port 5200 --data-dir /srv/aegisops-data
+</code></pre>
+<p>WSL 建议解压到 Linux 文件系统，例如 <code>~/apps/AegisOps</code>，避免在 Windows 挂载盘上运行大量依赖文件。常驻服务可由 systemd 管理，工作目录设为项目绝对路径，启动命令使用 <code>.venv/bin/python</code> 和 <code>run.py</code> 的绝对路径，并固定 <code>--data-dir</code>。使用同一个普通用户安装和启动，确保数据目录可写。</p>
+<h2>3. 首次初始化</h2>
+<ol>
+<li>打开首页，按照初始化页创建管理员。没有预置账号或默认密码。</li>
+<li>登录后进入模型清单，填写服务提供商、接口地址、API Key 和模型标识，保存并测试连接。配置一个可用默认模型后再发起 AI 对话。</li>
+<li>在账号管理中新增用户，设置系统角色，并配置漏洞运营访问权限和业务角色。新增账号可直接通过主系统登录。</li>
+<li>打开场景管理，确认告警研判、漏洞运营均可切换。首次启动时页面编译可能稍慢，等待日志中的构建完成后刷新。</li>
+<li>在告警研判场景配置目标设备连接信息，并在工作流中核对 <code>datang-tdp-fixed-review</code>。工作流已随包提供，但设备连接和模型参数需要在新环境重新配置。</li>
+</ol>
+<p>初始化管理员后再开放远程访问，避免未初始化实例被他人先行注册。业务权限在主系统账号管理中维护。</p>
+<h2>4. 日常操作</h2>
+<h3>4.1 首页与功能切换</h3>
+<p>首页展示趋势及业务概览，左侧导航切换各大模块。场景内的业务页通过顶部标签切换，运营总览作为统一入口。导航顶部的小图标可以折叠或展开侧栏。</p>
+<h3>4.2 对话与调度</h3>
+<p>进入对话，选择模型、Agent 及调度模式，输入任务后发送。普通调度适合日常使用；Super-agent 处于实验阶段，建议先用范围明确的小任务验证效果。切换模式后按输入区当前显示的模式发起任务。</p>
+<p>历史会话在对话区域内访问，菜单提供会话相关操作。工作目录、知识库、记忆可用于补充上下文；上传内容前检查所属目录和权限。实际模型调用消耗由配置的服务商计费。</p>
+<h3>4.3 任务中心与工作流</h3>
+<p>在任务中心创建和查看任务；在工作流中查看已安装流程，创建或编辑步骤、参数及工具依赖。预览已有流程后再运行。研判工作流依赖可用模型和设备连接，缺少连接时先配置再重试。</p>
+<h3>4.4 插件广场与场景管理</h3>
+<p>插件广场按类别和搜索条件查找资源，查看依赖后安装。告警运营套件和漏洞运营资源均在统一插件体系中。两个场景可在场景管理中切换，业务页面使用各自顶部标签导航。安装其他插件时只使用可信来源。</p>
+<h3>4.5 告警研判与漏洞写入</h3>
+<p>在告警研判场景查看告警与研判结果。人工确认攻击成功后，点击写入漏洞运营的操作按钮，由 AI 提取告警中的漏洞信息并提交到漏洞运营系统。此操作需要已配置模型、访问权限及有效告警内容。</p>
+<p>等待完成提示后进入漏洞运营核对生成的漏洞名称、资产、风险级别和描述；信息不完整时按业务事实补充。失败时检查模型连接及系统日志后再操作，重试前先确认是否已生成记录，避免重复录入。</p>
+<h3>4.6 漏洞运营与资产目录</h3>
+<p>通过顶部标签访问运营总览、漏洞及资产等页面。资产支持按名称、地址、部门搜索，支持编辑与删除。删除前核对目标资产；已关联漏洞的资产会被保护，需先处理关联关系。漏洞流转操作以当前角色及页面可用按钮为准。</p>
+<h3>4.7 用户与权限</h3>
+<p>主系统账号管理统一新增用户及维护漏洞运营权限，不再在场景内部重复管理成员。系统角色与漏洞运营业务角色分别控制主系统管理能力和场景内的数据操作范围。创建普通成员后，建议使用独立浏览器会话验证登录和业务访问。</p>
+<h3>4.8 模型、偏好设置与日志</h3>
+<p>模型清单统一管理模型配置及用量信息；偏好设置调整个人体验。发生调用、插件构建或权限问题时先查看系统日志，再查看服务进程日志。导出日志前检查是否含业务内容或连接信息。</p>
+<h3>4.9 消息渠道接入</h3>
+<p>企业微信：创建支持长连接的智能机器人，取得 Bot ID、Secret，填入对应渠道设置，绑定可用 Agent，保存后测试收发。</p>
+<p>飞书：在开放平台创建企业自建应用，启用机器人能力，填写 App ID、App Secret，按渠道设置选择长连接，订阅机器人消息事件并开通所需消息权限；发布应用并配置可用范围后测试。</p>
+<p>钉钉：创建企业内部应用并启用机器人和 Stream 模式，按渠道表单填写客户端凭据，配置应用可见范围与所需权限，保存后测试收发。</p>
+<p>各平台管理后台名称和权限要求可能调整，以平台当前说明及系统表单为准。接入时先进行一条简单消息的端到端测试，再绑定复杂业务流程。旧截图式 PDF 已删除，渠道教程入口统一提供本手册。</p>
+<h2>5. 数据保存、备份与迁移</h2>
+<p>运行数据根目录包含 <code>config/</code>、<code>data/</code>、<code>workspace/</code>、<code>plugins/</code> 等子目录。配置和凭据可能使用本地密钥保护，因此备份应覆盖整个数据根目录，包括隐藏文件，不要只复制单个数据库。</p>
+<p>原生部署：停止进程后备份整个 <code>--data-dir</code> 目录；恢复时停止新实例，将完整备份放回数据目录并恢复目录权限，再使用同一版本启动。</p>
+<p>Docker：执行 <code>docker compose stop</code> 后，用 <code>docker volume ls</code> 和 <code>docker volume inspect 实际卷名</code> 确认卷；完整备份该卷，再执行 <code>docker compose start</code>。恢复到新机器时先停止目标服务并恢复卷内容，保持 UID 10001 可写，再启动。备份文件应限制访问。</p>
+<p>升级前同时保存旧版本程序包与数据备份。回滚时恢复配套版本和备份，避免让旧程序直接读取经过新版迁移的数据。首次迁移先在独立端口验证，再切换正式入口。</p>
+<h2>6. 常见问题</h2>
+<table>
+<thead>
+<tr>
+<th>现象</th>
+<th>处理方式</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>页面打不开</td>
+<td>检查服务日志、5200 端口、容器状态及防火墙；本机执行 <code>curl http://127.0.0.1:5200/api/health</code></td>
+</tr>
+<tr>
+<td>局域网无法访问</td>
+<td>Docker 检查 <code>.env</code> 绑定地址；原生检查 <code>--host 0.0.0.0</code>，并确认主机防火墙</td>
+</tr>
+<tr>
+<td>首页出现管理员初始化</td>
+<td>新数据目录尚未初始化；若已有数据，核对数据卷、项目名和 <code>--data-dir</code> 是否指向正确位置</td>
+</tr>
+<tr>
+<td>AI 无法回答</td>
+<td>检查模型配置、Key、余额、模型名称及服务端网络；干净包不包含任何可用密钥</td>
+</tr>
+<tr>
+<td>场景页面构建失败</td>
+<td>确认 Node/npm 可用、<code>webui/node_modules</code> 完整；重新运行 <code>npm ci --include=dev</code> 后重启服务，查看构建日志</td>
+</tr>
+<tr>
+<td>看不到某场景或功能</td>
+<td>核对用户访问权限；首次启动等待场景构建完成后刷新</td>
+</tr>
+<tr>
+<td>研判工作流无法执行</td>
+<td>核对设备连接、模型和工具权限；工作流模板不等于已配置设备</td>
+</tr>
+<tr>
+<td>资产无法删除</td>
+<td>检查权限与关联漏洞提示，处理关联后再试</td>
+</tr>
+<tr>
+<td>重启后像全新系统</td>
+<td>通常是数据目录或 Compose 卷变化，停止服务并确认原数据位置后恢复挂载</td>
+</tr>
+<tr>
+<td>安装依赖失败</td>
+<td>检查联网、软件源、Python 3.12 和 Node 22；保留首次失败的安装日志定位</td>
+</tr>
+</tbody>
+</table>
+<h2>7. 本次交付验证范围</h2>
+<p>已完成重命名后的前端生产构建、独立空数据目录启动、首次创建管理员与登录、健康检查、用户和权限接口、空会话及资产数据、两个场景页面构建、研判工作流加载；账号初始化和调度相关测试共 20 项通过。</p>
+<p>原生验证复用了本机已有依赖库，未执行从公网完整下载所有依赖的安装测试。本机 Docker 守护进程未启动，因此 Dockerfile 和 Compose 为交付配置，尚未完成镜像构建及容器启动实测。新环境需按本手册完成部署验收。</p>
+<p>验收建议：确认健康接口正常 → 创建管理员 → 配置模型 → 新增普通用户并登录 → 切换两个场景 → 用一条测试告警验证研判与写入 → 创建、编辑、删除一条无关联的测试资产 → 重启并确认数据保留。</p></main></html>

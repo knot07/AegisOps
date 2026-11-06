@@ -1,0 +1,815 @@
+"""
+Unified plugin loading system for AegisOps.
+
+Each subsystem (Agent, Tool, Hook, ...) registers an **ExtensionPoint** that
+declares:
+- which module-level attribute to look for (e.g. ``AGENTS``, ``TOOLS``),
+- which subdirectory under ``~/.aegisops/plugins/`` to scan,
+- how to validate items and detect duplicates,
+- a *consumer* callback that receives the validated items.
+
+``PluginLoader.load_all()`` loads every registered extension point.
+``PluginLoader.load_extension("TOOLS")`` loads one registered extension point
+with the same filesystem scanning rules. For every loaded extension point it
+scans the corresponding subdirectory, loads each ``.py`` module, extracts and
+validates the attribute, then hands the items to the consumer.
+
+Safety guarantees
+-----------------
+- A single module failure is logged and skipped.
+- A single extension-point failure inside a module is logged and skipped.
+- Duplicate items (by *dedup_key*) are resolved first-wins.
+"""
+
+from __future__ import annotations
+
+import importlib
+import importlib.metadata
+import importlib.util
+import inspect
+from dataclasses import dataclass, field
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Callable, Dict, List, Optional, Set, FrozenSet
+
+import yaml
+
+from aegisops.config.config import get_user_plugins_root
+from aegisops.utils.log import Log
+
+log = Log.create(service="plugin")
+
+# Resolved once at import for backward compatibility; call-time readers use
+# ``get_user_plugins_root()`` so a ``AEGISOPS_ROOT`` override is always honored.
+DEFAULT_PLUGIN_ROOT = get_user_plugins_root()
+_PLUGIN_ENTRYPOINT_GROUP = "aegisops.plugins"
+_CRITICAL_PLUGIN_ENTRYPOINT_GROUP = "aegisops.plugins.critical"
+
+
+class CriticalPluginEntrypointFailure(RuntimeError):
+    """Marker an entrypoint may raise when required initialization fails.
+
+    The loader does not attach policy meaning to this marker.  It merely
+    reports it separately from ordinary, isolated plugin-load warnings so a
+    host can decide whether serving is safe for its own runtime.
+    """
+
+
+@dataclass
+class PluginLoadResult:
+    """Outcome of a generic plugin-loading pass."""
+
+    critical_entrypoint_failures: List[str] = field(default_factory=list)
+
+    @property
+    def has_critical_entrypoint_failure(self) -> bool:
+        return bool(self.critical_entrypoint_failures)
+
+
+# ---------------------------------------------------------------------------
+# Low-level helpers (extracted from agent/plugin_loader.py)
+# ---------------------------------------------------------------------------
+
+
+_SUPPORTED_EXTENSIONS = {".py", ".yaml", ".yml"}
+
+
+def scan_directory(
+    directory: Path,
+    *,
+    recursive: bool = False,
+    max_depth: int = 1,
+    exclude_subdirs: Optional[Set[str]] = None,
+) -> List[str]:
+    """Return absolute paths of all plugin files in *directory*.
+
+    Supports ``.py``, ``.yaml``, and ``.yml`` files.
+    Skips files whose name starts with ``_`` (e.g. ``__init__.py``,
+    ``_provider.yaml``).
+
+    When *recursive* is True, scans subdirectories up to *max_depth* levels
+    deep.  ``max_depth=1`` (default) replicates the original one-level
+    behaviour; ``max_depth=2`` also descends into provider sub-subdirectories::
+
+        tools/
+        ├── standalone.yaml               # depth 0
+        ├── api/                          # depth 1 subdir
+        │   ├── tool.yaml                 # depth 1
+        │   └── threatbook/               # depth 2 subdir
+        │       ├── _provider.yaml        # skipped (starts with _)
+        │       └── ip_query.yaml         # depth 2
+        └── mcp/                          # excluded via *exclude_subdirs*
+
+    *exclude_subdirs* names directories at depth-1 that should be skipped
+    entirely (e.g. ``{"mcp", "generated"}``).
+    """
+    if not directory.is_dir():
+        return []
+
+    exclude = exclude_subdirs or set()
+    results: List[str] = []
+    _scan_recursive(directory, results, depth=0, max_depth=max_depth if recursive else 0, exclude=exclude)
+    return sorted(results)
+
+
+def _scan_recursive(
+    directory: Path,
+    results: List[str],
+    depth: int,
+    max_depth: int,
+    exclude: Set[str],
+) -> None:
+    """Recursively collect plugin files up to *max_depth* levels."""
+    for item in directory.iterdir():
+        if item.is_file() and item.suffix in _SUPPORTED_EXTENSIONS and not item.name.startswith("_"):
+            results.append(str(item))
+        elif (
+            depth < max_depth
+            and item.is_dir()
+            and not item.name.startswith("_")
+            and (depth > 0 or item.name not in exclude)
+        ):
+            _scan_recursive(item, results, depth + 1, max_depth, exclude)
+
+
+def load_module(source: str, base_dir: Path) -> ModuleType:
+    """Import a Python module from a filesystem path or package path.
+
+    Supported formats::
+
+        "./plugins/my_agent.py"          # relative to *base_dir*
+        "/opt/agents/foo.py"             # absolute
+        "mycompany.threat_intel_agents"  # installed package
+    """
+    is_file = source.startswith("./") or source.startswith("/") or source.endswith(".py")
+    if is_file:
+        path = Path(source) if Path(source).is_absolute() else base_dir / source
+        spec = importlib.util.spec_from_file_location(
+            f"_aegisops_plugin_{path.stem}",
+            str(path),
+        )
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Cannot create import spec for {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    return importlib.import_module(source)
+
+
+def _error_source_path(source: str, base_dir: Path) -> str:
+    """Absolute path (or package name) used to attribute a load error to its source.
+
+    ``ToolRegistry.refresh_plugin_tools`` scopes failures by comparing this
+    prefix with the changed path, so file sources must be absolute.
+    """
+    candidate = Path(source)
+    if source.startswith("./") or source.startswith("/") or source.endswith((".py", ".yaml", ".yml")):
+        if not candidate.is_absolute():
+            candidate = base_dir / candidate
+        try:
+            return str(candidate.resolve())
+        except OSError:
+            return str(candidate.absolute())
+    return source
+
+
+# ---------------------------------------------------------------------------
+# ExtensionPoint & PluginLoader
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class ExtensionPoint:
+    """Describes one type of contribution a plugin module can make."""
+
+    attr_name: str
+    """Module-level attribute to look for, e.g. ``"AGENTS"``."""
+
+    subdir: str
+    """Subdirectory under the plugin root, e.g. ``"agents"``."""
+
+    consumer: Callable[[List[Any], str], None]
+    """Callback ``(items, source_path) -> None`` that receives validated items."""
+
+    item_type: Optional[type] = None
+    """If set, only items that are ``isinstance(item, item_type)`` are kept."""
+
+    dedup_key: Optional[Callable[[Any], str]] = None
+    """If set, used to deduplicate items (first wins)."""
+
+    yaml_item_factory: Optional[Callable[[dict, Path], Any]] = None
+    """Optional factory ``(raw_dict, yaml_path) -> item`` for YAML config files.
+    When set, ``.yaml``/``.yml`` files in the plugin subdirectory are loaded
+    and each document is converted via this factory instead of Python import."""
+
+    recursive: bool = False
+    """When True, ``scan_directory`` also scans subdirectories for plugin
+    files.  Depth is controlled by *max_depth*."""
+
+    max_depth: int = 1
+    """Maximum subdirectory depth when *recursive* is True.
+    ``1`` = one level (original behaviour); ``2`` = provider sub-subdirs."""
+
+    exclude_subdirs: Optional[FrozenSet[str]] = None
+    """Directory names at depth-1 to skip during scanning.
+    E.g. ``frozenset({"mcp", "generated"})`` — these are managed by
+    dedicated subsystems rather than the generic PluginLoader."""
+
+    load_once: bool = False
+    """When True, skip later ``load_all`` passes after this extension has loaded.
+
+    Stateful extension points, such as channels, own runtime connections and
+    callbacks on their plugin instances. Re-importing those modules can create
+    replacement instances that have not been started.
+    """
+
+    _seen_keys: Set[str] = field(default_factory=set, repr=False)
+    _loaded: bool = field(default=False, repr=False)
+
+
+class PluginLoader:
+    """Unified plugin loader with extension-point dispatch."""
+
+    _extension_points: Dict[str, ExtensionPoint] = {}
+    _plugin_root: Path = DEFAULT_PLUGIN_ROOT
+    _runtime_critical_entrypoint_failure = False
+    # Source-level failures of the most recent scoped load, reported back to the
+    # caller of ``load_extension`` (``<absolute source path>: <error>`` for plugin
+    # files, ``entry point <name>: <error>`` / ``entry point scan: <error>`` for
+    # installed packages, ``extension point not found: <attr>``).  Logging alone
+    # left ``ToolRegistry.refresh_plugin_tools`` reporting success for broken files.
+    _last_load_errors: List[str] = []
+
+    # ------------------------------------------------------------------
+    # Extension-point registration
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def register_extension_point(cls, ext: ExtensionPoint) -> None:
+        """Register an extension point (idempotent — last registration wins)."""
+        cls._extension_points[ext.attr_name] = ext
+        log.debug(
+            "plugin.ext_point.registered",
+            {
+                "attr": ext.attr_name,
+                "subdir": ext.subdir,
+            },
+        )
+
+    @classmethod
+    def clear_extension_points(cls) -> None:
+        """Reset all extension points (useful for testing)."""
+        cls._extension_points.clear()
+
+    @classmethod
+    def _record_load_error(cls, source: object, error: object) -> None:
+        if isinstance(error, BaseException):
+            error = f"{type(error).__name__}: {error}"
+        cls._last_load_errors.append(f"{source}: {error}")
+
+    @classmethod
+    def _record_consumer_errors(cls, error_source: str, returned: Any) -> None:
+        """Consumers may return a list of error strings for items they rejected."""
+        if isinstance(returned, (list, tuple)):
+            for item in returned:
+                if isinstance(item, str) and item:
+                    cls._record_load_error(error_source, item)
+
+    @classmethod
+    def has_runtime_critical_entrypoint_failure(cls) -> bool:
+        """Return whether the most recent full load found a critical failure."""
+        return cls._runtime_critical_entrypoint_failure
+
+    @classmethod
+    def clear_runtime_critical_entrypoint_failure(cls) -> None:
+        """Clear the generic runtime failure signal before an explicit reload."""
+        cls._runtime_critical_entrypoint_failure = False
+
+    @classmethod
+    def critical_entrypoints_declared(cls) -> bool:
+        """Return whether an installed package opted into fail-closed startup.
+
+        Unreadable package metadata counts as declared: it could hide one.
+        """
+        try:
+            return bool(tuple(importlib.metadata.entry_points().select(
+                group=_CRITICAL_PLUGIN_ENTRYPOINT_GROUP,
+            )))
+        except Exception:
+            return True
+
+    @classmethod
+    def interruption_is_critical(cls, error: BaseException) -> bool:
+        """Return whether an interrupted load pass must fail closed.
+
+        An explicit :class:`CriticalPluginEntrypointFailure` always does. Any
+        other interruption does only when an installed package declared a
+        critical entrypoint; without one there are no required guards to miss.
+        """
+        return isinstance(error, CriticalPluginEntrypointFailure) or cls.critical_entrypoints_declared()
+
+    @classmethod
+    def _publish_pass_outcome(
+        cls, result: PluginLoadResult | None, error: BaseException | None,
+    ) -> None:
+        """Update the runtime failure signal once an entrypoint pass has ended."""
+        if error is None and result is not None:
+            cls._runtime_critical_entrypoint_failure = result.has_critical_entrypoint_failure
+        elif error is not None and cls.interruption_is_critical(error):
+            cls._runtime_critical_entrypoint_failure = True
+        # Otherwise keep the verdict of the last completed pass: an interrupted
+        # pass proves nothing either way.
+
+    # ------------------------------------------------------------------
+    # Loading
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def load_all(
+        cls,
+        extra_sources: Optional[List[str]] = None,
+        project_dir: Optional[Path] = None,
+    ) -> PluginLoadResult:
+        """Unified loading entry point.
+
+        For each registered extension point:
+        1. Scan ``~/.aegisops/plugins/{ext.subdir}/`` for ``.py`` files.
+        2. Scan ``<project_dir>/.aegisops/plugins/{ext.subdir}/`` for project-level plugins.
+        3. Load *extra_sources* (from ``cfg.plugin``) and check for the attribute.
+        4. Validate, dedup, and dispatch to the consumer.
+        """
+        project_dir = project_dir or Path.cwd()
+        result = PluginLoadResult()
+        # The failure signal changes only when a pass ends, never while one is
+        # running: reloads (tool warm-up, Hub installs) run in worker threads
+        # while the server keeps handling requests under the previously loaded
+        # guards. An interrupted pass that must fail closed (see
+        # interruption_is_critical) sets the signal; only a completed pass
+        # clears it.
+        try:
+            for ext in tuple(cls._extension_points.values()):
+                cls._load_extension_point(
+                    ext,
+                    extra_sources=extra_sources,
+                    project_dir=project_dir,
+                    log_scope="load_all",
+                )
+
+                if ext.load_once:
+                    ext._loaded = True
+
+            # 4. Installed package entry-points
+            cls._load_entry_points(result)
+        except BaseException as exc:
+            cls._publish_pass_outcome(None, exc)
+            raise
+        cls._publish_pass_outcome(result, None)
+        return result
+
+    @classmethod
+    def load_extension(
+        cls,
+        attr_name: str,
+        extra_sources: Optional[List[str]] = None,
+        project_dir: Optional[Path] = None,
+        *,
+        load_entry_points: bool = False,
+    ) -> List[str]:
+        """Load one registered extension point using normal plugin scan rules.
+
+        This is the scoped counterpart to :meth:`load_all`. It scans the same
+        user-level, project-level, and explicit ``cfg.plugin`` sources, but only
+        dispatches the requested attribute (for example ``"TOOLS"``).
+
+        Set ``load_entry_points`` only for compatibility paths that still need
+        legacy package plugins from the global ``aegisops.plugins`` entry-point
+        group.
+
+        Returns the source-level load errors of this pass (empty when every
+        source loaded) so callers such as ``ToolRegistry.refresh_plugin_tools``
+        can report partial refreshes instead of silently succeeding.
+        """
+        ext = cls._extension_points.get(attr_name)
+        if ext is None:
+            log.warn("plugin.ext_point.not_found", {"attr": attr_name})
+            cls._last_load_errors = [f"extension point not found: {attr_name}"]
+            return list(cls._last_load_errors)
+
+        # Same signal contract as load_all() for a pass that loads entrypoints.
+        result = None
+        try:
+            cls._load_extension_point(
+                ext,
+                extra_sources=extra_sources,
+                project_dir=project_dir or Path.cwd(),
+                log_scope="load_extension",
+            )
+            if load_entry_points:
+                result = cls._load_entry_points()
+        except BaseException as exc:
+            if load_entry_points:
+                cls._publish_pass_outcome(None, exc)
+            raise
+        if load_entry_points:
+            cls._publish_pass_outcome(result, None)
+        return list(cls._last_load_errors)
+
+    @classmethod
+    def load_for_extension(
+        cls,
+        attr_name: str,
+        sources: List[str],
+        base_dir: Path,
+    ) -> List[Any]:
+        """Load plugins for a single extension point and return collected items.
+
+        Convenience wrapper used by backward-compatible shims.
+        """
+        ext = cls._extension_points.get(attr_name)
+        if ext is None:
+            log.warn("plugin.ext_point.not_found", {"attr": attr_name})
+            return []
+
+        collected: List[Any] = []
+        original_consumer = ext.consumer
+
+        def _collecting_consumer(items: List[Any], source: str) -> None:
+            collected.extend(items)
+            original_consumer(items, source)
+
+        ext.consumer = _collecting_consumer
+        ext._seen_keys = set()
+        try:
+            cls._load_sources_for_ext(ext, sources, base_dir)
+            if ext.load_once and sources:
+                ext._loaded = True
+        finally:
+            ext.consumer = original_consumer
+        return collected
+
+    @classmethod
+    def load_default_for_extension(cls, attr_name: str) -> List[Any]:
+        """Load plugins from the default subdirectory for one extension point."""
+        ext = cls._extension_points.get(attr_name)
+        if ext is None:
+            log.warn("plugin.ext_point.not_found", {"attr": attr_name})
+            return []
+
+        subdir_path = cls._plugin_root / ext.subdir
+        sources = scan_directory(
+            subdir_path,
+            recursive=ext.recursive,
+            max_depth=ext.max_depth,
+            exclude_subdirs=ext.exclude_subdirs,
+        )
+        if not sources:
+            return []
+
+        log.debug(
+            "plugin.default_dir.scan",
+            {
+                "subdir": ext.subdir,
+                "files": [Path(s).name for s in sources],
+            },
+        )
+        return cls.load_for_extension(attr_name, sources, subdir_path)
+
+    # ------------------------------------------------------------------
+    # Internal
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def _load_extension_point(
+        cls,
+        ext: ExtensionPoint,
+        *,
+        extra_sources: Optional[List[str]],
+        project_dir: Path,
+        log_scope: str,
+    ) -> None:
+        """Scan and load one registered extension point."""
+        # Fresh error list per pass; a load_once skip must not replay stale errors.
+        cls._last_load_errors = []
+        if ext.load_once and ext._loaded:
+            log.debug(
+                f"plugin.{log_scope}.skip_load_once",
+                {
+                    "attr": ext.attr_name,
+                },
+            )
+            return
+
+        ext._seen_keys = set()
+        project_plugin_root = project_dir / ".aegisops" / "plugins"
+
+        # 1. User-level plugin subdirectory (~/.aegisops/plugins/{subdir}/)
+        subdir_path = cls._plugin_root / ext.subdir
+        default_sources = scan_directory(
+            subdir_path,
+            recursive=ext.recursive,
+            max_depth=ext.max_depth,
+            exclude_subdirs=ext.exclude_subdirs,
+        )
+        if default_sources:
+            log.debug(
+                "plugin.scan",
+                {
+                    "subdir": ext.subdir,
+                    "files": [Path(s).name for s in default_sources],
+                },
+            )
+        cls._load_sources_for_ext(ext, default_sources, subdir_path)
+
+        # 2. Project-level plugin subdirectory (<project>/.aegisops/plugins/{subdir}/)
+        project_subdir_path = project_plugin_root / ext.subdir
+        if project_subdir_path != subdir_path and project_subdir_path.is_dir():
+            project_sources = scan_directory(
+                project_subdir_path,
+                recursive=ext.recursive,
+                max_depth=ext.max_depth,
+                exclude_subdirs=ext.exclude_subdirs,
+            )
+            if project_sources:
+                log.debug(
+                    "plugin.project.scan",
+                    {
+                        "subdir": ext.subdir,
+                        "project_dir": str(project_dir),
+                        "files": [Path(s).name for s in project_sources],
+                    },
+                )
+                cls._load_sources_for_ext(ext, project_sources, project_subdir_path)
+
+        # 3. Explicit sources from cfg.plugin
+        if extra_sources:
+            cls._load_sources_for_ext(ext, extra_sources, project_dir)
+
+        if ext.load_once:
+            ext._loaded = True
+
+    @classmethod
+    def _load_entry_points(cls, result: PluginLoadResult | None = None) -> PluginLoadResult:
+        """
+        Load installed package entry-points.
+
+        Entry-point target is expected to be callable, supporting either:
+        - ``fn(loader_cls)``, or
+        - ``fn()``.
+
+        Plugins opt into host-visible startup failure with the generic
+        ``aegisops.plugins.critical`` group. Core does not interpret a
+        plugin's product, license, or installation state.
+        """
+        result = result or PluginLoadResult()
+
+        def record_critical_failure(
+            name: str,
+            event: str,
+            context: Dict[str, Any],
+        ) -> None:
+            result.critical_entrypoint_failures.append(name)
+            log.error(event, context)
+
+        try:
+            entry_points = importlib.metadata.entry_points()
+        except Exception as e:
+            record_critical_failure(
+                "entrypoint_metadata_scan",
+                "plugin.entrypoints.scan_failed",
+                {"error": str(e)},
+            )
+            cls._record_load_error("entry point scan", e)
+            return result
+
+        for group, declared_critical in (
+            (_PLUGIN_ENTRYPOINT_GROUP, False),
+            (_CRITICAL_PLUGIN_ENTRYPOINT_GROUP, True),
+        ):
+            try:
+                eps = entry_points.select(group=group)
+            except Exception as exc:
+                if declared_critical:
+                    record_critical_failure(
+                        group,
+                        "plugin.entrypoint.critical_group_scan_failed",
+                        {"group": group, "error": str(exc)},
+                    )
+                else:
+                    log.warning(
+                        "plugin.entrypoint.group_scan_failed",
+                        {"group": group, "error": str(exc)},
+                    )
+                continue
+
+            for ep in eps:
+                try:
+                    target = ep.load()
+                except Exception as exc:
+                    if declared_critical or isinstance(exc, CriticalPluginEntrypointFailure):
+                        record_critical_failure(
+                            ep.name,
+                            "plugin.entrypoint.critical_load_failed",
+                            {"name": ep.name, "group": group, "error": str(exc)},
+                        )
+                    else:
+                        log.warning(
+                            "plugin.entrypoint.load_failed",
+                            {"name": ep.name, "error": str(exc)},
+                        )
+                    cls._record_load_error(f"entry point {ep.name}", exc)
+                    continue
+
+                if not callable(target):
+                    if declared_critical:
+                        record_critical_failure(
+                            ep.name,
+                            "plugin.entrypoint.critical_not_callable",
+                            {"name": ep.name, "group": group},
+                        )
+                    else:
+                        log.warning("plugin.entrypoint.not_callable", {"name": ep.name})
+                    cls._record_load_error(f"entry point {ep.name}", "target is not callable")
+                    continue
+
+                try:
+                    signature = inspect.signature(target)
+                    if len(signature.parameters) >= 1:
+                        target(cls)
+                    else:
+                        target()
+                    log.info("plugin.entrypoint.loaded", {"name": ep.name, "group": group})
+                except Exception as exc:
+                    if declared_critical or isinstance(exc, CriticalPluginEntrypointFailure):
+                        record_critical_failure(
+                            ep.name,
+                            "plugin.entrypoint.critical_invoke_failed",
+                            {"name": ep.name, "group": group, "error": str(exc)},
+                        )
+                    else:
+                        log.warning(
+                            "plugin.entrypoint.invoke_failed",
+                            {"name": ep.name, "error": str(exc)},
+                        )
+                    cls._record_load_error(f"entry point {ep.name}", exc)
+        return result
+
+    @classmethod
+    def _load_sources_for_ext(
+        cls,
+        ext: ExtensionPoint,
+        sources: List[str],
+        base_dir: Path,
+    ) -> None:
+        """Load each source module and dispatch matching items to *ext.consumer*."""
+        for source in sources:
+            source_path = Path(source)
+            if source_path.suffix in (".yaml", ".yml"):
+                cls._load_yaml_source(ext, source_path)
+                continue
+
+            try:
+                module = load_module(source, base_dir)
+            except BaseException as e:
+                log.error(
+                    "plugin.load_failed",
+                    {
+                        "source": source,
+                        "error": str(e),
+                        "type": type(e).__name__,
+                    },
+                )
+                cls._record_load_error(_error_source_path(source, base_dir), e)
+                continue
+
+            raw = getattr(module, ext.attr_name, None)
+            if raw is None:
+                continue
+
+            if not isinstance(raw, (list, tuple)):
+                log.warn(
+                    "plugin.attr_not_list",
+                    {
+                        "source": source,
+                        "attr": ext.attr_name,
+                    },
+                )
+                continue
+
+            error_source = _error_source_path(source, base_dir)
+            cls._dispatch_items(ext, list(raw), source, error_source)
+
+    @classmethod
+    def _load_yaml_source(cls, ext: ExtensionPoint, yaml_path: Path) -> None:
+        """Load a YAML config file and dispatch via the extension point's factory."""
+        if ext.yaml_item_factory is None:
+            log.warn(
+                "plugin.yaml_unsupported",
+                {
+                    "path": str(yaml_path),
+                    "attr": ext.attr_name,
+                    "hint": f"Extension point '{ext.attr_name}' has no yaml_item_factory; skipping YAML file",
+                },
+            )
+            return
+
+        try:
+            raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        except Exception as e:
+            log.error("plugin.yaml_parse_failed", {"path": str(yaml_path), "error": str(e)})
+            cls._record_load_error(_error_source_path(str(yaml_path), yaml_path.parent), e)
+            return
+
+        if not isinstance(raw, dict):
+            log.warn("plugin.yaml_invalid", {"path": str(yaml_path), "hint": "Expected a YAML mapping"})
+            cls._record_load_error(_error_source_path(str(yaml_path), yaml_path.parent), "Expected a YAML mapping")
+            return
+
+        try:
+            item = ext.yaml_item_factory(raw, yaml_path)
+        except Exception as e:
+            log.error("plugin.yaml_factory_failed", {"path": str(yaml_path), "error": str(e)})
+            cls._record_load_error(_error_source_path(str(yaml_path), yaml_path.parent), e)
+            return
+
+        error_source = _error_source_path(str(yaml_path), yaml_path.parent)
+        cls._dispatch_items(ext, [item], str(yaml_path), error_source, yaml_source=True)
+
+    @classmethod
+    def _dispatch_items(
+        cls, ext: ExtensionPoint, raw_items: List[Any], source: str, error_source: str,
+        *, yaml_source: bool = False,
+    ) -> None:
+        """Isolate one contribution without skipping later security entrypoints."""
+        try:
+            items = cls._validate_and_dedup(
+                ext, raw_items, source, error_source=error_source,
+            )
+            if items:
+                cls._record_consumer_errors(error_source, ext.consumer(items, source))
+                # One YAML file per item makes these dispatches high volume; keep
+                # them at debug level as before the dispatch path was shared.
+                emit, event = (
+                    (log.debug, "plugin.yaml_dispatched") if yaml_source
+                    else (log.info, "plugin.dispatched")
+                )
+                emit(event, {
+                    "source": source, "attr": ext.attr_name, "count": len(items),
+                })
+        except CriticalPluginEntrypointFailure:
+            raise
+        except Exception as exc:
+            cls._record_load_error(error_source, exc)
+            log.error("plugin.dispatch_failed", {
+                "source": source, "attr": ext.attr_name, "error": str(exc),
+            })
+
+    @classmethod
+    def _validate_and_dedup(
+        cls,
+        ext: ExtensionPoint,
+        raw_items: List[Any],
+        source: str,
+        *,
+        error_source: Optional[str] = None,
+    ) -> List[Any]:
+        """Type-check and deduplicate items for an extension point."""
+        if ext.item_type is not None:
+            valid = [it for it in raw_items if isinstance(it, ext.item_type)]
+            if len(valid) < len(raw_items):
+                invalid_count = len(raw_items) - len(valid)
+                log.warn(
+                    "plugin.invalid_entries",
+                    {
+                        "source": source,
+                        "attr": ext.attr_name,
+                        "expected_type": ext.item_type.__name__,
+                        "invalid_count": invalid_count,
+                    },
+                )
+                cls._record_load_error(
+                    error_source or source,
+                    f"{invalid_count} invalid {ext.attr_name} entries (expected {ext.item_type.__name__})",
+                )
+        else:
+            valid = raw_items
+
+        if ext.dedup_key is None:
+            return valid
+
+        result: List[Any] = []
+        for item in valid:
+            key = ext.dedup_key(item)
+            if key in ext._seen_keys:
+                log.warn(
+                    "plugin.duplicate",
+                    {
+                        "source": source,
+                        "attr": ext.attr_name,
+                        "key": key,
+                    },
+                )
+                continue
+            ext._seen_keys.add(key)
+            result.append(item)
+        return result

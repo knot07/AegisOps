@@ -1,0 +1,12 @@
+services:
+  aegisops:
+    build: .
+    image: aegisops:2026.11.06
+    ports:
+      - "${AEGISOPS_BIND_ADDRESS:-127.0.0.1}:${AEGISOPS_PORT:-5200}:5200"
+    volumes:
+      - aegisops-data:/var/lib/aegisops
+    restart: unless-stopped
+    stop_grace_period: 45s
+volumes:
+  aegisops-data:

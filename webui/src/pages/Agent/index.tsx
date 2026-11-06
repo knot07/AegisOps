@@ -1,0 +1,592 @@
+import { useState, useEffect, useMemo } from 'react';
+import { Bot, Plus, Cpu, Search, RefreshCw, Shield, Zap } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import PageHeader from '@/components/common/PageHeader';
+import ResourceOverview from '@/components/common/ResourceOverview';
+import LoadingSpinner from '@/components/common/LoadingSpinner';
+import EmptyState from '@/components/common/EmptyState';
+import { useToast } from '@/components/common/Toast';
+import PluginGroupButton from '@/components/plugin-groups/PluginGroupButton';
+import PluginCard, { PLUGIN_CARD_GRID_CLASS, PluginSourceTag } from '@/components/plugin-groups/PluginCard';
+import EnabledSwitch from '@/components/plugin-groups/EnabledSwitch';
+import { EnabledBadge } from '@/pages/Tool/components/badges';
+import { requestConfirm } from '@/components/common/ConfirmDialog';
+import { useAgents } from '@/hooks/useAgents';
+import { agentAPI, Agent } from '@/api/agent';
+import { getAgentDisplayDescription, getAgentDisplayName } from '@/utils/agentDisplay';
+import AgentSheet from './AgentSheet';
+import GroupNav, { useGroupDrag, type GroupDrag } from '@/components/plugin-groups/GroupNav';
+import { deriveGroupNav, matchesGroup, saveGroupItems, type GroupSelection } from '@/components/plugin-groups/groupView';
+import PluginViewToggle from '@/components/plugin-groups/PluginViewToggle';
+import { usePluginViewMode, type PluginViewMode } from '@/hooks/usePluginViewMode';
+
+// ============================================================================
+// Main Page Component
+// ============================================================================
+
+export default function AgentPage() {
+  const { t, i18n } = useTranslation('agent');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [editingAgent, setEditingAgent] = useState<Agent | null>(null);
+  const [showCreateSheet, setShowCreateSheet] = useState(false);
+  const [togglingAgents, setTogglingAgents] = useState<Record<string, boolean>>({});
+
+  const { agents, loading, error, refetch } = useAgents();
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshDone, setRefreshDone] = useState(false);
+  const [viewMode, setViewMode] = usePluginViewMode('agent', 'list');
+  const [groupSelection, setGroupSelection] = useState<GroupSelection>(null);
+  const asGroupItem = (agent: Agent) => ({
+    key: agent.name, name: getAgentDisplayName(agent, i18n.language), group: agent.group,
+    readOnlyReason: agent.group_readonly ? t('pluginGroups:readOnly.system') : undefined,
+  });
+  const visibleAgents = (inventory: Agent[]) => inventory.filter((agent) => agent.mode === 'primary' || !(agent.tags ?? []).includes('system'));
+  const groupItems = visibleAgents(agents).map(asGroupItem);
+  const { warning } = useToast();
+  const groupDrag = useGroupDrag(groupItems, warning);
+  const saveGroup = (name: string, group: string | null) => agentAPI.update(name, { group });
+  const reloadGroups = () => refetch(false, true);
+  const loadGroupItems = async () => visibleAgents((await agentAPI.list()).data).map(asGroupItem);
+  const moveGroup = async (key: string, group: string | null) => {
+    const inventory = await loadGroupItems();
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+  };
+  const createGroup = async (key: string, group: string) => {
+    const inventory = await loadGroupItems();
+    if (inventory.some((item) => matchesGroup(item.group, group))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => item.key === key), group, saveGroup, reloadGroups, t);
+  };
+  const changeGroup = async (from: string, to: string | null) => {
+    const inventory = await loadGroupItems();
+    if (to !== null && inventory.some((item) => matchesGroup(item.group, to))) throw new Error(t('pluginGroups:validation.duplicate'));
+    await saveGroupItems(inventory.filter((item) => matchesGroup(item.group, from)), to, saveGroup, reloadGroups, t, true);
+  };
+  const selectAgent = (agent: Agent) => setEditingAgent(agent);
+
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    try {
+      setRefreshing(true);
+      await Promise.all([
+        agentAPI.refresh().then(() => refetch(false)),
+        new Promise((r) => setTimeout(r, 600)),
+      ]);
+      setRefreshDone(true);
+      setTimeout(() => setRefreshDone(false), 2000);
+    } catch {
+      // best-effort
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  const searchedAgents = agents.filter((agent) => `${getAgentDisplayName(agent, i18n.language)} ${agent.name} ${getAgentDisplayDescription(agent, i18n.language)}`.toLowerCase().includes(searchQuery.trim().toLowerCase()));
+  const primaryAgents = searchedAgents.filter((a) => a.mode === 'primary');
+  const subAgents = searchedAgents.filter(
+    (a) => a.mode !== 'primary' && !(a.tags ?? []).includes('system')
+  );
+
+  const handleDelete = async (name: string) => {
+    if (!(await requestConfirm({ description: t('confirmDelete', { name }), confirmText: t('badge.delete'), variant: 'danger' }))) return;
+    try {
+      await agentAPI.delete(name);
+      if (editingAgent?.name === name) setEditingAgent(null);
+      refetch();
+    } catch (err: any) {
+      alert(`${t('deleteFailed')}: ${err.message}`);
+    }
+  };
+
+  const handleToggleDelegatable = async (agent: Agent, delegatable: boolean) => {
+    if (togglingAgents[agent.name]) return;
+    setTogglingAgents((prev) => ({ ...prev, [agent.name]: true }));
+    try {
+      const response = await agentAPI.setDelegatable(agent.name, delegatable);
+      if (editingAgent?.name === agent.name) {
+        setEditingAgent(response.data);
+      }
+      await refetch(false);
+    } catch (err: any) {
+      alert(t('error.updateFailed', { detail: err.response?.data?.detail ?? err.message }));
+    } finally {
+      setTogglingAgents((prev) => ({ ...prev, [agent.name]: false }));
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <LoadingSpinner delayMs={180} />
+      </div>
+    );
+  }
+
+  if (error && agents.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center">
+          <p className="text-red-600 mb-4">{error}</p>
+          <button
+            onClick={() => refetch()}
+            className="px-4 py-2 bg-slate-800 text-white rounded-lg hover:bg-slate-900"
+          >
+            {t('common:button.retry')}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div data-yushu-page="agent" className="yushu-resource-page h-full flex flex-col">
+      <PageHeader
+        title={t('pageTitle')}
+        description={t('pageDescription')}
+        icon={<Bot className="w-8 h-8" />}
+        action={<div className="flex flex-wrap items-center gap-2">
+          <PluginViewToggle value={viewMode} onChange={setViewMode} />
+          <button
+            onClick={handleRefresh}
+            disabled={refreshing}
+            title={refreshDone ? t('common:button.refreshed') : t('common:button.refresh')}
+            className={`p-1.5 rounded-lg border transition-all ${
+              refreshDone
+                ? 'border-green-200 text-green-600'
+                : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
+            }`}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+          </button>
+          <button
+            onClick={() => setShowCreateSheet(true)}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm max-md:whitespace-nowrap"
+          >
+            <Plus className="w-4 h-4" />
+            {t('createSubAgent')}
+          </button>
+        </div>}
+      />
+
+      <ResourceOverview items={[{ label: 'resourceTotal', value: visibleAgents(agents).length }, { label: 'resourcePrimary', value: agents.filter(a => a.mode === 'primary').length }, { label: 'resourceSubagents', value: visibleAgents(agents).filter(a => a.mode !== 'primary').length }, { label: 'resourceDelegatable', value: visibleAgents(agents).filter(a => a.delegatable).length }]} />
+
+      {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
+      {/* Toolbar — mirrors the Skill page toolbar style */}
+      <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2 max-md:px-0">
+        <label className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ui-muted" /><input aria-label={i18n.language.startsWith('zh') ? '搜索智能体' : 'Search agents'} placeholder={i18n.language.startsWith('zh') ? '搜索智能体名称、描述…' : 'Search agents…'} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className="h-10 w-full rounded-xl border border-ui-border bg-ui-surface pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-ui-focus" /></label>
+
+      </div>
+
+      {/* scrollbar-gutter: stable reserves the scrollbar track width even when the
+          scrollbar is absent, preventing the layout shift that occurs when filters
+          toggle between many results (scrollbar visible) and few results (no bar). */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-4 max-md:px-0" style={{ scrollbarGutter: 'stable' }}>
+        <GroupNav className="yushu-group-filter" inventoryComplete={!loading && !error} preferenceKey="agent" {...deriveGroupNav(groupItems)} items={groupItems} selection={groupSelection} onSelect={setGroupSelection} onMove={moveGroup} onCreate={createGroup} onRename={changeGroup} onDelete={(name) => changeGroup(name, null)} {...groupDrag} />
+        <div className="min-w-0 flex-1 space-y-6">
+        {agents.length === 0 ? (
+          <EmptyState
+            icon={<Bot className="w-16 h-16" />}
+            title={t('emptyState.title')}
+            description={t('emptyState.description')}
+            action={
+              <button
+                onClick={() => setShowCreateSheet(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
+              >
+                <Plus className="w-5 h-5" />
+                {t('createSubAgent')}
+              </button>
+            }
+          />
+        ) : (
+          <>
+            {primaryAgents.length > 0 && (
+              <AgentSection
+                title={t('section.primary.title')}
+                subtitle={t('section.primary.subtitle')}
+                icon={<Shield className="w-4 h-4" />}
+                agents={primaryAgents}
+                displayLang={i18n.language}
+                selectedAgent={editingAgent}
+                onSelect={selectAgent}
+                groupSelection={groupSelection}
+                groupDrag={groupDrag}
+                viewMode={viewMode}
+                onDelete={handleDelete}
+                togglingAgents={togglingAgents}
+                onToggleDelegatable={handleToggleDelegatable}
+              />
+            )}
+            {subAgents.length > 0 && (
+              <AgentSection
+                title={t('section.sub.title')}
+                subtitle={t('section.sub.subtitle')}
+                icon={<Zap className="w-4 h-4" />}
+                agents={subAgents}
+                displayLang={i18n.language}
+                selectedAgent={editingAgent}
+                onSelect={selectAgent}
+                groupSelection={groupSelection}
+                groupDrag={groupDrag}
+                viewMode={viewMode}
+                onDelete={handleDelete}
+                showSourceFilter
+                paginate
+                togglingAgents={togglingAgents}
+                onToggleDelegatable={handleToggleDelegatable}
+              />
+            )}
+          </>
+        )}
+        </div>
+      </div>
+
+      {editingAgent && (
+        <AgentSheet
+          agent={editingAgent}
+          onClose={() => setEditingAgent(null)}
+          onSaved={() => { refetch(false); setEditingAgent(null); }}
+        />
+      )}
+
+      {showCreateSheet && (
+        <AgentSheet
+          onClose={async () => {
+            setShowCreateSheet(false);
+            try { await agentAPI.refresh(); } catch { /* best-effort */ }
+            refetch(false);
+          }}
+          onSaved={async () => {
+            setShowCreateSheet(false);
+            try { await agentAPI.refresh(); } catch { /* best-effort */ }
+            refetch(false);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Agent Section
+// ============================================================================
+
+// Sub-agent grid page size: 12 fills 3×4 (xl) / 4×3 (lg) / 6×2 cleanly.
+const SUB_AGENT_PAGE_SIZE = 12;
+
+type SourceFilter = 'all' | 'builtin' | 'custom';
+
+// ---------------------------------------------------------------------------
+// PaginationBar
+// ---------------------------------------------------------------------------
+
+function PaginationBar({
+  total,
+  page,
+  totalPages,
+  pageSize,
+  onPageChange,
+}: {
+  total: number;
+  page: number;
+  totalPages: number;
+  pageSize: number;
+  onPageChange: (p: number) => void;
+}) {
+  const { t } = useTranslation('agent');
+  const start = (page - 1) * pageSize + 1;
+  const end = Math.min(total, page * pageSize);
+  return (
+    <div className="mt-3 flex items-center justify-between text-xs text-gray-400 select-none">
+      <span>{t('pagination.info', { start, end, total })}</span>
+      <div className="flex items-center gap-1">
+        <button
+          type="button"
+          disabled={page <= 1}
+          onClick={() => onPageChange(page - 1)}
+          className="px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          ‹
+        </button>
+        {Array.from({ length: totalPages }, (_, i) => i + 1).map((p) => (
+          <button
+            key={p}
+            type="button"
+            onClick={() => onPageChange(p)}
+            className={`w-6 h-5 rounded text-[11px] font-medium transition-colors ${
+              p === page
+                ? 'bg-slate-700 text-white'
+                : 'hover:bg-gray-100 text-gray-500'
+            }`}
+          >
+            {p}
+          </button>
+        ))}
+        <button
+          type="button"
+          disabled={page >= totalPages}
+          onClick={() => onPageChange(page + 1)}
+          className="px-2 py-0.5 rounded border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+        >
+          ›
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// AgentSection
+// ---------------------------------------------------------------------------
+
+interface AgentSectionProps {
+  title: string;
+  subtitle: string;
+  icon: React.ReactNode;
+  agents: Agent[];
+  displayLang: string;
+  selectedAgent: Agent | null;
+  onSelect: (agent: Agent) => void;
+  onDelete: (name: string) => void;
+  togglingAgents: Record<string, boolean>;
+  onToggleDelegatable: (agent: Agent, delegatable: boolean) => void;
+  showSourceFilter?: boolean;
+  paginate?: boolean;
+  groupSelection: GroupSelection;
+  groupDrag: GroupDrag;
+  viewMode: PluginViewMode;
+}
+
+function AgentSection({
+  title,
+  subtitle,
+  icon,
+  agents,
+  displayLang,
+  selectedAgent,
+  onSelect,
+  onDelete,
+  togglingAgents,
+  onToggleDelegatable,
+  showSourceFilter = false,
+  paginate = false,
+  groupSelection,
+  groupDrag,
+  viewMode,
+}: AgentSectionProps) {
+  const { t } = useTranslation('agent');
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
+  const [page, setPage] = useState(1);
+
+  // Per-source counts for the filter chips
+  const builtinCount = useMemo(() => agents.filter(isBuiltinAgent).length, [agents]);
+  const customCount  = useMemo(() => agents.filter(a => !isBuiltinAgent(a)).length, [agents]);
+
+  const filtered = agents.filter((agent) => {
+    if (!matchesGroup(agent.group, groupSelection)) return false;
+    if (!showSourceFilter) return true;
+    if (sourceFilter === 'builtin') return isBuiltinAgent(agent);
+    if (sourceFilter === 'custom') return !isBuiltinAgent(agent);
+    return true;
+  });
+
+  const totalPages = paginate ? Math.max(1, Math.ceil(filtered.length / SUB_AGENT_PAGE_SIZE)) : 1;
+
+  // Clamp page when filter shrinks total pages
+  useEffect(() => {
+    if (page > totalPages) setPage(totalPages);
+  }, [totalPages, page]);
+
+  // Reset to page 1 when filter changes
+  useEffect(() => { setPage(1); }, [sourceFilter, groupSelection]);
+
+  const displayed = paginate
+    ? filtered.slice((page - 1) * SUB_AGENT_PAGE_SIZE, page * SUB_AGENT_PAGE_SIZE)
+    : filtered;
+
+  // Filter chip definitions — same pattern as Skill page FilterChips
+  const filterChips: { key: SourceFilter; label: string; count: number }[] = [
+    { key: 'all',     label: t('filter.all'),     count: agents.length },
+    { key: 'builtin', label: t('filter.builtin'), count: builtinCount },
+    { key: 'custom',  label: t('filter.custom'),  count: customCount },
+  ];
+
+  // Grid min-height: keeps the area stable when filters reduce item count.
+  // Based on SUB_AGENT_PAGE_SIZE=12 in 4-col XL layout (3 rows × ~172px + 2 gaps×12px).
+  const GRID_MIN_H = paginate ? 540 : undefined;
+
+  return (
+    <div>
+      {/* Section header: left accent stripe */}
+      <div className="flex items-start gap-3 pl-3 border-l-2 border-slate-300">
+        <span className="text-slate-400 mt-0.5">{icon}</span>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-gray-800">{title}</h2>
+            <span className="text-[11px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 tabular-nums">
+              {agents.length}
+            </span>
+          </div>
+          <p className="text-xs text-gray-400 mt-0.5">{subtitle}</p>
+        </div>
+      </div>
+
+      {/* Source filter — segmented control, same style as Skill page */}
+      {showSourceFilter && (
+        <div className="mt-2.5 mb-3" role="tablist" aria-label={t('filter.aria')}>
+          <div className="inline-flex items-center rounded-lg border border-gray-200 bg-white p-0.5 text-xs">
+            {filterChips.map((chip, idx) => {
+              const active = chip.key === sourceFilter;
+              return (
+                <button
+                  key={chip.key}
+                  type="button"
+                  role="tab"
+                  aria-selected={active}
+                  onClick={() => setSourceFilter(chip.key)}
+                  className={`px-2.5 py-1 rounded-md transition-colors whitespace-nowrap ${
+                    active
+                      ? 'bg-slate-700 text-white'
+                      : 'text-gray-500 hover:text-gray-700 hover:bg-gray-50'
+                  } ${idx > 0 ? 'ml-0.5' : ''}`}
+                >
+                  <span>{chip.label}</span>
+                  <span className={`ml-1.5 inline-block min-w-[1.25rem] px-1 rounded text-[10px] tabular-nums ${
+                    active ? 'bg-white/15' : 'bg-gray-100 text-gray-500'
+                  }`}>
+                    {chip.count}
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Grid area — min-height anchors the layout so filter switches don't
+          collapse the section height and cause visual jumps. */}
+      <div style={GRID_MIN_H ? { minHeight: GRID_MIN_H } : undefined}>
+        {!showSourceFilter && <div className="mb-3" />}
+        {displayed.length === 0 ? (
+          <p className="text-xs text-gray-400 py-4">
+            {t(`filter.${sourceFilter}` as any)} — {t('emptyState.title')}
+          </p>
+        ) : (
+          <div className={viewMode === 'cards' ? PLUGIN_CARD_GRID_CLASS : 'space-y-2'}>
+            {displayed.map((agent) => (
+              <div key={agent.name} className="min-w-0 [&>div]:h-full" {...groupDrag.dragProps(agent.name)}>
+                <AgentCard
+                  agent={agent}
+                  grouping={groupDrag}
+                  displayLang={displayLang}
+                  isSelected={selectedAgent?.name === agent.name}
+                  onClick={() => onSelect(agent)}
+                  onDelete={onDelete}
+                  toggling={!!togglingAgents[agent.name]}
+                  onToggleDelegatable={onToggleDelegatable}
+                  layout={viewMode}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {paginate && totalPages > 1 && (
+        <PaginationBar
+          total={filtered.length}
+          page={page}
+          totalPages={totalPages}
+          pageSize={SUB_AGENT_PAGE_SIZE}
+          onPageChange={setPage}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// Agent Card
+// ============================================================================
+
+/** Shipped with the product rather than made by the user: core built-ins and sealed extension agents. */
+function isBuiltinAgent(agent: Agent): boolean {
+  return !!agent.native || !!agent.promptProtected;
+}
+
+interface AgentCardProps {
+  grouping: GroupDrag;
+  layout?: PluginViewMode;
+  agent: Agent;
+  displayLang: string;
+  isSelected: boolean;
+  onClick: () => void;
+  onDelete: (name: string) => void;
+  toggling: boolean;
+  onToggleDelegatable: (agent: Agent, delegatable: boolean) => void;
+}
+
+function AgentCard({
+  grouping,
+  layout = 'cards',
+  agent,
+  displayLang,
+  isSelected,
+  onClick,
+  onDelete,
+  toggling,
+  onToggleDelegatable,
+}: AgentCardProps) {
+  const { t } = useTranslation('agent');
+  const displayName = getAgentDisplayName(agent, displayLang);
+  const displayDesc = getAgentDisplayDescription(agent, displayLang);
+  // Delegation applies to sub-agents. A sealed definition keeps its own setting
+  // (the API refuses changes), so its switch stays disabled and says why.
+  const showDelegation = agent.mode === 'subagent';
+  const sourceLabel = agent.promptProtected ? t('badge.protected') : agent.native ? t('badge.native') : t('badge.custom');
+  const deleteDisabledReason = agent.promptProtected
+    ? t('badge.protectedDeleteDisabled')
+    : agent.native ? t('badge.nativeDeleteDisabled') : undefined;
+
+  return (
+    <PluginCard
+      layout={layout}
+      icon={<Bot className="h-4 w-4" />}
+      title={displayName}
+      tags={<>
+        <PluginSourceTag builtin={isBuiltinAgent(agent)} label={sourceLabel} />
+        {agent.delegatable && (
+          <span className="inline-flex items-center rounded bg-gray-50 px-1.5 py-0.5 text-[10px] font-medium text-gray-500">{t('badge.delegatable')}</span>
+        )}
+      </>}
+      status={showDelegation ? <EnabledBadge enabled={!!agent.delegatable} /> : undefined}
+      statusControl={showDelegation ? (
+        <EnabledSwitch
+          enabled={!!agent.delegatable}
+          loading={toggling}
+          label={t('form.enabled')}
+          title={agent.delegatable ? t('form.enabledTip') : t('form.disabledTip')}
+          disabledReason={agent.promptProtected ? t('badge.protectedDelegateDisabled') : undefined}
+          onChange={() => onToggleDelegatable(agent, !agent.delegatable)}
+        />
+      ) : undefined}
+      description={displayDesc}
+      emptyDescription={t('common:empty.noDescription')}
+      meta={agent.model ? (
+        <span className="inline-flex max-w-full items-center gap-1">
+          <Cpu className="h-3 w-3 shrink-0" />
+          <span className="truncate" title={agent.model.modelID}>{agent.model.modelID}</span>
+        </span>
+      ) : undefined}
+      selected={isSelected}
+      onOpen={onClick}
+      deleteLabel={t('badge.delete')}
+      onDelete={deleteDisabledReason ? undefined : () => onDelete(agent.name)}
+      deleteDisabledReason={deleteDisabledReason}
+      groupButton={<PluginGroupButton grouping={grouping} itemKey={agent.name} iconOnly />}
+      editLabel={t('badge.edit')}
+      editDisabledReason={agent.promptProtected ? t('badge.protectedEditDisabled') : undefined}
+      testId={`agent-card-${agent.name}`}
+    />
+  );
+}
+

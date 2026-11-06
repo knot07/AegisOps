@@ -1,0 +1,217 @@
+"""Build WebUI page TSX sources into browser-loadable ESM bundles."""
+
+from __future__ import annotations
+
+import hashlib
+import os
+import platform
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Optional
+
+from aegisops.contracts.webui.models import WebUIPageBuildMeta
+from aegisops.contracts.webui.store import WEBUI_CONTRACT_SDK_IMPORT, WebUIPagesStore
+from aegisops.utils.log import Log
+
+log = Log.create(service="webui-pages-builder")
+
+MAX_OUTPUT_BYTES = 2_000_000
+BUILD_TIMEOUT_SECONDS = 30
+_SHIMS_DIR = Path(__file__).resolve().parent / "shims"
+RUNTIME_NAME = "webui_page"
+RUNTIME_VERSION = 1
+SDK_IMPORT_NAME = WEBUI_CONTRACT_SDK_IMPORT
+
+
+def _repo_root() -> Path:
+    # aegisops/contracts/webui/builder.py -> repo root is parents[3].
+    return Path(__file__).resolve().parents[3]
+
+
+def resolve_esbuild_bin() -> Optional[Path]:
+    """Locate the packaged compiler or the native binary installed by npm.
+
+    Keep this within the runtime tree. In particular, Windows can execute the
+    native .exe without relying on an npm .cmd launcher and Node's PATH.
+    """
+    modules = _repo_root() / "webui" / "node_modules"
+    webui_bin = modules / ".bin"
+    machine = platform.machine().lower()
+    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(machine, machine)
+    candidates = []
+    if sys.platform == "win32":
+        candidates.append(webui_bin / "esbuild.exe")
+        candidates.append(modules / "@esbuild" / f"win32-{arch}" / "esbuild.exe")
+        candidates.append(webui_bin / "esbuild.cmd")
+    else:
+        candidates.append(webui_bin / "esbuild")
+        candidates.append(modules / "@esbuild" / f"{sys.platform}-{arch}" / "bin" / "esbuild")
+    for candidate in candidates:
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def bundle_digest(content: bytes) -> str:
+    """The digest a page's build record carries for its bundle."""
+    return hashlib.sha256(content).hexdigest()[:16]
+
+
+def prebuilt_bundle_problem(store: WebUIPagesStore, page_id: str) -> Optional[str]:
+    """Why a page's shipped bundle cannot be served as it is; None when it can.
+
+    A page can be delivered already built, without the source it was built
+    from. Its bundle is then served only if its build record says it was
+    built for this runtime and the bundle is the one the record describes.
+    """
+    bundle = store.bundle_path(page_id)
+    if not bundle.is_file():
+        return "is missing"
+    meta = store.read_build_meta(page_id)
+    if meta.status != "ready":
+        return f"is not a finished build (status {meta.status})"
+    if meta.runtime != RUNTIME_NAME or meta.runtimeVersion != RUNTIME_VERSION or meta.sdkImport != SDK_IMPORT_NAME:
+        return (
+            f"was built for {meta.runtime} v{meta.runtimeVersion}, "
+            f"and this version runs {RUNTIME_NAME} v{RUNTIME_VERSION}"
+        )
+    if meta.hash != bundle_digest(bundle.read_bytes()):
+        return "does not match its build record"
+    return None
+
+
+class WebUIPageBuilder:
+    """Compile a page entry file into dist/page.js."""
+
+    def __init__(self, store: Optional[WebUIPagesStore] = None, *, minify: bool = False) -> None:
+        self._store = store or WebUIPagesStore()
+        # Minified bundles are for pages shipped built (see
+        # prebuilt_bundle_problem); pages built on the install stay readable.
+        self._minify = minify
+
+    def build(self, page_id: str) -> WebUIPageBuildMeta:
+        page_id = self._store.validate_page_id(page_id)
+        detail = self._store.get_page(page_id)
+        page_dir = self._store.writable_page_dir(page_id)
+        entry = detail.manifest.entry.replace("\\", "/")
+        entry_path = (page_dir / entry).resolve()
+        try:
+            entry_path.relative_to(page_dir.resolve())
+        except ValueError:
+            raise ValueError("invalid entry path")
+        if not entry_path.is_file():
+            raise FileNotFoundError(f"entry file not found: {entry}")
+
+        esbuild = resolve_esbuild_bin()
+        if esbuild is None:
+            raise RuntimeError(
+                "esbuild is not available in this runtime. "
+                "For a source installation, reinstall the locked WebUI dependencies (npm ci in webui). "
+                "For a packaged installation, install a complete runtime package containing the WebUI compiler."
+            )
+
+        dist_dir = page_dir / "dist"
+        dist_dir.mkdir(parents=True, exist_ok=True)
+        outfile = dist_dir / "page.js"
+
+        building = WebUIPageBuildMeta(status="building", hash="", builtAt=0, error=None)
+        self._store.write_build_meta(page_id, building)
+
+        cmd = [
+            str(esbuild),
+            str(entry_path),
+            "--bundle",
+            "--format=esm",
+            f"--outfile={outfile}",
+            "--platform=browser",
+            "--target=es2020",
+            "--jsx=automatic",
+            f"--alias:react={_SHIMS_DIR / 'react.js'}",
+            f"--alias:react/jsx-runtime={_SHIMS_DIR / 'jsx-runtime.js'}",
+            f"--alias:{WEBUI_CONTRACT_SDK_IMPORT}={_SHIMS_DIR / 'sdk.js'}",
+        ]
+        if self._minify:
+            cmd.append("--minify")
+
+        env = os.environ.copy()
+        try:
+            result = subprocess.run(
+                cmd,
+                cwd=str(page_dir),
+                capture_output=True,
+                text=True,
+                timeout=BUILD_TIMEOUT_SECONDS,
+                env=env,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            meta = WebUIPageBuildMeta(
+                status="failed",
+                hash="",
+                builtAt=int(time.time() * 1000),
+                error=f"build timed out after {BUILD_TIMEOUT_SECONDS}s",
+                runtime=RUNTIME_NAME,
+                runtimeVersion=RUNTIME_VERSION,
+                sdkImport=SDK_IMPORT_NAME,
+            )
+            self._store.write_build_meta(page_id, meta)
+            raise RuntimeError(meta.error) from exc
+
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "esbuild failed").strip()
+            meta = WebUIPageBuildMeta(
+                status="failed",
+                hash="",
+                builtAt=int(time.time() * 1000),
+                error=stderr[:4000],
+                runtime=RUNTIME_NAME,
+                runtimeVersion=RUNTIME_VERSION,
+                sdkImport=SDK_IMPORT_NAME,
+            )
+            self._store.write_build_meta(page_id, meta)
+            log.warning("webui_pages.build.failed", {"pageId": page_id, "error": stderr[:500]})
+            return meta
+
+        if not outfile.is_file():
+            meta = WebUIPageBuildMeta(
+                status="failed",
+                hash="",
+                builtAt=int(time.time() * 1000),
+                error="build produced no output",
+                runtime=RUNTIME_NAME,
+                runtimeVersion=RUNTIME_VERSION,
+                sdkImport=SDK_IMPORT_NAME,
+            )
+            self._store.write_build_meta(page_id, meta)
+            return meta
+
+        content = outfile.read_bytes()
+        if len(content) > MAX_OUTPUT_BYTES:
+            outfile.unlink(missing_ok=True)
+            meta = WebUIPageBuildMeta(
+                status="failed",
+                hash="",
+                builtAt=int(time.time() * 1000),
+                error="build output is too large",
+                runtime=RUNTIME_NAME,
+                runtimeVersion=RUNTIME_VERSION,
+                sdkImport=SDK_IMPORT_NAME,
+            )
+            self._store.write_build_meta(page_id, meta)
+            return meta
+
+        digest = bundle_digest(content)
+        meta = WebUIPageBuildMeta(
+            status="ready",
+            hash=digest,
+            builtAt=int(time.time() * 1000),
+            error=None,
+            runtime=RUNTIME_NAME,
+            runtimeVersion=RUNTIME_VERSION,
+            sdkImport=SDK_IMPORT_NAME,
+        )
+        self._store.write_build_meta(page_id, meta)
+        log.info("webui_pages.build.ready", {"pageId": page_id, "hash": digest})
+        return meta

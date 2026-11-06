@@ -1,0 +1,500 @@
+"""AegisOps Hub routes."""
+
+from __future__ import annotations
+
+import asyncio
+from typing import Any, Optional, Union
+
+from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
+
+from aegisops.hub.catalog import (
+    category_counts,
+    clear_catalog_caches,
+    filter_catalog_entries,
+    legacy_removed_plugin_message,
+    list_catalog,
+    load_manifest,
+    load_taxonomy,
+)
+from aegisops.hub.files import file_tree, read_file_content
+from aegisops.hub import access as hub_access
+from aegisops.hub.installer import install_plugin, preview_plan, uninstall_plugin, update_plugin
+from aegisops.hub.update_protection import UpdateConfirmationRequired, public_plan
+from aegisops.hub.models import (
+    HubCatalogEntry,
+    HubFileContent,
+    HubFileNode,
+    HubInstallProgressEvent,
+    HubPluginManifest,
+    InstalledPluginRecord,
+    PluginType,
+)
+from aegisops.server.auth import require_admin, require_user
+from aegisops.utils.log import Log
+
+
+router = APIRouter()
+log = Log.create(service="hub-routes")
+
+
+class HubInstallRequest(BaseModel):
+    scope: str = Field(default="global", description="'global' only")
+
+
+class HubUpdateRequest(HubInstallRequest):
+    confirmationToken: str | None = None
+    confirmChanges: bool = False
+
+
+class HubCatalogFacets(BaseModel):
+    type: dict[str, int] = Field(default_factory=dict)
+    category: dict[str, int] = Field(default_factory=dict)
+    tags: dict[str, int] = Field(default_factory=dict)
+    useCases: dict[str, int] = Field(default_factory=dict)
+    state: dict[str, int] = Field(default_factory=dict)
+    trust: dict[str, int] = Field(default_factory=dict)
+    riskLevel: dict[str, int] = Field(default_factory=dict)
+
+
+class HubCatalogPageResponse(BaseModel):
+    items: list[HubCatalogEntry] = Field(default_factory=list)
+    total: int = Field(0)
+    offset: int = Field(0)
+    limit: int = Field(25)
+    facets: HubCatalogFacets = Field(default_factory=HubCatalogFacets)
+
+
+def _split_csv(value: Optional[str | list[str]]) -> Optional[list[str]]:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        parts = value
+    else:
+        parts = value.split(",")
+    result = [part.strip() for part in parts if part and part.strip()]
+    return result or None
+
+
+def _guard_legacy_removed_plugin(plugin_type: PluginType, plugin_id: str) -> None:
+    detail = legacy_removed_plugin_message(plugin_type, plugin_id)
+    if detail:
+        raise HTTPException(status_code=410, detail=detail)
+
+
+def _clear_hub_runtime_caches() -> None:
+    hub_access.contents_changed()
+    clear_catalog_caches()
+    try:
+        from aegisops.tool.device.plugin_index import clear_device_template_cache
+
+        clear_device_template_cache()
+    except Exception:
+        pass
+
+
+def _count_hub_catalog_facet(
+    items: list[HubCatalogEntry],
+    attribute: str,
+) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        values = getattr(item, attribute)
+        if isinstance(values, str):
+            values = [values]
+        for value in values:
+            counts[value] = counts.get(value, 0) + 1
+    return counts
+
+
+def _build_hub_catalog_facets_for_filters(
+    all_entries: list[HubCatalogEntry],
+    filters: dict[str, object],
+) -> HubCatalogFacets:
+    """Build each facet with every active filter except that facet itself."""
+    dimensions = {
+        "type": ("plugin_type", "type"),
+        "category": ("category", "category"),
+        "tags": ("tags", "tags"),
+        "useCases": ("use_cases", "useCases"),
+        "state": ("state", "state"),
+        "trust": ("trust", "trust"),
+        "riskLevel": ("risk", "riskLevel"),
+    }
+    counts: dict[str, dict[str, int]] = {}
+    for response_field, (query_field, item_attribute) in dimensions.items():
+        facet_filters = dict(filters)
+        facet_filters[query_field] = None
+        counts[response_field] = _count_hub_catalog_facet(
+            filter_catalog_entries(all_entries, **facet_filters),
+            item_attribute,
+        )
+    return HubCatalogFacets(**counts)
+
+
+def _prioritize_installed_catalog_entries(
+    entries: list[HubCatalogEntry],
+) -> list[HubCatalogEntry]:
+    """Put plugins that need local attention at the beginning of the catalog."""
+    priority = {"partial": 0, "updateAvailable": 0, "installed": 1}
+    return sorted(entries, key=lambda entry: priority.get(entry.state, 2))
+
+
+@router.get("/hub/catalog", response_model=Union[list[HubCatalogEntry], HubCatalogPageResponse])
+async def hub_catalog(
+    type: Optional[PluginType] = Query(default=None),  # noqa: A002 - API field name
+    category: Optional[str] = None,
+    tags: Optional[str] = None,
+    useCases: Optional[str] = None,
+    state: Optional[str] = None,
+    trust: Optional[str] = None,
+    risk: Optional[str] = None,
+    q: Optional[str] = None,
+    prioritizeInstalled: bool = Query(default=False),  # noqa: N803 - API field name
+    offset: int = Query(0, ge=0),
+    limit: Optional[int] = Query(default=None, ge=1, le=200),
+):
+    filters: dict[str, object] = {
+        "plugin_type": type,
+        "category": _split_csv(category),
+        "tags": _split_csv(tags),
+        "use_cases": _split_csv(useCases),
+        "state": _split_csv(state),
+        "trust": _split_csv(trust),
+        "risk": _split_csv(risk),
+        "q": q,
+    }
+    if limit is None and offset == 0:
+        entries = await asyncio.to_thread(list_catalog, **filters)
+        return _prioritize_installed_catalog_entries(entries) if prioritizeInstalled else entries
+
+    def load_page() -> tuple[list[HubCatalogEntry], HubCatalogFacets]:
+        all_entries = list_catalog()
+        entries = filter_catalog_entries(all_entries, **filters)
+        if prioritizeInstalled:
+            entries = _prioritize_installed_catalog_entries(entries)
+        facets = _build_hub_catalog_facets_for_filters(all_entries, filters)
+        return entries, facets
+
+    entries, facets = await asyncio.to_thread(load_page)
+
+    page_limit = limit or 25
+    total = len(entries)
+    return HubCatalogPageResponse(
+        items=entries[offset:offset + page_limit],
+        total=total,
+        offset=offset,
+        limit=page_limit,
+        facets=facets,
+    )
+
+
+@router.get("/hub/categories")
+async def hub_categories(include_counts: bool = Query(True)):
+    if not include_counts:
+        return load_taxonomy().model_dump(mode="json")
+    return await asyncio.to_thread(category_counts)
+
+
+@router.get("/hub/plugins/{plugin_type}/{plugin_id}", response_model=HubPluginManifest)
+async def hub_plugin(plugin_type: PluginType, plugin_id: str):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    try:
+        return load_manifest(plugin_type, plugin_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/hub/plugins/{plugin_type}/{plugin_id}/files", response_model=HubFileNode)
+async def hub_plugin_files(plugin_type: PluginType, plugin_id: str):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    try:
+        return file_tree(plugin_type, plugin_id)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/hub/plugins/{plugin_type}/{plugin_id}/files/content", response_model=HubFileContent)
+async def hub_plugin_file_content(plugin_type: PluginType, plugin_id: str, path: str):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    try:
+        return read_file_content(plugin_type, plugin_id, path)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+class SceneSuiteEntry(BaseModel):
+    """A scene suite as the scene workspace shows it: catalog state + workspace state."""
+
+    id: str
+    name: str
+    nameCn: Optional[str] = None
+    description: str = ""
+    descriptionCn: Optional[str] = None
+    version: str = "0.0.0"
+    installedVersion: Optional[str] = None
+    edition: str = "oss"
+    state: str = "available"
+    workspaceId: Optional[str] = None
+    workspaceTitle: Optional[str] = None
+    workspaceRoute: Optional[str] = None
+    workspaceEnabled: Optional[bool] = None
+    # The suite's page package has its own version; an update can be pending
+    # there while the suite version itself has not moved.
+    workspaceVersion: Optional[str] = None
+    workspaceLatestVersion: Optional[str] = None
+    # Filled in by a hub access policy (aegisops.hub.access), when one is
+    # registered: a locked suite is listed but does not install; what else
+    # the policy knows about it is for its own part of the page.
+    locked: Optional[bool] = None
+    lockReason: Optional[str] = None
+    annotations: dict[str, Any] = Field(default_factory=dict)
+
+
+def _suite_workspace_id(plugin_id: str) -> Optional[str]:
+    try:
+        manifest = load_manifest("component", plugin_id)
+    except Exception:
+        return None
+    for component in getattr(manifest, "components", []) or []:
+        if getattr(component, "type", None) == "webui":
+            return getattr(component, "id", None)
+    return None
+
+
+@router.get("/hub/scene-suites", response_model=list[SceneSuiteEntry])
+async def hub_scene_suites(_user: object = Depends(require_user)):
+    """Scene suites with the same install state exposed in the Hub catalog."""
+    suites = await asyncio.to_thread(_load_scene_suites)
+    return await hub_access.decorate_scene_suites(suites)
+
+
+def _load_scene_suites() -> list[SceneSuiteEntry]:
+    from aegisops.contracts.webui.store import WebUIPagesStore, webui_contract_workspace_route
+
+    catalog = list_catalog()
+    entries = [entry for entry in catalog if entry.type == "component"]
+    catalog_by_key = {(entry.type, entry.id): entry for entry in catalog}
+    workspaces = {item.id: item for item in WebUIPagesStore().list_workspaces()}
+    suites: list[SceneSuiteEntry] = []
+    for entry in entries:
+        try:
+            refs = load_manifest("component", entry.id).components
+        except Exception:
+            refs = []
+        workspace_id = next((ref.id for ref in refs if ref.type == "webui"), None)
+        workspace = workspaces.get(workspace_id) if workspace_id else None
+        child = catalog_by_key.get(("webui", workspace_id)) if workspace_id else None
+        suites.append(
+            SceneSuiteEntry(
+                id=entry.id,
+                name=entry.name,
+                nameCn=entry.nameCn,
+                description=entry.description,
+                descriptionCn=entry.descriptionCn,
+                version=entry.version,
+                installedVersion=entry.installedVersion,
+                edition=entry.edition,
+                state=entry.state,
+                workspaceId=workspace_id,
+                workspaceTitle=workspace.title if workspace else None,
+                workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,
+                workspaceEnabled=workspace.enabled if workspace else None,
+                workspaceVersion=child.installedVersion if child is not None else None,
+                workspaceLatestVersion=child.version if child is not None else None,
+            )
+        )
+    suites.sort(key=lambda item: (item.edition != "oss", item.id))
+    return suites
+
+
+async def _publish_scene_suites_changed(plugin_type: PluginType, plugin_id: str, action: str) -> None:
+    from aegisops.server.routes.event import publish_event
+
+    # What a hub access policy decided about this content may have changed with this action.
+    hub_access.contents_changed()
+    try:
+        suite_ids = [plugin_id] if plugin_type == "component" else []
+        if plugin_type != "component":
+            # Updating a child also changes its suite's update/completeness
+            # state. Refresh the acting user's other open scene views
+            # without a manual reload.
+            entries = await asyncio.to_thread(list_catalog, plugin_type="component")
+            for entry in entries:
+                refs = load_manifest("component", entry.id).components
+                if any((ref.type, ref.id) == (plugin_type, plugin_id) for ref in refs):
+                    suite_ids.append(entry.id)
+        for suite_id in suite_ids:
+            await publish_event("hub.scene_suites.changed", {"suiteId": suite_id, "action": action})
+    except Exception as exc:
+        # Notification failures must not hide the installer result or prevent
+        # streaming responses from closing after a failed installation.
+        log.warning("hub.scene_suites.notify_failed", {"id": plugin_id, "action": action, "error": str(exc)})
+
+
+def _guard_guided_install(plugin_type: PluginType, plugin_id: str) -> None:
+    """Plugins installed through a Rex conversation have no file-copy install, update or uninstall."""
+
+    try:
+        manifest = load_manifest(plugin_type, plugin_id)
+    except Exception:
+        return
+    if getattr(manifest, "guidedInstall", None) is None:
+        return
+    raise HTTPException(
+        status_code=409,
+        detail={
+            "code": "hub_guided_install",
+            "message": "该插件通过 Atlas 会话安装：在插件广场点击安装后，由 Atlas 在新会话中完成安装与验证。",
+        },
+    )
+
+
+async def _assert_install_allowed(plugin_type: PluginType, plugin_id: str) -> None:
+    """A registered hub access policy may refuse an install or update (aegisops.hub.access)."""
+    refusal = await hub_access.install_refusal(plugin_type, plugin_id)
+    if refusal:
+        raise HTTPException(status_code=403, detail=refusal)
+
+
+@router.post("/hub/plugins/{plugin_type}/{plugin_id}/install", response_model=InstalledPluginRecord)
+async def hub_install_plugin(
+    plugin_type: PluginType,
+    plugin_id: str,
+    req: HubInstallRequest = HubInstallRequest(),
+    _admin: object = Depends(require_admin),
+):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
+    try:
+        return await install_plugin(plugin_type, plugin_id, scope=req.scope)
+    except UpdateConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail={"code": "hub_update_confirmation_required", "plan": exc.plan}) from exc
+    except Exception as exc:
+        log.error("hub.install.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await _publish_scene_suites_changed(plugin_type, plugin_id, "install")
+
+
+@router.post("/hub/plugins/{plugin_type}/{plugin_id}/install/stream")
+async def hub_install_plugin_stream(
+    plugin_type: PluginType,
+    plugin_id: str,
+    req: HubInstallRequest = HubInstallRequest(),
+    _admin: object = Depends(require_admin),
+):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
+    if plugin_type != "component":
+        raise HTTPException(status_code=400, detail="Streaming install progress is only supported for components.")
+    try:
+        manifest = load_manifest(plugin_type, plugin_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    async def generate():
+        queue: asyncio.Queue[HubInstallProgressEvent | None] = asyncio.Queue()
+
+        async def emit(event: HubInstallProgressEvent) -> None:
+            await queue.put(event)
+
+        async def run_install() -> None:
+            try:
+                await install_plugin(plugin_type, plugin_id, scope=req.scope, progress=emit)
+            except Exception as exc:
+                log.error("hub.install_stream.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
+                await queue.put(
+                    HubInstallProgressEvent(
+                        event="error",
+                        id=manifest.id,
+                        type=manifest.type,
+                        name=manifest.name,
+                        nameCn=manifest.nameCn,
+                        total=len(manifest.components),
+                        message=str(exc),
+                    )
+                )
+            finally:
+                await _publish_scene_suites_changed(plugin_type, plugin_id, "install")
+                await queue.put(None)
+
+        task = asyncio.create_task(run_install())
+        try:
+            while True:
+                event = await queue.get()
+                if event is None:
+                    break
+                yield f"data: {event.model_dump_json()}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+@router.post("/hub/plugins/{plugin_type}/{plugin_id}/update/preview")
+async def hub_preview_update(
+    plugin_type: PluginType, plugin_id: str,
+    req: HubInstallRequest = HubInstallRequest(),
+    _admin: object = Depends(require_admin),
+):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
+    try:
+        return public_plan(await preview_plan(plugin_type, plugin_id, req.scope))
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/hub/plugins/{plugin_type}/{plugin_id}/update", response_model=InstalledPluginRecord)
+async def hub_update_plugin(
+    plugin_type: PluginType,
+    plugin_id: str,
+    req: HubUpdateRequest = HubUpdateRequest(),
+    _admin: object = Depends(require_admin),
+):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
+    await _assert_install_allowed(plugin_type, plugin_id)
+    try:
+        return await update_plugin(plugin_type, plugin_id, scope=req.scope,
+                                   confirmation_token=req.confirmationToken, confirm_changes=req.confirmChanges)
+    except UpdateConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail={"code": "hub_update_confirmation_required", "plan": exc.plan}) from exc
+    except Exception as exc:
+        log.error("hub.update.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await _publish_scene_suites_changed(plugin_type, plugin_id, "update")
+
+
+@router.delete("/hub/plugins/{plugin_type}/{plugin_id}")
+async def hub_uninstall_plugin(
+    plugin_type: PluginType,
+    plugin_id: str,
+    _admin: object = Depends(require_admin),
+):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    _guard_guided_install(plugin_type, plugin_id)
+    try:
+        removed = await uninstall_plugin(plugin_type, plugin_id)
+        return {"removed": removed}
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    finally:
+        await _publish_scene_suites_changed(plugin_type, plugin_id, "uninstall")
+
+
+@router.post("/hub/refresh")
+async def hub_refresh(_admin: object = Depends(require_admin)):
+    _clear_hub_runtime_caches()
+    return {"count": len(await asyncio.to_thread(list_catalog))}

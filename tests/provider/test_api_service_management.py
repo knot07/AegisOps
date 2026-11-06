@@ -1,0 +1,914 @@
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+import yaml
+
+from fastapi import HTTPException
+from aegisops.tool.registry import Tool, ToolCategory, ToolInfo, ToolRegistry
+
+
+class TestNativeAPIServiceGroup:
+    @pytest.fixture
+    def native_services(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+        from aegisops.config.config_writer import ConfigWriter
+        from aegisops.config import api_versioning
+        from aegisops.server.routes import provider as routes
+        from aegisops.tool.schema import api_service_schema
+
+        monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path / "config"))
+        descriptors = []
+        for version in ("1", "2"):
+            path = tmp_path / version / "_provider.yaml"
+            path.parent.mkdir()
+            path.write_text(yaml.safe_dump({"name": "Native API", "service_id": "native_api", "version": version, "group": " Package "}))
+            descriptors.append(SimpleNamespace(storage_key=f"native_api_v{version}", service_id="native_api", provider_yaml=path))
+        monkeypatch.setattr(api_versioning, "discover_api_service_descriptors", lambda **kw: descriptors)
+        monkeypatch.setattr(api_service_schema, "discover_api_service_descriptors", lambda **kw: descriptors)
+        monkeypatch.setattr(ToolRegistry, "init_async", AsyncMock())
+        monkeypatch.setattr(ToolRegistry, "get_api_service_ids", lambda: {d.storage_key for d in descriptors})
+        monkeypatch.setattr(routes, "_get_api_service_tool_infos", lambda name: [])
+        monkeypatch.setattr(routes, "_is_api_service_builtin", lambda *args: False)
+        monkeypatch.setattr(routes, "_read_api_service_status_cache", AsyncMock(return_value={"native_api_v1": {"status": "connected"}}))
+        no_toggle = MagicMock(side_effect=AssertionError("metadata cannot toggle tools"))
+        no_status_write = AsyncMock(side_effect=AssertionError("metadata cannot reset status"))
+        monkeypatch.setattr(routes, "_set_api_service_tools_enabled", no_toggle)
+        monkeypatch.setattr(routes, "_write_api_service_status_cache", no_status_write)
+        ConfigWriter.set_api_service("native_api_v1", {"enabled": True, "apiKey": "{secret:key1}", "future": {"kept": True}})
+        ConfigWriter.set_api_service("native_api_v2", {"enabled": False, "apiKey": "{secret:key2}", "group": "Sibling"})
+        routes._clear_api_service_summary_metadata_cache()
+        return routes, ConfigWriter, no_toggle, no_status_write
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("stored_group,expected", [
+        (["legacy"], None), ("x" * 33, None), ("a\x00b", None),
+        ("a\nb", None), ("a\x7fb", None), (None, None), ("", ""), (" Valid ", "Valid"),
+    ])
+    async def test_bad_stored_group_cannot_break_mixed_service_reads(
+        self, native_services, monkeypatch, stored_group, expected,
+    ):
+        import json
+        from aegisops.tool.schema import api_service_schema
+
+        routes, writer, no_toggle, no_status_write = native_services
+        # Simulate historical data without going through today's strict writer.
+        path = writer._get_config_path()
+        raw = writer._read_raw()
+        raw["api_services"]["native_api_v1"]["group"] = stored_group
+        raw["api_services"].pop("native_api_v2")
+        raw["api_services"]["healthy"] = {"name": "Healthy", "enabled": True, "group": " Operations "}
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        before = path.read_bytes()
+        monkeypatch.setattr(api_service_schema, "is_shipped_tool_path", lambda path: True)
+        routes._clear_api_service_summary_metadata_cache()
+
+        for _ in range(2):  # Cached list metadata must also retain the safe projection.
+            summaries = {row.id: row for row in await routes.list_api_services()}
+            assert set(summaries) == {"native_api_v1", "native_api_v2", "healthy"}
+            assert summaries["healthy"].group == "Operations"
+            assert summaries["native_api_v1"].group == expected
+            assert summaries["native_api_v1"].enabled is True
+            assert summaries["native_api_v1"].group_readonly is False
+            assert summaries["native_api_v2"].group == "Package"
+            assert summaries["native_api_v2"].group_readonly is True
+
+        metadata = await routes.get_api_service_metadata("native_api_v1")
+        assert metadata.group == expected and metadata.group_readonly is False
+        assert metadata.name == "Native API" and metadata.version == "1"
+        assert api_service_schema._load_api_service_metadata_data("native_api_v1")["group"] == expected
+        assert (await routes.get_api_service_metadata("native_api_v2")).group == "Package"
+        assert path.read_bytes() == before
+        assert writer.get_api_service_raw("native_api_v1")["group"] == stored_group
+        no_toggle.assert_not_called()
+        no_status_write.assert_not_called()
+        if stored_group is not None and expected is None:
+            with pytest.raises(ValueError):
+                api_service_schema.normalize_api_service_group(stored_group)
+            with pytest.raises(ValueError):
+                routes.APIServiceUpdateRequest(group=stored_group)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("record", [None, {}, {"enabled": False}, {"group": ""}])
+    async def test_shipped_definition_vs_empty_or_disabled_instance(self, native_services, monkeypatch, tmp_path, record):
+        from aegisops.config import api_versioning
+        from aegisops.tool import registry
+
+        routes, writer, _, _ = native_services
+        installation = tmp_path / "installation"
+        monkeypatch.setattr(registry, "__file__", str(installation / "aegisops/tool/registry.py"))
+        descriptors = api_versioning.discover_api_service_descriptors()
+        selected = descriptors[0]
+        path = installation / ".aegisops/plugins/tools/api/native/_provider.yaml"
+        path.parent.mkdir(parents=True)
+        path.write_bytes(selected.provider_yaml.read_bytes())
+        selected.provider_yaml = path
+        monkeypatch.setattr(api_versioning, "discover_api_service_descriptors", lambda **kw: descriptors[:1])
+        writer.remove_api_service("native_api_v1")
+        if record is not None:
+            writer.set_api_service("native_api_v1", record)
+        routes._clear_api_service_summary_metadata_cache()
+        summary = routes._build_api_service_summary("native_api_v1", {})
+        assert summary.group_readonly is (record is None)
+        assert (await routes.get_api_service_metadata("native_api")).group_readonly is (record is None)
+        if record is None:
+            before = writer._get_config_path().read_bytes()
+            for group in (None, "", "Override"):
+                with pytest.raises(HTTPException) as exc:
+                    await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group=group, enabled=True))
+                assert exc.value.status_code == 400
+                assert writer._get_config_path().read_bytes() == before
+            # Same-value group-only requests must not manufacture an instance.
+            same = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Package"))
+            assert same.group_readonly is True
+            assert writer.get_api_service_raw("native_api_v1") is None
+            assert writer._get_config_path().read_bytes() == before
+        else:
+            changed = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Instance"))
+            assert changed.group == "Instance" and changed.group_readonly is False
+            cleared = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group=None))
+            assert cleared.group == "" and cleared.group_readonly is False
+            assert yaml.safe_load(path.read_text())["group"] == " Package "
+
+    @pytest.mark.asyncio
+    async def test_group_only_version_identity_preserves_credentials_and_enabled(self, native_services):
+        routes, writer, no_toggle, no_status_write = native_services
+        sibling = dict(writer.get_api_service_raw("native_api_v2"))
+        assert routes._build_api_service_summary("native_api_v1", {}).group == "Package"
+        result = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group="  Operations  "))
+        assert result.id == "native_api_v1"
+        assert result.group == "Operations"
+        assert result.enabled is True
+        assert writer.get_api_service_raw("native_api_v1") == {
+            "enabled": True, "apiKey": "{secret:key1}", "future": {"kept": True}, "group": "Operations",
+        }
+        assert writer.get_api_service_raw("native_api_v2") == sibling
+        for clear in (None, "", "   "):
+            cleared = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group=clear))
+            assert cleared.group == ""
+            assert cleared.enabled is True
+            assert writer.get_api_service_raw("native_api_v1")["group"] == ""
+            assert (await routes.get_api_service_metadata("native_api_v1")).group == ""
+        await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(verify_ssl=True))
+        assert writer.get_api_service_raw("native_api_v1")["group"] == ""
+        assert writer.get_api_service_raw("native_api_v1")["future"] == {"kept": True}
+        no_toggle.assert_not_called()
+        no_status_write.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_single_version_alias_writes_only_canonical_native_record(self, native_services, monkeypatch):
+        from aegisops.config import api_versioning
+
+        routes, writer, _, _ = native_services
+        descriptors = api_versioning.discover_api_service_descriptors()
+        monkeypatch.setattr(api_versioning, "discover_api_service_descriptors", lambda **kw: descriptors[:1])
+        sibling = dict(writer.get_api_service_raw("native_api_v2"))
+        updated = await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Operations"))
+        assert updated.id == "native_api_v1"
+        assert writer.list_api_services_raw()["native_api_v1"]["group"] == "Operations"
+        assert "native_api" not in writer.list_api_services_raw()
+        assert writer.get_api_service_raw("native_api_v2") == sibling
+
+    @pytest.mark.asyncio
+    async def test_enabled_update_preserves_explicit_group_and_other_metadata(self, native_services, monkeypatch):
+        routes, writer, _, _ = native_services
+        await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group=None))
+        toggle = MagicMock(return_value=0)
+        monkeypatch.setattr(routes, "_set_api_service_tools_enabled", toggle)
+        monkeypatch.setattr(routes, "_write_api_service_status_cache", AsyncMock())
+        for enabled in (False, True):
+            updated = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(enabled=enabled))
+            assert updated.enabled is enabled
+            assert updated.group == ""
+            raw = writer.get_api_service_raw("native_api_v1")
+            assert raw["group"] == ""
+            assert raw["apiKey"] == "{secret:key1}"
+            assert raw["future"] == {"kept": True}
+        assert toggle.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_metadata_only_service_does_not_become_credential_ready(self, native_services, monkeypatch):
+        import aegisops.security
+
+        routes, writer, _, _ = native_services
+        writer.remove_api_service("native_api_v1")
+        monkeypatch.setattr(aegisops.security, "get_secret_manager", lambda: MagicMock(get=lambda key: None))
+        summary = await routes.update_api_service("native_api_v1", routes.APIServiceUpdateRequest(group="Operations"))
+        assert summary.enabled is False
+        assert writer.get_api_service_raw("native_api_v1") == {"group": "Operations"}
+        credentials = await routes.get_service_credentials("native_api_v1")
+        assert credentials.has_credential is False
+        assert not credentials.fields
+        assert "group" not in credentials.model_dump()
+
+    @pytest.mark.asyncio
+    async def test_ambiguous_legacy_id_cannot_edit_version_groups(self, native_services):
+        routes, writer, _, _ = native_services
+        original = writer.list_api_services_raw()
+        with pytest.raises(HTTPException) as exc:
+            await routes.update_api_service("native_api", routes.APIServiceUpdateRequest(group="Wrong identity"))
+        assert exc.value.status_code == 400
+        assert writer.list_api_services_raw() == original
+
+    @pytest.mark.asyncio
+    async def test_group_cannot_be_written_as_credentials_or_mark_configured(self, native_services, monkeypatch):
+        import aegisops.security
+
+        routes, writer, _, _ = native_services
+        raw = {"group": "Operations", "credential_fields": [
+            {"key": "group", "storage": "config"},
+            {"key": "alias", "storage": "secret", "config_key": "group"},
+        ]}
+        writer.set_api_service("native_api_v1", raw)
+        monkeypatch.setattr(aegisops.security, "get_secret_manager", lambda: MagicMock(get=lambda key: None))
+        credentials = await routes.get_service_credentials("native_api_v1")
+        assert credentials.fields is None
+        assert credentials.has_credential is False
+        with pytest.raises(HTTPException) as exc:
+            await routes.set_service_credentials("native_api_v1", routes.ProviderCredentialRequest(fields={"group": "Bad"}))
+        assert exc.value.status_code == 400
+        assert writer.get_api_service_raw("native_api_v1") == raw
+        writer.set_api_service("native_api_v1", {"group": "Operations"})
+        save_status = AsyncMock()
+        monkeypatch.setattr(routes, "_save_api_service_status", save_status)
+        await routes._save_api_service_status_if_configured("native_api_v1", {"success": True})
+        save_status.assert_not_called()
+
+    @pytest.mark.parametrize("group", [42, {}, "x" * 33, "a\x7fb"])
+    def test_group_validation(self, group):
+        from pydantic import ValidationError
+        from aegisops.server.routes.provider import APIServiceUpdateRequest
+
+        with pytest.raises(ValidationError):
+            APIServiceUpdateRequest(group=group)
+        with pytest.raises(ValidationError):
+            APIServiceUpdateRequest(enabled=None)
+
+
+class TestAPIServiceManagement:
+    @pytest.mark.asyncio
+    async def test_list_api_services_returns_enabled_state_and_bilingual_descriptions(self):
+        from aegisops.server.routes.provider import list_api_services
+
+        metadata_by_id = {
+            "threatbook_api": {
+                "name": "ThreatBook",
+                "description": "Threat intelligence lookups",
+                "description_cn": "威胁情报查询服务",
+            },
+            "fofa": {
+                "name": "FOFA",
+                "description": "Internet asset search",
+                "description_cn": "互联网资产检索服务",
+            },
+        }
+
+        with (
+            patch("aegisops.tool.registry.ToolRegistry") as mock_tool_registry,
+            patch("aegisops.config.config_writer.ConfigWriter.list_api_services_raw", return_value={
+                "threatbook_api": {"enabled": False},
+            }),
+            patch("aegisops.config.config_writer.ConfigWriter.get_api_service_raw", side_effect=lambda service_id: {
+                "threatbook_api": {"enabled": False},
+            }.get(service_id, {})),
+            patch(
+                "aegisops.server.routes.provider._load_api_service_summary_metadata_data",
+                side_effect=lambda service_id: metadata_by_id[service_id],
+            ),
+            patch(
+                "aegisops.server.routes.provider._read_api_service_status_cache",
+                new=AsyncMock(return_value={
+                    "fofa": {
+                        "status": "connected",
+                        "latency_ms": 120,
+                        "checked_at": 123,
+                    }
+                }),
+            ),
+            patch(
+                "aegisops.server.routes.provider._get_api_service_tool_infos",
+                side_effect=lambda service_id: [object(), object()] if service_id == "threatbook_api" else [object()],
+            ),
+        ):
+            mock_tool_registry.init_async = AsyncMock()
+            mock_tool_registry.get_api_service_ids.return_value = {"fofa"}
+
+            result = await list_api_services()
+
+        mock_tool_registry.init_async.assert_awaited_once()
+        assert [item.id for item in result] == ["fofa", "threatbook_api"]
+        assert result[0].enabled is False
+        assert result[0].status == "disabled"
+        assert result[0].description == "Internet asset search"
+        assert result[0].description_cn == "互联网资产检索服务"
+        assert result[1].enabled is False
+        assert result[1].status == "disabled"
+        assert result[1].tool_count == 2
+
+    def test_api_service_summary_uses_lightweight_metadata_loader(self):
+        from aegisops.server.routes import provider as provider_routes
+
+        with (
+            patch(
+                "aegisops.server.routes.provider._load_api_service_summary_metadata_data",
+                return_value={
+                    "name": "Example API",
+                    "description": "Summary metadata only",
+                    "version": "1.2.3",
+                },
+            ) as mock_summary_loader,
+            patch(
+                "aegisops.server.routes.provider._load_api_service_metadata_data",
+                side_effect=AssertionError("list summaries should not load full API metadata"),
+            ),
+            patch("aegisops.server.routes.provider._get_api_service_enabled", return_value=True),
+            patch("aegisops.server.routes.provider._get_api_service_tool_infos", return_value=[]),
+            patch("aegisops.server.routes.provider._is_api_service_builtin", return_value=False),
+            patch("aegisops.config.config_writer.ConfigWriter.get_api_service_raw", return_value={}),
+        ):
+            summary = provider_routes._build_api_service_summary("example_api", {})
+
+        mock_summary_loader.assert_called_once_with("example_api")
+        assert summary.id == "example_api"
+        assert summary.name == "Example API"
+        assert summary.version == "1.2.3"
+        assert summary.tool_count == 0
+
+    @pytest.mark.asyncio
+    async def test_update_api_service_persists_enabled_flag_and_updates_status_cache(self):
+        from aegisops.server.routes.provider import (
+            APIServiceSummary,
+            APIServiceUpdateRequest,
+            update_api_service,
+        )
+
+        existing_config = {"apiKey": "{secret:threatbook_api_key}"}
+        expected_summary = APIServiceSummary(
+            id="threatbook_api",
+            name="ThreatBook",
+            enabled=False,
+            status="disabled",
+            tool_count=2,
+        )
+
+        with (
+            patch("aegisops.config.config_writer.ConfigWriter.get_api_service_raw", return_value=existing_config.copy()),
+            patch("aegisops.config.config_writer.ConfigWriter.set_api_service") as mock_set_service,
+            patch("aegisops.server.routes.provider._set_api_service_tools_enabled", return_value=2) as mock_toggle_tools,
+            patch(
+                "aegisops.server.routes.provider._read_api_service_status_cache",
+                new=AsyncMock(return_value={}),
+            ),
+            patch(
+                "aegisops.server.routes.provider._write_api_service_status_cache",
+                new=AsyncMock(),
+            ) as mock_write_status,
+            patch(
+                "aegisops.server.routes.provider._build_api_service_summary",
+                return_value=expected_summary,
+            ),
+            patch(
+                "aegisops.tool.registry.ToolRegistry.init_async",
+                new=AsyncMock(),
+            ),
+        ):
+            result = await update_api_service(
+                "threatbook_api",
+                APIServiceUpdateRequest(enabled=False),
+            )
+
+        mock_set_service.assert_called_once_with(
+            "threatbook_api",
+            {"apiKey": "{secret:threatbook_api_key}", "enabled": False},
+        )
+        mock_toggle_tools.assert_called_once_with("threatbook_api", False)
+        written_statuses = mock_write_status.await_args.args[0]
+        assert written_statuses["threatbook_api"]["status"] == "disabled"
+        assert result == expected_summary
+
+
+class TestToolRouteAPIServiceSync:
+    def test_effective_api_tool_state_requires_service_credentials(self):
+        from aegisops.server.routes.tool import _get_effective_tool_enabled
+
+        tool_info = ToolInfo(
+            name="threatbook_ip_query",
+            description="Query threat intelligence",
+            category=ToolCategory.CUSTOM,
+            enabled=True,
+            source="api",
+            provider="threatbook_api",
+        )
+
+        with patch("aegisops.server.routes.provider._get_api_service_enabled", return_value=False):
+            assert _get_effective_tool_enabled(tool_info) is False
+
+    def test_effective_api_tool_state_keeps_tool_level_disable(self):
+        from aegisops.server.routes.tool import _get_effective_tool_enabled, _build_tool_response
+
+        tool_info = ToolInfo(
+            name="threatbook_ip_query",
+            description="Query threat intelligence",
+            category=ToolCategory.CUSTOM,
+            enabled=False,
+            source="api",
+            provider="threatbook_api",
+        )
+
+        with patch(
+            "aegisops.config.config_writer.ConfigWriter.get_api_service_raw",
+            return_value={"enabled": True},
+        ):
+            assert _get_effective_tool_enabled(tool_info) is False
+            response = _build_tool_response(tool_info)
+
+        assert tool_info.enabled is False
+        assert response.enabled is False
+
+    @pytest.mark.asyncio
+    async def test_update_tool_allows_api_tool_toggle(self):
+        from aegisops.server.routes.tool import ToolUpdateRequest, update_tool
+
+        tool = MagicMock()
+        tool.info = ToolInfo(
+            name="threatbook_ip_query",
+            description="Query threat intelligence",
+            category=ToolCategory.CUSTOM,
+            enabled=True,
+            source="api",
+            provider="threatbook_api",
+        )
+
+        with (
+            patch("aegisops.server.routes.tool.ToolRegistry.init"),
+            patch("aegisops.server.routes.tool.ToolRegistry.get", return_value=tool),
+            patch("aegisops.tool.tool_loader.find_yaml_tool", return_value=None),
+            patch("aegisops.server.routes.tool._build_tool_response") as mock_build,
+        ):
+            mock_build.return_value = MagicMock()
+            await update_tool("threatbook_ip_query", ToolUpdateRequest(enabled=False))
+            assert tool.info.enabled is False
+
+    @pytest.mark.asyncio
+    async def test_create_tool_auto_enables_provider_backed_api_service(self):
+        from aegisops.server.routes.tool import (
+            CreateToolRequest,
+            ToolInfoResponse,
+            ToolRegistry,
+            create_tool,
+        )
+
+        tool = MagicMock()
+        tool.info = ToolInfo(
+            name="threatbook_ip_query",
+            description="Query threat intelligence",
+            category=ToolCategory.CUSTOM,
+            enabled=True,
+            source="api",
+            provider="threatbook_api",
+        )
+        response = ToolInfoResponse(
+            name="threatbook_ip_query",
+            description="Query threat intelligence",
+            category="custom",
+            source="api",
+            source_name="threatbook_api",
+            enabled=True,
+            parameters=[],
+            requires_confirmation=False,
+        )
+
+        with (
+            patch("aegisops.server.routes.tool.ToolRegistry.init"),
+            patch("aegisops.tool.tool_loader.create_yaml_tool", return_value="dummy.yaml"),
+            patch("aegisops.tool.tool_loader.yaml_to_tool", return_value=tool),
+            patch("aegisops.server.routes.tool.ToolRegistry.register"),
+            patch.object(ToolRegistry, "_plugin_tool_names", []),
+            patch("aegisops.server.routes.tool._build_tool_response", return_value=response),
+            patch(
+                "aegisops.server.routes.provider.update_api_service",
+                new=AsyncMock(),
+            ) as mock_update_api_service,
+        ):
+            result = await create_tool(
+                CreateToolRequest(
+                    name="threatbook_ip_query",
+                    description="Query threat intelligence",
+                    category="custom",
+                    provider="threatbook_api",
+                    enabled=True,
+                    handler={
+                        "type": "http",
+                        "method": "GET",
+                        "url": "https://example.com",
+                    },
+                )
+            )
+
+        assert result == response
+        assert mock_update_api_service.await_count == 1
+        args = mock_update_api_service.await_args.args
+        assert args[0] == "threatbook_api"
+        assert args[1].enabled is True
+
+    @pytest.mark.asyncio
+    async def test_create_tool_does_not_enable_service_when_explicitly_disabled(self):
+        from aegisops.server.routes.tool import CreateToolRequest, ToolInfoResponse, ToolRegistry, create_tool
+
+        tool = MagicMock()
+        tool.info = ToolInfo(
+            name="threatbook_ip_query",
+            description="Query threat intelligence",
+            category=ToolCategory.CUSTOM,
+            enabled=False,
+            source="api",
+            provider="threatbook_api",
+        )
+        response = ToolInfoResponse(
+            name="threatbook_ip_query",
+            description="Query threat intelligence",
+            category="custom",
+            source="api",
+            source_name="threatbook_api",
+            enabled=False,
+            parameters=[],
+            requires_confirmation=False,
+        )
+
+        with (
+            patch("aegisops.server.routes.tool.ToolRegistry.init"),
+            patch("aegisops.tool.tool_loader.create_yaml_tool", return_value="dummy.yaml"),
+            patch("aegisops.tool.tool_loader.yaml_to_tool", return_value=tool),
+            patch("aegisops.server.routes.tool.ToolRegistry.register"),
+            patch.object(ToolRegistry, "_plugin_tool_names", []),
+            patch("aegisops.server.routes.tool._build_tool_response", return_value=response),
+            patch(
+                "aegisops.server.routes.provider.update_api_service",
+                new=AsyncMock(),
+            ) as mock_update_api_service,
+        ):
+            result = await create_tool(
+                CreateToolRequest(
+                    name="threatbook_ip_query",
+                    description="Query threat intelligence",
+                    category="custom",
+                    provider="threatbook_api",
+                    enabled=False,
+                    handler={
+                        "type": "http",
+                        "method": "GET",
+                        "url": "https://example.com",
+                    },
+                )
+            )
+
+        assert result == response
+        assert mock_update_api_service.await_count == 0
+
+
+class TestProviderBackedApiServiceStatus:
+    @pytest.mark.asyncio
+    async def test_provider_test_updates_api_service_status_cache_when_configured(self):
+        from aegisops.server.routes.provider import test_provider_credentials
+
+        provider = MagicMock()
+        provider._config = None
+        provider._base_url = None
+        provider.configure = MagicMock()
+        provider.chat = AsyncMock(return_value=MagicMock(content="Paris"))
+
+        model = MagicMock()
+        model.id = "test-model"
+
+        mock_secrets = MagicMock()
+        mock_secrets.get.side_effect = lambda key: "api-key"
+
+        mock_config = MagicMock()
+
+        with (
+            patch("aegisops.security.get_secret_manager", return_value=mock_secrets),
+            patch("aegisops.config.config.Config.get", new_callable=AsyncMock, return_value=mock_config),
+            patch("aegisops.config.config_writer.ConfigWriter.get_api_service_raw", return_value={"apiKey": "{secret:threatbook_api_key}"}),
+            patch("aegisops.server.routes.provider.Provider") as mock_provider_cls,
+            patch("aegisops.server.routes.provider._save_api_service_status", new=AsyncMock()) as mock_save_status,
+        ):
+            mock_provider_cls._ensure_initialized = MagicMock()
+            mock_provider_cls.apply_config = AsyncMock()
+            mock_provider_cls.get.return_value = provider
+            mock_provider_cls.list_models.return_value = [model]
+
+            result = await test_provider_credentials("threatbook_api")
+
+        assert result["success"] is True
+        assert mock_save_status.await_count == 1
+        saved_args = mock_save_status.await_args.args
+        assert saved_args[0] == "threatbook_api"
+        assert saved_args[1]["success"] is True
+
+    @pytest.mark.asyncio
+    async def test_skip_status_cache_update_for_disabled_api_service(self):
+        from aegisops.server.routes.provider import _save_api_service_status_if_configured
+
+        with (
+            patch("aegisops.config.config_writer.ConfigWriter.get_api_service_raw", return_value={"enabled": False}),
+            patch("aegisops.server.routes.provider._save_api_service_status", new=AsyncMock()) as mock_save_status,
+        ):
+            await _save_api_service_status_if_configured("threatbook_api", {"success": True})
+
+        assert mock_save_status.await_count == 0
+
+
+class TestAPIServiceStatusCache:
+    @pytest.mark.asyncio
+    async def test_read_api_service_status_cache_ignores_expired_entries(self):
+        from aegisops.server.routes.provider import _read_api_service_status_cache
+
+        with (
+            patch("aegisops.server.routes.provider.Storage.init", new=AsyncMock()),
+            patch(
+                "aegisops.server.routes.provider.Storage.read",
+                new=AsyncMock(return_value={
+                    "checked_at": 1,
+                    "statuses": {"threatbook_api": {"status": "connected"}},
+                }),
+            ),
+        ):
+            result = await _read_api_service_status_cache(max_age_seconds=60)
+
+        assert result == {}
+
+
+class TestProviderYamlMetadata:
+    def test_load_api_service_metadata_uses_config_writer_raw_data(self):
+        from aegisops.server.routes.provider import _load_api_service_metadata_data
+
+        with (
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.get_api_service_raw",
+                return_value={"enabled": False, "base_url": "https://api.example.test"},
+            ),
+            patch(
+                "aegisops.server.routes.provider._load_provider_yaml_metadata",
+                return_value={
+                    "name": "Example Service",
+                    "description": "Example description",
+                },
+            ),
+        ):
+            metadata = _load_api_service_metadata_data("example_service")
+
+        assert metadata is not None
+        assert metadata["name"] == "Example Service"
+        assert metadata["base_url"] == "https://api.example.test"
+        assert metadata["enabled"] is False
+
+    def test_load_api_service_summary_metadata_reuses_cached_yaml(self, tmp_path, monkeypatch):
+        from aegisops.server.routes import provider as provider_routes
+
+        provider_routes._clear_api_service_summary_metadata_cache()
+        monkeypatch.setattr(provider_routes.api_service_schema_helpers, "_LEGACY_METADATA_DIR", tmp_path)
+        try:
+            with (
+                patch(
+                    "aegisops.config.config_writer.ConfigWriter.get_api_service_raw",
+                    return_value={"enabled": True},
+                ),
+                patch(
+                    "aegisops.server.routes.provider._provider_yaml_cache_key",
+                    return_value=("/plugins/example/_provider.yaml", 123),
+                ),
+                patch(
+                    "aegisops.server.routes.provider._load_provider_yaml_summary_metadata",
+                    return_value={
+                        "name": "Example Service",
+                        "description": "Loaded from provider yaml",
+                    },
+                ) as mock_yaml_loader,
+            ):
+                first = provider_routes._load_api_service_summary_metadata_data("example_service")
+                second = provider_routes._load_api_service_summary_metadata_data("example_service")
+
+            mock_yaml_loader.assert_called_once_with("example_service")
+            assert first == second
+            assert first["name"] == "Example Service"
+            assert first["enabled"] is True
+        finally:
+            provider_routes._clear_api_service_summary_metadata_cache()
+
+    def test_summary_descriptor_lookup_uses_cached_discovery(self, monkeypatch):
+        from aegisops.server.routes import provider as provider_routes
+
+        calls = []
+
+        def discover_api_service_descriptors(*, refresh=False):
+            calls.append(refresh)
+            if refresh:
+                raise AssertionError("summary lookup should not refresh descriptor discovery")
+            return []
+
+        monkeypatch.setattr(
+            "aegisops.config.api_versioning.discover_api_service_descriptors",
+            discover_api_service_descriptors,
+        )
+
+        assert provider_routes._find_api_service_descriptor("missing_service") is None
+        assert calls == [False]
+
+    def test_load_provider_yaml_metadata_from_project_plugins(self, tmp_path, monkeypatch):
+        from aegisops.server.routes.provider import _load_provider_yaml_metadata
+
+        provider_dir = tmp_path / ".aegisops" / "plugins" / "tools" / "api" / "threatbook"
+        provider_dir.mkdir(parents=True)
+        (provider_dir / "_provider.yaml").write_text(yaml.safe_dump({
+            "name": "ThreatBook",
+            "service_id": "threatbook_api",
+            "description": "Threat intelligence",
+            "description_cn": "威胁情报",
+            "docs_url": "https://docs.example.com/threatbook",
+        }), encoding="utf-8")
+        (provider_dir / "threatbook_ip_query.yaml").write_text(yaml.safe_dump({
+            "name": "threatbook_ip_query",
+            "provider": "threatbook_api",
+            "description": "Query IP threat intelligence",
+            "handler": {"type": "script", "script_file": "threatbook.handler.py", "function": "ip_query"},
+        }), encoding="utf-8")
+
+        monkeypatch.chdir(tmp_path)
+        metadata = _load_provider_yaml_metadata("threatbook_api")
+
+        assert metadata is not None
+        assert metadata["name"] == "ThreatBook"
+        assert metadata["description_cn"] == "威胁情报"
+        assert metadata["docs_url"] == "https://docs.example.com/threatbook"
+        assert metadata["apis"][0]["name"] == "threatbook_ip_query"
+
+    @pytest.mark.asyncio
+    async def test_get_api_service_metadata_returns_credential_schema(self):
+        from aegisops.server.routes.provider import get_api_service_metadata
+
+        with patch(
+            "aegisops.server.routes.provider._load_api_service_metadata_data",
+            return_value={
+                "name": "Qingteng",
+                "description": "Qingteng API service",
+                "docs_url": "https://docs.example.com/qingteng",
+                "credential_fields": [
+                    {"key": "base_url", "storage": "config", "config_key": "base_url", "input_type": "url"},
+                    {"key": "username", "storage": "config", "config_key": "username"},
+                    {"key": "password", "storage": "secret", "config_key": "password", "secret_id": "qingteng_password"},
+                ],
+            },
+        ):
+            result = await get_api_service_metadata("qingteng")
+
+        assert result.name == "Qingteng"
+        assert result.docs_url == "https://docs.example.com/qingteng"
+        assert result.credential_schema is not None
+        assert [field["key"] for field in result.credential_schema] == ["base_url", "username", "password"]
+        assert result.credential_schema[2]["secret_id"] == "qingteng_password"
+
+
+def _make_api_tool(name: str, provider: str, *, native: bool = False, enabled: bool = True) -> Tool:
+    """Helper to create a minimal API tool for bootstrap tests."""
+    async def _noop(ctx, **kw):
+        pass
+    return Tool(
+        info=ToolInfo(
+            name=name,
+            description="test tool",
+            category=ToolCategory.CUSTOM,
+            source="api",
+            provider=provider,
+            native=native,
+            enabled=enabled,
+        ),
+        handler=_noop,
+    )
+
+
+class TestBootstrapUserApiServices:
+    """Tests for ToolRegistry._bootstrap_user_api_services()."""
+
+    def _run_bootstrap(self, tools: dict, get_raw_side_effect):
+        """Patch ToolRegistry._tools, run bootstrap, return mock_set."""
+        with (
+            patch.object(ToolRegistry, "_tools", tools),
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.get_api_service_raw",
+                side_effect=get_raw_side_effect,
+            ),
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.set_api_service",
+            ) as mock_set,
+        ):
+            ToolRegistry._bootstrap_user_api_services()
+        return mock_set
+
+    def test_bootstrap_creates_enabled_entry_for_new_provider(self):
+        """When api_services has no entry for the provider, bootstrap writes {enabled: True}."""
+        tools = {"my_api_tool": _make_api_tool("my_api_tool", "my_service")}
+        mock_set = self._run_bootstrap(tools, get_raw_side_effect=lambda _: None)
+        mock_set.assert_called_once_with("my_service", {"enabled": True})
+
+    def test_bootstrap_adds_enabled_true_when_key_missing(self):
+        """When api_services.<provider> exists but lacks 'enabled', bootstrap adds enabled: True."""
+        existing = {"apiKey": "{secret:key}", "base_url": "https://api.example.com"}
+        tools = {"my_api_tool": _make_api_tool("my_api_tool", "my_service")}
+        mock_set = self._run_bootstrap(
+            tools,
+            get_raw_side_effect=lambda _: existing.copy(),
+        )
+        mock_set.assert_called_once()
+        written = mock_set.call_args.args[1]
+        assert written["enabled"] is True
+        assert written["apiKey"] == "{secret:key}"
+        assert written["base_url"] == "https://api.example.com"
+
+    def test_bootstrap_writes_unique_versioned_storage_key(self):
+        tools = {"tdp_tool": _make_api_tool("tdp_tool", "tdp_api")}
+        with patch(
+            "aegisops.config.api_versioning.versioned_storage_key_for",
+            return_value="tdp_api_v3_3_10",
+        ):
+            mock_set = self._run_bootstrap(tools, get_raw_side_effect=lambda _: None)
+
+        mock_set.assert_called_once_with("tdp_api_v3_3_10", {"enabled": True})
+
+    def test_bootstrap_then_sync_reads_the_same_versioned_storage_key(self):
+        tool = _make_api_tool("tdp_tool", "tdp_api")
+        tools = {"tdp_tool": tool}
+        services = {
+            "tdp_api": {"apiKey": "legacy-copy"},
+            "tdp_api_v3_3_10": {"apiKey": "versioned-copy"},
+        }
+
+        def get_raw(storage_key: str):
+            value = services.get(storage_key)
+            return value.copy() if value is not None else None
+
+        def set_service(storage_key: str, value: dict):
+            services[storage_key] = value.copy()
+
+        with (
+            patch.object(ToolRegistry, "_tools", tools),
+            patch.object(ToolRegistry, "_enabled_defaults", {"tdp_tool": True}),
+            patch(
+                "aegisops.config.api_versioning.versioned_storage_key_for",
+                return_value="tdp_api_v3_3_10",
+            ),
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.get_api_service_raw",
+                side_effect=get_raw,
+            ),
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.set_api_service",
+                side_effect=set_service,
+            ),
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.list_api_services_raw",
+                side_effect=lambda: services,
+            ),
+        ):
+            ToolRegistry._bootstrap_user_api_services()
+            ToolRegistry._sync_api_service_states()
+
+        assert services["tdp_api_v3_3_10"]["enabled"] is True
+        assert "enabled" not in services["tdp_api"]
+        assert tool.info.enabled is True
+
+    def test_bootstrap_does_not_overwrite_explicit_disabled(self):
+        """When api_services.<provider>.enabled is False, bootstrap leaves it untouched."""
+        existing = {"enabled": False, "apiKey": "{secret:key}"}
+        tools = {"my_api_tool": _make_api_tool("my_api_tool", "my_service")}
+        mock_set = self._run_bootstrap(
+            tools,
+            get_raw_side_effect=lambda _: existing.copy(),
+        )
+        mock_set.assert_not_called()
+
+    def test_bootstrap_skips_native_tools(self):
+        """Native (project-level) tools should not trigger bootstrap."""
+        tools = {"native_tool": _make_api_tool("native_tool", "native_svc", native=True)}
+        mock_set = self._run_bootstrap(tools, get_raw_side_effect=lambda _: None)
+        mock_set.assert_not_called()
+
+    def test_bootstrap_then_sync_keeps_disabled_tool_off(self):
+        """End-to-end: bootstrap respects explicit disabled, sync keeps tool disabled."""
+        tool = _make_api_tool("my_api_tool", "my_service")
+        tools = {"my_api_tool": tool}
+
+        with (
+            patch.object(ToolRegistry, "_tools", tools),
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.get_api_service_raw",
+                return_value={"enabled": False},
+            ),
+            patch("aegisops.config.config_writer.ConfigWriter.set_api_service") as mock_set,
+            patch(
+                "aegisops.config.config_writer.ConfigWriter.list_api_services_raw",
+                return_value={"my_service": {"enabled": False}},
+            ),
+        ):
+            ToolRegistry._bootstrap_user_api_services()
+            ToolRegistry._sync_api_service_states()
+
+        mock_set.assert_not_called()
+        assert tool.info.enabled is False

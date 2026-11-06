@@ -1,0 +1,397 @@
+"""
+channel_message tool — sends a message to the messaging channel bound to a given session.
+
+Looks up the SessionBinding for the given session_id to automatically resolve
+the target channel (WeCom / Weixin / Feishu / DingTalk / Telegram / WhatsApp / Email / Slack)
+and chat_id, so the caller
+does not need to specify them manually.
+
+The optional channel_type parameter selects a specific channel when a session
+is bound to multiple channels.
+"""
+
+from __future__ import annotations
+
+import fnmatch
+import os
+import re
+from pathlib import Path
+
+from aegisops.tool.registry import (
+    ParameterType,
+    ToolCategory,
+    ToolContext,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
+)
+
+_CHANNEL_ALIASES: dict[str, list[str]] = {
+    "wecom": ["wecom", "企微", "企业微信", "wechat_work", "wxwork"],
+    "weixin": ["weixin", "微信", "wechat", "wx"],
+    "feishu": ["feishu", "飞书", "lark"],
+    "dingtalk": ["dingtalk", "钉钉", "dingding", "dingtalk-connector"],
+    "telegram": ["telegram", "tg", "tele"],
+    "whatsapp": ["whatsapp", "wa"],
+    "email": ["email", "mail", "邮件", "imap", "smtp"],
+    "slack": ["slack", "sl"],
+}
+
+
+def _get_server_port() -> int:
+    """Return the port of the API server hosting the current process."""
+    try:
+        runtime_port = os.environ.get("_AEGISOPS_SERVER_PORT")
+        if runtime_port:
+            return int(runtime_port)
+
+        from aegisops.config import Config
+
+        return Config.get_global().server_port
+    except Exception:
+        return 8000
+
+
+def _normalize_channel_type(channel_type: str | None) -> str | None:
+    """Normalize a user-supplied channel_type (Chinese or English) to its canonical channel id."""
+    if not channel_type:
+        return None
+    lower = channel_type.strip().lower()
+    for canonical, aliases in _CHANNEL_ALIASES.items():
+        if lower in [a.lower() for a in aliases]:
+            return canonical
+    return lower
+
+
+_URL_SCHEME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*://")
+_SENSITIVE_MEDIA_BASENAMES = (".secret.json", ".env", ".env.*", ".netrc", ".npmrc", "credentials.json",
+                              "service-account*.json", "*.pem", "*.key", "*.p12", "*.jks", "id_rsa*", "id_ed25519*")
+# Inside the runtime root only these trees hold user-facing artifacts (tool
+# outputs, reports, project files); everything else there — config, databases,
+# logs, caches, plugin sources and any extension's own state directory — is
+# private and never a legitimate IM attachment.
+_SHAREABLE_RUNTIME_SUBDIRS = ("workspace", "projects")
+
+
+def _sensitive_media_error(media: str | None) -> str | None:
+    """Refuse local paths that would leak credentials/keys to an IM channel.
+
+    ``media`` is either a URL (passed through) or a local file path handed to
+    the channel plugin as ``media_url``; private runtime state, ``~/.ssh`` and
+    well-known secret files must never be delivered.
+    """
+    if not media or _URL_SCHEME_RE.match(media):
+        return None
+    path = Path(media).expanduser()
+    try:
+        resolved = path.resolve()
+    except OSError:
+        resolved = path.absolute()
+
+    def _under(root: Path) -> bool:
+        try:
+            root = root.resolve()
+        except OSError:
+            return False
+        return resolved == root or root in resolved.parents
+
+    protected: list[Path] = [Path.home() / ".ssh"]
+    try:
+        from aegisops.config.config import _get_config_dir, _get_aegisops_root
+
+        protected.append(_get_config_dir())
+        runtime_root = _get_aegisops_root()
+        if _under(runtime_root) and not any(
+            _under(runtime_root / sub) for sub in _SHAREABLE_RUNTIME_SUBDIRS
+        ):
+            return f"media 指向受保护目录中的文件，拒绝发送: {media}"
+    except Exception:
+        pass
+    if any(_under(root) for root in protected):
+        return f"media 指向受保护目录中的文件，拒绝发送: {media}"
+    if any(fnmatch.fnmatch(resolved.name, pattern) for pattern in _SENSITIVE_MEDIA_BASENAMES):
+        return f"media 指向敏感文件，拒绝发送: {media}"
+    return None
+
+
+def _get_api_token() -> str | None:
+    """Read the server API token from the secret manager (non-async, best-effort).
+
+    Reuses ``API_TOKEN_SECRET_ID`` from ``aegisops.server.auth`` so that the
+    secret id stays in lockstep with what the server-side auth middleware
+    expects; if those drift apart the request will silently start failing
+    with 401.
+    """
+    try:
+        from aegisops.security import get_secret_manager
+        from aegisops.server.auth import API_TOKEN_SECRET_ID
+        token = get_secret_manager().get(API_TOKEN_SECRET_ID)
+        return token.strip() if token and token.strip() else None
+    except Exception:
+        return None
+
+
+async def _http_session_send(
+    port: int,
+    session_id: str,
+    text: str,
+    channel_type: str | None = None,
+    media_url: str | None = None,
+    account_id: str | None = None,
+    chat_id: str | None = None,
+) -> ToolResult | None:
+    """Send a message via the running aegisops server's /api/channel/session-send endpoint,
+    reusing the already-established WebSocket connection.
+
+    Returns None when the HTTP path is unavailable (server not running),
+    signalling the caller to fall back to the in-process path.
+    """
+    try:
+        import httpx
+
+        payload: dict = {"session_id": session_id, "text": text}
+        if channel_type:
+            payload["channel_type"] = channel_type
+        if media_url:
+            payload["media_url"] = media_url
+        if account_id:
+            payload["account_id"] = account_id
+        if chat_id:
+            payload["chat_id"] = chat_id
+
+        headers: dict[str, str] = {}
+        api_token = _get_api_token()
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
+
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"http://localhost:{port}/api/channel/session-send",
+                json=payload,
+                headers=headers,
+                timeout=10.0,
+            )
+            body = resp.json()
+            if resp.status_code == 200:
+                resolved_session_id = body.get("session_id") or session_id
+                return ToolResult(
+                    success=True,
+                    output=(
+                        f"Message sent to session '{resolved_session_id}' "
+                        f"via channels {body.get('channels', [])}, "
+                        f"ids: {body.get('message_ids', [])}"
+                    ),
+                )
+            # 401 + we had no token to present: either the secret is unset
+            # or this process can't read it. Either way, the in-process
+            # path bypasses HTTP auth and can still deliver the message,
+            # so we fall back instead of surfacing an error.
+            # (If we DID send a token and it was rejected, fall through
+            # and report the server's detail so misconfiguration is visible.)
+            if resp.status_code == 401 and not api_token:
+                return None
+            return ToolResult(
+                success=False,
+                error=f"Send failed (HTTP {resp.status_code}): {body.get('detail', body)}",
+            )
+    except ImportError:
+        return None
+    except (httpx.ConnectError, httpx.ConnectTimeout):
+        return None  # server not running — fall back to in-process path
+    except Exception as e:
+        return ToolResult(success=False, error=f"HTTP send failed: {e}")
+
+
+@ToolRegistry.register_function(
+    name="channel_message",
+    group="企业协作",
+    description=(
+        "Send a message to the messaging channel bound to a session. "
+        "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk, "
+        "Telegram=telegram, WhatsApp=whatsapp, Email/邮件=email, Slack=slack. "
+        "Resolves the target channel and chat automatically from session_id. "
+        "Use channel_type to target a specific channel when the session has multiple bindings."
+    ),
+    category=ToolCategory.SYSTEM,
+    parameters=[
+        ToolParameter(
+            name="session_id",
+            type=ParameterType.STRING,
+            required=True,
+            description="ID of the target session. The tool resolves the bound IM channel and chat from this.",
+        ),
+        ToolParameter(
+            name="message",
+            type=ParameterType.STRING,
+            required=True,
+            description="Message content (Markdown supported).",
+        ),
+        ToolParameter(
+            name="channel_type",
+            type=ParameterType.STRING,
+            required=False,
+            enum=[
+                "wecom",
+                "weixin",
+                "feishu",
+                "dingtalk",
+                "telegram",
+                "whatsapp",
+                "email",
+                "slack",
+                "企微",
+                "企业微信",
+                "微信",
+                "飞书",
+                "钉钉",
+                "邮件",
+            ],
+            description=(
+                "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, dingtalk=钉钉, "
+                "telegram=Telegram, whatsapp=WhatsApp, email=邮件, or slack=Slack. "
+                "Chinese aliases are accepted. "
+                "If omitted and the session has only one binding, that channel is used automatically. "
+                "If omitted and the session has multiple bindings, the message is sent to all of them."
+            ),
+        ),
+        ToolParameter(
+            name="media",
+            type=ParameterType.STRING,
+            required=False,
+            description="Media URL or local file path (optional).",
+        ),
+        ToolParameter(
+            name="account_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
+        ToolParameter(
+            name="chat_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
+    ],
+)
+async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
+    session_id: str = kwargs["session_id"]
+    message: str = kwargs["message"]
+    media: str | None = kwargs.get("media")
+    account_id: str | None = kwargs.get("account_id")
+    chat_id: str | None = kwargs.get("chat_id")
+    raw_channel_type: str | None = kwargs.get("channel_type")
+    channel_type: str | None = _normalize_channel_type(raw_channel_type)
+
+    media_error = _sensitive_media_error(media)
+    if media_error:
+        return ToolResult(success=False, error=media_error)
+
+    # Prefer the HTTP endpoint of the running aegisops server to reuse its WS connection.
+    port = _get_server_port()
+
+    result = await _http_session_send(
+        port,
+        session_id,
+        message,
+        channel_type,
+        media,
+        account_id,
+        chat_id,
+    )
+    if result is not None:
+        return result
+
+    # Fallback: in-process delivery (requires the channel to be started in the same process).
+    from aegisops.channel.inbound.session_binding import SessionBindingService
+    from aegisops.channel.outbound.deliver import OutboundDelivery
+    from aegisops.channel.base import OutboundContext
+
+    svc = SessionBindingService()
+    all_bindings = await svc.list_bindings()
+    matched = [b for b in all_bindings if b.session_id == session_id]
+    resolved_session_id = session_id
+
+    if not matched and channel_type:
+        latest = await svc.latest_active_user_binding(
+            channel_id=channel_type,
+            account_id=account_id,
+            chat_id=chat_id,
+        )
+        if latest:
+            matched = [latest]
+            resolved_session_id = latest.session_id
+
+    if not matched:
+        return ToolResult(
+            success=False,
+            error=(
+                f"No channel binding found for session_id='{session_id}'. "
+                "Resolve the current IM target again with "
+                "im_send_message(resolve_only=true), or ask the user to confirm "
+                "the target IM session."
+            ),
+        )
+
+    if channel_type:
+        filtered = [b for b in matched if b.channel_id == channel_type]
+        if not filtered:
+            available = list({b.channel_id for b in matched})
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Session '{session_id}' has no binding for channel_type='{raw_channel_type}'. "
+                    f"Available channels: {available}"
+                ),
+            )
+        targets = filtered
+    else:
+        targets = matched
+
+    if account_id:
+        targets = [b for b in targets if b.account_id == account_id]
+    if chat_id:
+        targets = [b for b in targets if b.chat_id == chat_id]
+    if (account_id or chat_id) and not targets:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Session '{session_id}' has no binding matching "
+                f"account_id='{account_id}' chat_id='{chat_id}'."
+            ),
+        )
+
+    all_results = []
+    errors = []
+
+    for binding in targets:
+        out_ctx = OutboundContext(
+            channel_id=binding.channel_id,
+            account_id=binding.account_id,
+            to=binding.chat_id,
+            text=message,
+            media_url=media,
+        )
+        results = await OutboundDelivery.deliver(out_ctx, session_id=resolved_session_id)
+        all_results.extend(results)
+
+        failed = [r for r in results if not r.success]
+        if failed:
+            errors.append(f"[{binding.channel_id}/{binding.chat_id}] {failed[0].error}")
+
+    if errors:
+        return ToolResult(
+            success=False,
+            error="Delivery failed for some channels:\n" + "\n".join(errors),
+        )
+
+    msg_ids = [r.message_id for r in all_results if r.message_id]
+    channels_sent = list({b.channel_id for b in targets})
+    return ToolResult(
+        success=True,
+        output=(
+            f"Message sent to session '{resolved_session_id}' "
+            f"via channels {channels_sent}, "
+            f"{len(all_results)} chunk(s), ids: {msg_ids}"
+        ),
+    )

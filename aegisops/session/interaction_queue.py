@@ -1,0 +1,242 @@
+"""In-memory prompt queue for non-blocking session interaction."""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from pydantic import BaseModel, Field
+
+from aegisops.session.execution_mode import SessionExecutionMode
+from aegisops.utils.id import Identifier
+
+
+MAX_QUEUE_SIZE = 50
+
+
+class QueueFullError(Exception):
+    """Raised when a session prompt queue reaches its configured limit."""
+
+
+class QueueItemNotFoundError(Exception):
+    """Raised when a queued prompt cannot be found."""
+
+
+class QueuedPrompt(BaseModel):
+    id: str = Field(default_factory=lambda: Identifier.create("part"))
+    sessionID: str
+    parts: List[Dict[str, Any]] = Field(default_factory=list)
+    agent: Optional[str] = None
+    model: Optional[Dict[str, Any]] = None
+    variant: Optional[str] = None
+    display_text: Optional[str] = None
+    messageID: Optional[str] = None
+    noReply: Optional[bool] = None
+    mockReply: Optional[str] = None
+    tools: Optional[Dict[str, bool]] = None
+    system: Optional[str] = None
+    executionMode: SessionExecutionMode = SessionExecutionMode.BUILD
+    execution_context: Optional[Dict[str, Any]] = None
+    status: str = "pending"
+    createdAt: int = Field(default_factory=lambda: int(time.time() * 1000))
+    updatedAt: int = Field(default_factory=lambda: int(time.time() * 1000))
+
+
+class InteractionQueue:
+    """Process-local per-session FIFO prompt queues."""
+
+    _queues: Dict[str, List[QueuedPrompt]] = {}
+    _locks: Dict[str, asyncio.Lock] = {}
+    _paused: set[str] = set()
+    # Accepted requests outlive the Composer and may leave the pending queue
+    # before their files are bound. Keep those short-lived references here too.
+    _upload_holds: Dict[str, tuple[str, str, frozenset[str]]] = {}
+
+    @classmethod
+    def hold_uploads(cls, session_id: str, owner_id: str, parts: List[Dict[str, Any]]) -> str:
+        upload_ids = frozenset(
+            str(part.get("uploadID") or "").strip() for part in parts if part.get("uploadID")
+        )
+        if not owner_id or not upload_ids:
+            return ""
+        token = Identifier.create("part")
+        cls._upload_holds[token] = (session_id, owner_id, upload_ids)
+        return token
+
+    @classmethod
+    def release_uploads(cls, token: str) -> None:
+        cls._upload_holds.pop(token, None)
+
+    @classmethod
+    def references_upload(cls, owner_id: str, upload_id: str) -> bool:
+        if any(
+            uploader == owner_id and upload_id in upload_ids
+            for _session, uploader, upload_ids in cls._upload_holds.values()
+        ):
+            return True
+        return any(
+            (item.execution_context or {}).get("_uploaderUserID") == owner_id
+            and any(str(part.get("uploadID") or "").strip() == upload_id for part in item.parts)
+            for queue in cls._queues.values()
+            for item in queue
+        )
+
+    @classmethod
+    def _lock_for(cls, session_id: str) -> asyncio.Lock:
+        lock = cls._locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._locks[session_id] = lock
+        return lock
+
+    @classmethod
+    async def enqueue(
+        cls,
+        session_id: str,
+        *,
+        parts: List[Dict[str, Any]],
+        agent: Optional[str] = None,
+        model: Optional[Dict[str, Any]] = None,
+        variant: Optional[str] = None,
+        display_text: Optional[str] = None,
+        message_id: Optional[str] = None,
+        no_reply: Optional[bool] = None,
+        mock_reply: Optional[str] = None,
+        tools: Optional[Dict[str, bool]] = None,
+        system: Optional[str] = None,
+        execution_mode: SessionExecutionMode = SessionExecutionMode.BUILD,
+        execution_context: Optional[Dict[str, Any]] = None,
+    ) -> QueuedPrompt:
+        async with cls._lock_for(session_id):
+            queue = cls._queues.setdefault(session_id, [])
+            if len(queue) >= MAX_QUEUE_SIZE:
+                raise QueueFullError(f"Session {session_id} prompt queue is full")
+
+            item = QueuedPrompt(
+                sessionID=session_id,
+                parts=[dict(part) for part in parts],
+                agent=agent,
+                model=dict(model) if isinstance(model, dict) else model,
+                variant=variant,
+                display_text=display_text,
+                messageID=message_id,
+                noReply=no_reply,
+                mockReply=mock_reply,
+                tools=dict(tools) if tools else None,
+                system=system,
+                executionMode=execution_mode,
+                execution_context=(
+                    dict(execution_context)
+                    if isinstance(execution_context, dict)
+                    else None
+                ),
+            )
+            queue.append(item)
+            return item
+
+    @classmethod
+    async def list(cls, session_id: str) -> List[QueuedPrompt]:
+        async with cls._lock_for(session_id):
+            return [item.model_copy(deep=True) for item in cls._queues.get(session_id, [])]
+
+    @classmethod
+    async def update_text(cls, session_id: str, item_id: str, text: str) -> QueuedPrompt:
+        async with cls._lock_for(session_id):
+            item = cls._find_locked(session_id, item_id)
+            if item.status == "executing":
+                raise QueueItemNotFoundError(f"Queued prompt {item_id} is already executing")
+
+            parts: List[Dict[str, Any]] = []
+            replaced = False
+            for part in item.parts:
+                if part.get("type") == "text" and not replaced:
+                    next_part = dict(part)
+                    next_part["text"] = text
+                    parts.append(next_part)
+                    replaced = True
+                elif part.get("type") != "text":
+                    parts.append(dict(part))
+            if not replaced:
+                parts.insert(0, {"type": "text", "text": text})
+
+            item.parts = parts
+            item.display_text = None
+            item.updatedAt = int(time.time() * 1000)
+            return item.model_copy(deep=True)
+
+    @classmethod
+    async def remove(cls, session_id: str, item_id: str) -> QueuedPrompt:
+        async with cls._lock_for(session_id):
+            queue = cls._queues.get(session_id, [])
+            for idx, item in enumerate(queue):
+                if item.id == item_id:
+                    return queue.pop(idx)
+            raise QueueItemNotFoundError(f"Queued prompt {item_id} not found")
+
+    @classmethod
+    async def pop_next(cls, session_id: str) -> Optional[QueuedPrompt]:
+        async with cls._lock_for(session_id):
+            if session_id in cls._paused:
+                return None
+            queue = cls._queues.get(session_id, [])
+            if not queue:
+                return None
+            item = queue.pop(0)
+            item.status = "executing"
+            item.updatedAt = int(time.time() * 1000)
+            return item
+
+    @classmethod
+    async def promote(cls, session_id: str, item_id: str) -> QueuedPrompt:
+        async with cls._lock_for(session_id):
+            queue = cls._queues.get(session_id, [])
+            for idx, item in enumerate(queue):
+                if item.id == item_id:
+                    if item.status == "executing":
+                        raise QueueItemNotFoundError(f"Queued prompt {item_id} is already executing")
+                    promoted = queue.pop(idx)
+                    promoted.updatedAt = int(time.time() * 1000)
+                    queue.insert(0, promoted)
+                    return promoted.model_copy(deep=True)
+            raise QueueItemNotFoundError(f"Queued prompt {item_id} not found")
+
+    @classmethod
+    def held_items(cls) -> List[Tuple[str, QueuedPrompt]]:
+        """Every prompt waiting in this process, with its session (a snapshot)."""
+        return [(session_id, item) for session_id, items in list(cls._queues.items()) for item in list(items)]
+
+    @classmethod
+    async def clear(cls, session_id: str) -> None:
+        async with cls._lock_for(session_id):
+            items = cls._queues.pop(session_id, [])
+            cls._paused.discard(session_id)
+
+        from aegisops.session import turn_receipt
+        from aegisops.session.files import discard_staged_chat_uploads_from_parts
+
+        await turn_receipt.mark_removed(session_id, items)
+
+        for item in items:
+            execution_context = item.execution_context or {}
+            owner_id = str(execution_context.get("_uploaderUserID") or "").strip()
+            if owner_id:
+                await discard_staged_chat_uploads_from_parts(owner_id, item.parts)
+
+    @classmethod
+    async def pause(cls, session_id: str) -> None:
+        async with cls._lock_for(session_id):
+            if cls._queues.get(session_id):
+                cls._paused.add(session_id)
+
+    @classmethod
+    async def resume(cls, session_id: str) -> None:
+        async with cls._lock_for(session_id):
+            cls._paused.discard(session_id)
+
+    @classmethod
+    def _find_locked(cls, session_id: str, item_id: str) -> QueuedPrompt:
+        for item in cls._queues.get(session_id, []):
+            if item.id == item_id:
+                return item
+        raise QueueItemNotFoundError(f"Queued prompt {item_id} not found")

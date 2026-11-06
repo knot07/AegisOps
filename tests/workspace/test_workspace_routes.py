@@ -1,0 +1,1476 @@
+"""
+Integration tests for Workspace API routes
+
+Uses FastAPI's TestClient (synchronous, no live server needed).
+Each test class gets a fresh isolated workspace via the `workspace_client` fixture.
+
+Covered endpoints
+-----------------
+Directory:  GET /tree, GET /list, POST /dir, DELETE /dir
+File:       POST /upload, GET /file, PUT /file, DELETE /file,
+            GET /preview, GET /download, POST /download/zip, POST /move
+Memory:     GET /memory/list, GET/PUT /memory/file, GET /memory/preview,
+            GET /memory/download
+Stats:      GET /stats
+"""
+
+from __future__ import annotations
+
+import asyncio
+import io
+import zipfile
+from contextlib import contextmanager
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException, Request
+from fastapi.testclient import TestClient
+from starlette.datastructures import UploadFile
+from tests.utils.file_type_samples import ALL_SUPPORTED_UPLOAD_FILENAMES, create_sample_file
+
+
+# ─── Fixtures ────────────────────────────────────────────────────────────────
+
+@pytest.fixture()
+def workspace_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """
+    Return a TestClient pointed at the workspace router with an isolated
+    temp workspace + memory directory.
+
+    Two caches must be reset between tests:
+    - WorkspaceManager._instance  (workspace module singleton)
+    - Config._global_config       (aegisops config module singleton, caches data_dir)
+    """
+    ws = tmp_path / "workspace"
+    data = tmp_path / "data"
+    mem = data / "memory"
+    ws.mkdir()
+    data.mkdir()
+    mem.mkdir()
+    # Pre-create conventional workspace subdirs so tests can write files directly
+    for sub in ("outputs", "knowledge"):
+        (ws / sub).mkdir()
+
+    monkeypatch.setenv("AEGISOPS_WORKSPACE_DIR", str(ws))
+    monkeypatch.setenv("AEGISOPS_DATA_DIR", str(data))
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path / ".aegisops"))
+
+    # Reset both singletons so they re-read env vars
+    from aegisops.workspace.manager import WorkspaceManager
+    from aegisops.config.config import Config
+    WorkspaceManager._instance = None
+    Config._global_config = None
+
+    # Build a minimal FastAPI app with only the workspace router
+    from fastapi import FastAPI
+    from aegisops.auth.context import AuthUser
+    from aegisops.server.routes.workspace import router
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def inject_auth_user(request, call_next):
+        request.state.auth_user = AuthUser(
+            id="usr_workspace",
+            username="workspace",
+            role="member",
+            status="active",
+        )
+        return await call_next(request)
+
+    app.include_router(router, prefix="/api/workspace")
+
+    client = TestClient(app, raise_server_exceptions=True)
+
+    yield client, ws, mem
+
+    # Cleanup
+    WorkspaceManager._instance = None
+    Config._global_config = None
+
+
+@pytest.fixture()
+def chat_staging(workspace_client, monkeypatch):
+    """Track newly created targets alongside an unrelated existing upload."""
+    from aegisops.session import files as session_files
+
+    create_target = session_files.create_chat_upload_target
+    existing = create_target("usr_workspace", "part_existing", "keep.txt")
+    existing.write_bytes(b"keep")
+    created = []
+
+    def track_target(owner_id, upload_id, filename):
+        target = create_target(owner_id, upload_id, filename)
+        created.append(target)
+        return target
+
+    monkeypatch.setattr(session_files, "create_chat_upload_target", track_target)
+    return created, existing
+
+
+@pytest.fixture()
+def upload_request():
+    from aegisops.auth.context import AuthUser
+
+    request = Request({"type": "http"})
+    request.state.auth_user = AuthUser(
+        id="usr_workspace", username="workspace", role="member", status="active",
+    )
+    return request
+
+
+# Convenience unpacking helpers used in every test
+def _client(fixture): return fixture[0]
+def _ws(fixture): return fixture[1]
+def _mem(fixture): return fixture[2]
+
+
+# ─── Stats ───────────────────────────────────────────────────────────────────
+
+class TestStats:
+    def test_empty_stats(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/stats")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["file_count"] == 0
+        assert data["dir_count"] >= 2  # outputs/ knowledge/
+        assert data["total_size_bytes"] == 0
+        assert data["memory_file_count"] == 0
+
+    def test_stats_reflect_uploaded_file(self, workspace_client):
+        client = _client(workspace_client)
+        client.post("/api/workspace/upload?dest=outputs", files=[("files", ("a.txt", b"hello", "text/plain"))])
+        r = client.get("/api/workspace/stats")
+        assert r.status_code == 200
+        assert r.json()["file_count"] == 1
+        assert r.json()["total_size_bytes"] == 5  # len("hello")
+
+
+# ─── Directory operations ─────────────────────────────────────────────────────
+
+class TestDirList:
+    def test_list_root(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/list")
+        assert r.status_code == 200
+        names = {n["name"] for n in r.json()}
+        assert {"outputs", "knowledge"}.issubset(names)
+
+    def test_list_subdir(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "sub.txt").write_text("hi")
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+        assert r.status_code == 200
+        assert any(n["name"] == "sub.txt" for n in r.json())
+
+    def test_list_outputs_hides_hidden_entries_and_sorts_directories_descending(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "2026-09-06").mkdir()
+        (ws / "outputs" / "2026-09-07").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+        (ws / "outputs" / "report.md").write_text("visible")
+        (ws / "outputs" / ".DS_Store").write_text("hidden")
+
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert r.status_code == 200
+        assert [item["name"] for item in r.json()] == ["2026-09-07", "2026-09-06", "report.md"]
+
+    def test_list_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/list?path=does_not_exist")
+        assert r.status_code == 404
+
+    def test_list_file_path_returns_400(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "file.txt").write_text("x")
+        r = _client(workspace_client).get("/api/workspace/list?path=file.txt")
+        assert r.status_code == 400
+
+    def test_list_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from aegisops.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "report.txt").write_text("ok")
+
+        root = _client(workspace_client).get("/api/workspace/list")
+        r = _client(workspace_client).get("/api/workspace/list?path=outputs")
+
+        assert root.status_code == 200
+        assert any(item["name"] == "outputs" and item["path"] == "outputs" for item in root.json())
+        assert r.status_code == 200
+        assert any(
+            item["name"] == "report.txt"
+            and item["path"] == "outputs/report.txt"
+            and item["type"] == "file"
+            for item in r.json()
+        )
+
+
+class TestDirTree:
+    def test_tree_root(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/tree")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["type"] == "directory"
+        assert "children" in data
+        # Root node path must be '' (not '.') so the frontend can use it directly
+        assert data["path"] == ""
+
+    def test_tree_depth_param(self, workspace_client):
+        ws = _ws(workspace_client)
+        deep = ws / "a" / "b" / "c"
+        deep.mkdir(parents=True)
+        r = _client(workspace_client).get("/api/workspace/tree?depth=1")
+        assert r.status_code == 200
+        # depth=1: children of root listed but not recursed into
+        children_names = {c["name"] for c in (r.json().get("children") or [])}
+        assert "a" in children_names
+
+    def test_tree_hides_hidden_entries(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / ".hidden").mkdir()
+        (ws / "outputs" / ".staging").mkdir()
+
+        r = _client(workspace_client).get("/api/workspace/tree?depth=2")
+
+        assert r.status_code == 200
+        assert all(child["name"] != ".hidden" for child in r.json()["children"])
+        outputs = next(child for child in r.json()["children"] if child["name"] == "outputs")
+        assert all(child["name"] != ".staging" for child in outputs["children"])
+
+    def test_tree_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/tree?path=nope")
+        assert r.status_code == 404
+
+    def test_tree_subdir_when_workspace_root_is_symlink(self, workspace_client, tmp_path: Path):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from aegisops.workspace.manager import WorkspaceManager
+
+        manager = WorkspaceManager.get_instance()
+        manager._workspace_dir = link
+        (ws / "outputs" / "nested").mkdir()
+
+        root = _client(workspace_client).get("/api/workspace/tree?depth=1")
+        r = _client(workspace_client).get("/api/workspace/tree?path=outputs&depth=1")
+
+        assert root.status_code == 200
+        assert root.json()["path"] == ""
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs"
+        assert any(child["path"] == "outputs/nested" for child in data["children"])
+
+
+class TestDirCreate:
+    def test_create_new_dir(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.post("/api/workspace/dir", json={"path": "outputs/reports"})
+        assert r.status_code == 200
+        assert r.json()["created"] is True
+        assert (_ws(workspace_client) / "outputs" / "reports").is_dir()
+
+    def test_create_nested_dir(self, workspace_client):
+        r = _client(workspace_client).post("/api/workspace/dir", json={"path": "outputs/2026/03"})
+        assert r.status_code == 200
+        assert (_ws(workspace_client) / "outputs" / "2026" / "03").is_dir()
+
+    def test_create_dir_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).post("/api/workspace/dir", json={"path": "../../evil"})
+        assert r.status_code == 400
+
+    def test_create_dir_absolute_rejected(self, workspace_client):
+        r = _client(workspace_client).post("/api/workspace/dir", json={"path": "/tmp/evil"})
+        assert r.status_code == 400
+
+
+class TestDirDelete:
+    def test_delete_existing_dir(self, workspace_client):
+        ws = _ws(workspace_client)
+        d = ws / "to_delete"
+        d.mkdir()
+        r = _client(workspace_client).delete("/api/workspace/dir?path=to_delete")
+        assert r.status_code == 200
+        assert not d.exists()
+
+    def test_delete_dir_with_contents(self, workspace_client):
+        ws = _ws(workspace_client)
+        d = ws / "full_dir"
+        d.mkdir()
+        (d / "file.txt").write_text("content")
+        r = _client(workspace_client).delete("/api/workspace/dir?path=full_dir")
+        assert r.status_code == 200
+        assert not d.exists()
+
+    def test_delete_nonexistent_dir_returns_404(self, workspace_client):
+        r = _client(workspace_client).delete("/api/workspace/dir?path=ghost")
+        assert r.status_code == 404
+
+    def test_delete_workspace_root_rejected(self, workspace_client):
+        r = _client(workspace_client).delete("/api/workspace/dir?path=")
+        # Empty path resolves to workspace root — must be rejected
+        assert r.status_code in (400, 422)
+
+    def test_delete_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).delete("/api/workspace/dir?path=../../etc")
+        assert r.status_code == 400
+
+
+# ─── File upload ─────────────────────────────────────────────────────────────
+
+class TestUpload:
+    def test_upload_text_file(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload?dest=outputs",
+            files=[("files", ("hello.txt", b"hello world", "text/plain"))],
+        )
+        assert r.status_code == 200
+        result = r.json()["uploaded"][0]
+        assert result["name"] == "hello.txt"
+        assert result["size"] == 11
+        assert result["is_text_file"] is True
+        assert result.get("error") is None
+        assert (_ws(workspace_client) / "outputs" / "hello.txt").read_text() == "hello world"
+
+    def test_upload_binary_file_succeeds_without_chat_purpose(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload",
+            files=[("files", ("archive.zip", b"\x50\x4b\x03\x04", "application/zip"))],
+        )
+        assert r.status_code == 200
+        result = r.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == "archive.zip"
+        assert (_ws(workspace_client) / "archive.zip").exists()
+
+    def test_chat_upload_rejects_disallowed_file_type(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("archive.rar", b"\x50\x4b\x03\x04", "application/vnd.rar"))],
+        )
+        assert r.status_code == 200
+        result = r.json()["uploaded"][0]
+        assert "Unsupported file type" in result["error"]
+        assert not (_ws(workspace_client) / "archive.rar").exists()
+
+    @pytest.mark.parametrize("filename", ["sample.exe", "libfoo.so", "rea_demo", "app.apk"])
+    def test_chat_upload_takes_reverse_samples_only_once_rea_is_ready(
+        self, workspace_client, monkeypatch, filename: str,
+    ):
+        from aegisops.rea import runtime
+        from aegisops.session.files import resolve_staged_chat_upload
+
+        client = _client(workspace_client)
+        body = b"\x7fELF\x02\x01\x01\x00"
+        monkeypatch.setattr(runtime, "is_ready", lambda: False)
+        refused = client.post(
+            "/api/workspace/upload?purpose=chat", files=[("files", (filename, body, "application/octet-stream"))],
+        ).json()["uploaded"][0]
+        assert "Unsupported file type" in refused["error"]
+
+        monkeypatch.setattr(runtime, "is_ready", lambda: True)
+        accepted = client.post(
+            "/api/workspace/upload?purpose=chat", files=[("files", (filename, body, "application/octet-stream"))],
+        ).json()["uploaded"][0]
+        assert accepted.get("error") is None
+        assert accepted["name"] == filename
+        assert accepted["is_text_file"] is False
+        assert resolve_staged_chat_upload("usr_workspace", accepted["uploadID"]).read_bytes() == body
+
+    def test_chat_upload_size_limit_still_applies_to_samples(self, workspace_client, monkeypatch):
+        from aegisops.rea import runtime
+
+        monkeypatch.setattr(runtime, "is_ready", lambda: True)
+        monkeypatch.setenv("AEGISOPS_WORKSPACE_MAX_UPLOAD_MB", "1")
+        client = _client(workspace_client)
+        result = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("big.bin", b"\0" * (1024 * 1024 + 1), "application/octet-stream"))],
+        ).json()["uploaded"][0]
+        assert "File too large" in result["error"]
+
+    @pytest.mark.parametrize("filename", ALL_SUPPORTED_UPLOAD_FILENAMES)
+    def test_chat_upload_accepts_all_supported_file_types(
+        self,
+        workspace_client,
+        filename: str,
+    ):
+        client = _client(workspace_client)
+        source = _ws(workspace_client) / "fixtures" / filename
+        source.parent.mkdir(parents=True, exist_ok=True)
+        create_sample_file(source)
+
+        response = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (filename, source.read_bytes(), "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == filename
+        assert result.get("uploadID")
+        assert "path" not in result
+        assert "abs_path" not in result
+        from aegisops.session.files import resolve_staged_chat_upload
+
+        staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+        assert staged.read_bytes() == source.read_bytes()
+
+    def test_upload_multiple_files(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload?dest=knowledge",
+            files=[
+                ("files", ("a.md", b"# A", "text/plain")),
+                ("files", ("b.json", b'{"x":1}', "application/json")),
+            ],
+        )
+        assert r.status_code == 200
+        uploaded = r.json()["uploaded"]
+        assert len(uploaded) == 2
+        names = {u["name"] for u in uploaded}
+        assert names == {"a.md", "b.json"}
+
+    def test_upload_strips_directory_from_client_filename(self, workspace_client):
+        """A client sending '../../../etc/passwd' as filename must be sandboxed."""
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload",
+            files=[("files", ("../../../evil.txt", b"evil", "text/plain"))],
+        )
+        assert r.status_code == 200
+        # The file should be saved as just "evil.txt" in the workspace root
+        uploaded = r.json()["uploaded"]
+        assert uploaded[0]["name"] == "evil.txt"
+
+    @pytest.mark.parametrize(("raw_name", "filename"), [
+        ("folder\\report\x01.pdf", "report_.pdf"),
+        ("folder%5Creport%0A.pdf", "report_.pdf"),
+        ("folder/report%3F%3C.pdf", "report_.pdf"),
+        ("  report   notes.txt  ", "report notes.txt"),
+        ("café.txt", "café.txt"),
+    ])
+    def test_chat_upload_sanitizes_filename(self, workspace_client, raw_name, filename):
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (raw_name, b"report", "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == filename
+
+    @pytest.mark.parametrize("filename", [None, "", "  ", ".", "..", "folder/", "%20", "%2e%2e"])
+    async def test_chat_upload_rejects_empty_filename(
+        self, chat_staging, upload_request, filename,
+    ):
+        from aegisops.server.routes.workspace import upload_files
+
+        upload = UploadFile(filename=filename, file=io.BytesIO(b"report"))
+        try:
+            response = await upload_files(upload_request, dest="", purpose="chat", files=[upload])
+            assert response["uploaded"][0] == {
+                "name": "",
+                "error": "Filename is missing" if not filename else "Filename is invalid",
+            }
+            assert upload.file.tell() == 0
+        finally:
+            await upload.close()
+        created, existing = chat_staging
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+
+    async def test_chat_upload_requires_user_before_reading(self, chat_staging):
+        from aegisops.server.routes.workspace import upload_files
+
+        upload = UploadFile(filename="report.txt", file=io.BytesIO(b"report"))
+        try:
+            with pytest.raises(HTTPException) as exc:
+                await upload_files(Request({"type": "http"}), dest="", purpose="chat", files=[upload])
+            assert exc.value.status_code == 401
+            assert upload.file.tell() == 0
+        finally:
+            await upload.close()
+        created, existing = chat_staging
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+
+    def test_upload_to_nonexistent_dest_creates_it(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload?dest=new_folder",
+            files=[("files", ("x.txt", b"x", "text/plain"))],
+        )
+        assert r.status_code == 200
+        assert (_ws(workspace_client) / "new_folder" / "x.txt").exists()
+
+    @pytest.mark.parametrize("purpose", [None, "chat"])
+    def test_upload_to_dest_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+        purpose: str | None,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from aegisops.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        url = "/api/workspace/upload?dest=uploads"
+        if purpose:
+            url += f"&purpose={purpose}"
+
+        response = _client(workspace_client).post(
+            url,
+            files=[("files", ("report.pdf", b"report", "application/pdf"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        if purpose == "chat":
+            from aegisops.session.files import resolve_staged_chat_upload
+
+            assert "path" not in result
+            assert "abs_path" not in result
+            staged = resolve_staged_chat_upload("usr_workspace", result["uploadID"])
+            assert staged.read_bytes() == b"report"
+        else:
+            assert result["path"] == "uploads/report.pdf"
+            assert result["abs_path"] == str(ws / "uploads" / "report.pdf")
+            assert (ws / "uploads" / "report.pdf").read_bytes() == b"report"
+
+    def test_upload_to_root_when_workspace_root_is_symlink(
+        self,
+        workspace_client,
+        tmp_path: Path,
+    ):
+        ws = _ws(workspace_client)
+        link = tmp_path / "workspace-link"
+        try:
+            link.symlink_to(ws, target_is_directory=True)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable on this platform: {exc}")
+
+        from aegisops.workspace.manager import WorkspaceManager
+
+        WorkspaceManager.get_instance()._workspace_dir = link
+        response = _client(workspace_client).post(
+            "/api/workspace/upload",
+            files=[("files", ("root.txt", b"root", "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["path"] == "root.txt"
+        assert result["abs_path"] == str(link / "root.txt")
+        assert (ws / "root.txt").read_bytes() == b"root"
+
+    @pytest.mark.parametrize("filename", [
+        "report.pdf",
+        "normalfilename.txt",
+        "report%20notes.txt",
+        "report%2Fnotes.txt",
+        "r" * 210 + ".txt",
+        "  report   notes.txt",
+        "folder\\report.txt",
+    ])
+    def test_upload_overwrites_duplicate_file_without_chat_purpose(self, workspace_client, filename):
+        client = _client(workspace_client)
+        first = client.post(
+            "/api/workspace/upload?dest=uploads",
+            files=[("files", (filename, b"first", "application/octet-stream"))],
+        )
+        second = client.post(
+            "/api/workspace/upload?dest=uploads",
+            files=[("files", (filename, b"second", "application/octet-stream"))],
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        expected_name = Path(filename).name
+        target = _ws(workspace_client) / "uploads" / expected_name
+        for response in (first, second):
+            item = response.json()["uploaded"][0]
+            assert item.get("error") is None
+            assert item["name"] == expected_name
+            assert item["path"] == str(Path("uploads") / expected_name)
+            assert item["abs_path"] == str(target)
+        assert target.read_bytes() == b"second"
+        assert list(target.parent.iterdir()) == [target]
+
+    def test_chat_upload_keeps_duplicate_filenames_isolated(self, workspace_client):
+        client = _client(workspace_client)
+        first = client.post(
+            "/api/workspace/upload?dest=uploads&purpose=chat",
+            files=[("files", ("report.pdf", b"first", "application/pdf"))],
+        )
+        second = client.post(
+            "/api/workspace/upload?dest=uploads&purpose=chat",
+            files=[("files", ("report.pdf", b"second", "application/pdf"))],
+        )
+        assert first.status_code == 200
+        assert second.status_code == 200
+        first_item = first.json()["uploaded"][0]
+        second_item = second.json()["uploaded"][0]
+        assert first_item["name"] == "report.pdf"
+        assert second_item["name"] == "report.pdf"
+        assert first_item["uploadID"] != second_item["uploadID"]
+        assert "path" not in first_item
+        assert "abs_path" not in first_item
+
+        from aegisops.session.files import resolve_staged_chat_upload
+
+        assert resolve_staged_chat_upload("usr_workspace", first_item["uploadID"]).read_bytes() == b"first"
+        assert resolve_staged_chat_upload("usr_workspace", second_item["uploadID"]).read_bytes() == b"second"
+
+    @pytest.mark.parametrize("content", [b"", b"x" * (3 * 65536)], ids=["empty", "multiple-chunks"])
+    def test_chat_upload_streams_chunks_to_disk(
+        self, workspace_client, chat_staging, monkeypatch, content,
+    ):
+        from aegisops.server.routes import workspace as workspace_routes
+        from aegisops.session.files import resolve_staged_chat_upload
+
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        read_sizes = []
+        bytes_read = 0
+
+        async def tracked_read(upload, size=-1):
+            nonlocal bytes_read
+            assert size == 65536
+            assert len(created) == 1  # Staging must precede the first read.
+            assert created[0].stat().st_size == bytes_read
+            read_sizes.append(size)
+            chunk = await original_read(upload, size)
+            bytes_read += len(chunk)
+            return chunk
+
+        def reject_write_bytes(*args, **kwargs):
+            pytest.fail("Chat uploads must not buffer content for write_bytes")
+
+        monkeypatch.setattr(UploadFile, "read", tracked_read)
+        monkeypatch.setattr(Path, "write_bytes", reject_write_bytes)
+        monkeypatch.setattr(workspace_routes, "_max_upload_bytes", lambda: len(content))
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", content, "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["size"] == len(content)
+        assert read_sizes == [65536] * (len(content) // 65536 + 1)
+        assert resolve_staged_chat_upload("usr_workspace", result["uploadID"]).read_bytes() == content
+        assert existing.read_bytes() == b"keep"
+
+    def test_chat_upload_size_limit_cleans_partial_file_and_continues(
+        self, workspace_client, chat_staging, monkeypatch,
+    ):
+        from aegisops.server.routes import workspace as workspace_routes
+
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        big_reads = []
+
+        async def tracked_read(upload, size=-1):
+            chunk = await original_read(upload, size)
+            if upload.filename == "big.txt":
+                big_reads.append(len(chunk))
+            return chunk
+
+        monkeypatch.setattr(UploadFile, "read", tracked_read)
+        monkeypatch.setattr(workspace_routes, "_max_upload_bytes", lambda: 65536)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[
+                ("files", ("big.txt", b"x" * (3 * 65536), "text/plain")),
+                ("files", ("small.txt", b"ok", "text/plain")),
+            ],
+        )
+
+        assert response.status_code == 200
+        failed, succeeded = response.json()["uploaded"]
+        assert "File too large" in failed["error"]
+        assert "uploadID" not in failed
+        assert succeeded.get("error") is None
+        assert big_reads == [65536, 65536]  # Stop as soon as the sum exceeds the limit.
+        assert len(created) == 2
+        assert not created[0].parent.exists()
+        assert created[1].read_bytes() == b"ok"
+        assert existing.read_bytes() == b"keep"
+        assert set(existing.parent.parent.iterdir()) == {existing.parent, created[1].parent}
+
+    @pytest.mark.parametrize("error_type", [OSError, RuntimeError])
+    def test_chat_upload_read_exception_cleans_partial_file(
+        self, workspace_client, chat_staging, monkeypatch, error_type,
+    ):
+        created, existing = chat_staging
+        original_read = UploadFile.read
+        reads = 0
+
+        async def failing_read(upload, size=-1):
+            nonlocal reads
+            reads += 1
+            if reads == 2:
+                assert created[0].stat().st_size == 65536
+                raise error_type("read failed")
+            return await original_read(upload, size)
+
+        monkeypatch.setattr(UploadFile, "read", failing_read)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", b"x" * (2 * 65536), "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert "Failed to stage upload: read failed" == result["error"]
+        assert "uploadID" not in result
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    @pytest.mark.parametrize("failure", ["open", "write", "close"])
+    def test_chat_upload_disk_exception_cleans_partial_file(
+        self, workspace_client, chat_staging, monkeypatch, failure,
+    ):
+        created, existing = chat_staging
+        original_open = Path.open
+
+        @contextmanager
+        def failing_writer(path):
+            if failure == "open":
+                raise OSError("open failed")
+            with original_open(path, "xb") as handle:
+                class FailingWriter:
+                    def write(self, chunk):
+                        handle.write(chunk[:16])
+                        handle.flush()
+                        raise OSError("write failed")
+
+                yield FailingWriter() if failure == "write" else handle
+            if failure == "close":
+                raise OSError("close failed")
+
+        def patched_open(path, mode="r", *args, **kwargs):
+            if path in created and mode == "xb":
+                return failing_writer(path)
+            return original_open(path, mode, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", patched_open)
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("report.txt", b"x" * 65536, "text/plain"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result["error"] == f"Failed to stage upload: {failure} failed"
+        assert "uploadID" not in result
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    async def test_chat_upload_cancellation_cleans_partial_file(
+        self, chat_staging, upload_request, monkeypatch,
+    ):
+        from aegisops.server.routes.workspace import upload_files
+
+        created, existing = chat_staging
+        upload = UploadFile(filename="report.txt", file=io.BytesIO(b"x" * 65536))
+        original_read = upload.read
+        waiting_for_chunk = asyncio.Event()
+
+        async def blocking_read(size=-1):
+            if upload.file.tell():
+                assert created[0].stat().st_size == 65536
+                waiting_for_chunk.set()
+                await asyncio.Future()
+            return await original_read(size)
+
+        monkeypatch.setattr(upload, "read", blocking_read)
+        task = asyncio.create_task(
+            upload_files(upload_request, dest="", purpose="chat", files=[upload])
+        )
+        try:
+            await asyncio.wait_for(waiting_for_chunk.wait(), timeout=5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await upload.close()
+
+        assert len(created) == 1
+        assert not created[0].parent.exists()
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    @pytest.mark.parametrize("filename", ["keep.txt", "report.pdf"])
+    def test_chat_upload_id_collision_preserves_existing_upload(
+        self, workspace_client, chat_staging, monkeypatch, filename,
+    ):
+        from aegisops.utils.id import Identifier
+
+        created, existing = chat_staging
+        monkeypatch.setattr(Identifier, "ascending", staticmethod(lambda prefix: "part_existing"))
+        response = _client(workspace_client).post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (filename, b"replacement", "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert "Failed to stage upload" in result["error"]
+        assert "uploadID" not in result
+        assert created == []
+        assert existing.read_bytes() == b"keep"
+        assert list(existing.parent.iterdir()) == [existing]
+        assert list(existing.parent.parent.iterdir()) == [existing.parent]
+
+    def test_discard_chat_upload_removes_staged_file(self, workspace_client):
+        client = _client(workspace_client)
+        uploaded = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", ("draft.md", b"draft", "text/markdown"))],
+        ).json()["uploaded"][0]
+
+        response = client.delete(
+            f"/api/workspace/upload/chat/{uploaded['uploadID']}"
+        )
+
+        assert response.status_code == 200
+        assert response.json()["removed"] is True
+        from aegisops.session.files import resolve_staged_chat_upload
+
+        with pytest.raises(FileNotFoundError):
+            resolve_staged_chat_upload("usr_workspace", uploaded["uploadID"])
+
+    def test_upload_too_large_file_rejected(self, workspace_client, monkeypatch):
+        # Set the limit to 0 MB; _max_upload_bytes() reads the env var at
+        # request time so no module-level patching is needed.
+        monkeypatch.setenv("AEGISOPS_WORKSPACE_MAX_UPLOAD_MB", "0")
+        client = _client(workspace_client)
+        r = client.post(
+            "/api/workspace/upload",
+            files=[("files", ("big.txt", b"x", "text/plain"))],
+        )
+        assert r.status_code == 200
+        result = r.json()["uploaded"][0]
+        assert result.get("error") is not None
+
+
+# ─── File read ───────────────────────────────────────────────────────────────
+
+class TestReadFile:
+    def test_read_text_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "note.md").write_text("# Hello\nWorld")
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs/note.md")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs/note.md"
+        assert data["content"] == "# Hello\nWorld"
+
+    def test_read_jsonl_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "events.jsonl").write_text('{"id": 1}\n{"id": 2}\n')
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs/events.jsonl")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs/events.jsonl"
+        assert data["content"] == '{"id": 1}\n{"id": 2}\n'
+        assert data["truncated"] is False
+
+    def test_read_large_text_file_returns_truncated_preview(self, workspace_client, monkeypatch):
+        monkeypatch.setenv("AEGISOPS_WORKSPACE_MAX_READ_BYTES", "10")
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "large.jsonl").write_text("0123456789ABCDEF", encoding="utf-8")
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs/large.jsonl")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs/large.jsonl"
+        assert data["content"] == "0123456789"
+        assert data["truncated"] is True
+        assert data["size"] == 16
+        assert data["preview_limit_bytes"] == 10
+
+    def test_read_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/file?path=ghost.txt")
+        assert r.status_code == 404
+
+    def test_read_binary_file_returns_400(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "archive.zip").write_bytes(b"\x50\x4b\x03\x04")
+        r = _client(workspace_client).get("/api/workspace/file?path=archive.zip")
+        assert r.status_code == 400
+
+    def test_read_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/file?path=../../etc/passwd")
+        assert r.status_code == 400
+
+    def test_read_directory_returns_400(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs")
+        assert r.status_code == 400
+
+
+# ─── File write ──────────────────────────────────────────────────────────────
+
+class TestWriteFile:
+    def test_write_new_file(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.put("/api/workspace/file", json={"path": "outputs/result.md", "content": "# Done"})
+        assert r.status_code == 200
+        assert r.json()["written"] is True
+        assert (_ws(workspace_client) / "outputs" / "result.md").read_text() == "# Done"
+
+    def test_overwrite_existing_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "f.txt").write_text("old")
+        client = _client(workspace_client)
+        r = client.put("/api/workspace/file", json={"path": "outputs/f.txt", "content": "new"})
+        assert r.status_code == 200
+        assert (ws / "outputs" / "f.txt").read_text() == "new"
+
+    def test_write_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).put(
+            "/api/workspace/file",
+            json={"path": "../../evil.txt", "content": "x"},
+        )
+        assert r.status_code == 400
+
+    def test_write_creates_parent_dirs(self, workspace_client):
+        client = _client(workspace_client)
+        r = client.put(
+            "/api/workspace/file",
+            json={"path": "outputs/deep/nested/file.json", "content": "{}"},
+        )
+        assert r.status_code == 200
+        assert (_ws(workspace_client) / "outputs" / "deep" / "nested" / "file.json").exists()
+
+
+# ─── File delete ─────────────────────────────────────────────────────────────
+
+class TestDeleteFile:
+    def test_delete_existing_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        f = ws / "outputs" / "del.txt"
+        f.write_text("bye")
+        r = _client(workspace_client).delete("/api/workspace/file?path=outputs/del.txt")
+        assert r.status_code == 200
+        assert not f.exists()
+
+    def test_delete_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).delete("/api/workspace/file?path=ghost.txt")
+        assert r.status_code == 404
+
+    def test_delete_directory_returns_400(self, workspace_client):
+        r = _client(workspace_client).delete("/api/workspace/file?path=outputs")
+        assert r.status_code == 400
+
+    def test_delete_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).delete("/api/workspace/file?path=../../etc/hosts")
+        assert r.status_code == 400
+
+
+# ─── File download ────────────────────────────────────────────────────────────
+
+class TestDownload:
+    def test_download_single_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "doc.pdf").write_bytes(b"%PDF-1.4")
+        r = _client(workspace_client).get("/api/workspace/download?path=outputs/doc.pdf")
+        assert r.status_code == 200
+        assert r.content == b"%PDF-1.4"
+        assert "attachment" in r.headers.get("content-disposition", "")
+
+    def test_download_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/download?path=missing.pdf")
+        assert r.status_code == 404
+
+    def test_download_zip_multiple_files(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "a.txt").write_text("aaa")
+        (ws / "knowledge" / "b.txt").write_text("bbb")
+        r = _client(workspace_client).post(
+            "/api/workspace/download/zip",
+            json={"paths": ["outputs/a.txt", "knowledge/b.txt"]},
+        )
+        assert r.status_code == 200
+        assert r.headers["content-type"] == "application/zip"
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        names = zf.namelist()
+        assert "outputs/a.txt" in names
+        assert "knowledge/b.txt" in names
+
+    def test_download_zip_skips_invalid_paths(self, workspace_client):
+        """Invalid / traversal paths in zip request are silently skipped."""
+        r = _client(workspace_client).post(
+            "/api/workspace/download/zip",
+            json={"paths": ["../../etc/passwd", "nonexistent.txt"]},
+        )
+        assert r.status_code == 200
+        zf = zipfile.ZipFile(io.BytesIO(r.content))
+        assert zf.namelist() == []
+
+
+# ─── File preview ─────────────────────────────────────────────────────────────
+
+class TestPreview:
+    def test_preview_pdf_inline(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "doc.pdf").write_bytes(b"%PDF-1.4")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/doc.pdf")
+        assert r.status_code == 200
+        assert r.content == b"%PDF-1.4"
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_png_inline(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/image.png")
+        assert r.status_code == 200
+        assert r.content == b"\x89PNG\r\n\x1a\n"
+        assert r.headers["content-type"].startswith("image/png")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_html_rejected(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "demo.html").write_text("<script>alert(1)</script>")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/demo.html")
+        assert r.status_code == 415
+
+    def test_preview_svg_inline_with_security_headers(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "image.svg").write_text("<svg><script>alert(1)</script></svg>")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/image.svg")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert "inline" in r.headers.get("content-disposition", "")
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert "script-src 'none'" in r.headers["content-security-policy"]
+
+    def test_preview_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/preview?path=missing.pdf")
+        assert r.status_code == 404
+
+    def test_preview_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/preview?path=../../etc/passwd")
+        assert r.status_code == 400
+
+
+# ─── Move / rename ────────────────────────────────────────────────────────────
+
+class TestMove:
+    def test_move_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "old.txt").write_text("hello")
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "outputs/old.txt", "dst": "knowledge/new.txt"},
+        )
+        assert r.status_code == 200
+        assert r.json()["moved"] is True
+        assert not (ws / "outputs" / "old.txt").exists()
+        assert (ws / "knowledge" / "new.txt").read_text() == "hello"
+
+    def test_move_directory(self, workspace_client):
+        ws = _ws(workspace_client)
+        d = ws / "outputs" / "subdir"
+        d.mkdir()
+        (d / "file.txt").write_text("x")
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "outputs/subdir", "dst": "knowledge/subdir"},
+        )
+        assert r.status_code == 200
+        assert (ws / "knowledge" / "subdir" / "file.txt").read_text() == "x"
+
+    def test_move_nonexistent_src_returns_404(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "ghost.txt", "dst": "outputs/ghost.txt"},
+        )
+        assert r.status_code == 404
+
+    def test_move_to_existing_dst_returns_409(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "src.txt").write_text("a")
+        (ws / "outputs" / "dst.txt").write_text("b")
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "outputs/src.txt", "dst": "outputs/dst.txt"},
+        )
+        assert r.status_code == 409
+
+    def test_move_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "../../etc/passwd", "dst": "outputs/passwd"},
+        )
+        assert r.status_code == 400
+
+    def test_move_directory_into_itself_is_rejected_without_side_effects(self, workspace_client):
+        """Used to 500 after mkdir had already created child/ in the source (FL-BUG-008)."""
+        ws = _ws(workspace_client)
+        src = ws / "outputs" / "case"
+        src.mkdir()
+        (src / "keep.txt").write_text("keep")
+        before = sorted(str(p.relative_to(src)) for p in src.rglob("*"))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "outputs/case", "dst": "outputs/case/child/moved"},
+        )
+
+        assert r.status_code == 400
+        assert "into itself" in r.json()["detail"]
+        assert sorted(str(p.relative_to(src)) for p in src.rglob("*")) == before
+
+    def test_move_directory_to_sibling_with_shared_prefix(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "case").mkdir()
+        (ws / "outputs" / "case" / "f.txt").write_text("x")
+        r = _client(workspace_client).post(
+            "/api/workspace/move",
+            json={"src": "outputs/case", "dst": "outputs/case-archive/case"},
+        )
+        assert r.status_code == 200
+        assert (ws / "outputs" / "case-archive" / "case" / "f.txt").read_text() == "x"
+
+
+# ─── Reveal in file manager ──────────────────────────────────────────────────
+
+class TestReveal:
+    def test_reveal_file_on_macos_selects_file(self, workspace_client, monkeypatch):
+        from aegisops.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs" / "report.pdf"
+        target.write_bytes(b"%PDF")
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "darwin")
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs/report.pdf"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["opened"] is True
+        assert r.json()["target"] == "file"
+        assert calls == [["open", "-R", str(target)]]
+
+    def test_reveal_directory_on_windows_opens_directory(self, workspace_client, monkeypatch):
+        from aegisops.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs"
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "win32")
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["target"] == "directory"
+        assert calls == [["explorer", str(target)]]
+
+    def test_reveal_file_on_linux_opens_parent_directory(self, workspace_client, monkeypatch):
+        from aegisops.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs" / "report.txt"
+        target.write_text("hello")
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "linux")
+        monkeypatch.setattr(workspace_routes.shutil, "which", lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs/report.txt"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["mode"] == "open"
+        assert calls == [["/usr/bin/xdg-open", str(target.parent)]]
+
+    def test_reveal_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "missing.txt"},
+        )
+        assert r.status_code == 404
+
+    def test_reveal_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "../../etc/passwd"},
+        )
+        assert r.status_code == 400
+
+
+# ─── Memory files ────────────────────────────────────────────────────────────
+
+class TestMemoryView:
+    def test_list_memory_without_files_returns_empty_daily_tree(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/memory/list")
+        assert r.status_code == 200
+        assert len(r.json()) == 1
+        daily = r.json()[0]
+        assert daily["path"] == "daily"
+        assert daily["type"] == "directory"
+        assert daily["children"] == []
+
+    def test_list_memory_with_files(self, workspace_client, monkeypatch):
+        from aegisops.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_example"}),
+        )
+        mem = _mem(workspace_client)
+        (mem / "USER.md").write_text("# User")
+        (mem / "MEMORY.md").write_text("# Memory")
+        (mem / "SHORT_MEMORY.md").write_text("# Short")
+        (mem / "bak.txt").write_text("backup")
+        (mem / "archive").mkdir()
+        (mem / "archive" / "2026-08-18.md").write_text("# Archived")
+        (mem / "daily").mkdir()
+        (mem / "daily" / "2026-03-14.md").write_text("## Daily")
+        (mem / "projects" / "prj_example").mkdir(parents=True)
+        (mem / "projects" / "prj_example" / "MEMORY.md").write_text(
+            "# Project Memory"
+        )
+
+        r = _client(workspace_client).get("/api/workspace/memory/list")
+
+        assert r.status_code == 200
+        assert [node["name"] for node in r.json()] == [
+            "USER.md",
+            "MEMORY.md",
+            "projects",
+            "daily",
+            "archive",
+            "bak.txt",
+            "SHORT_MEMORY.md",
+        ]
+        nodes = {node["name"]: node for node in r.json()}
+        assert set(nodes) == {"USER.md", "MEMORY.md", "SHORT_MEMORY.md", "archive", "bak.txt", "daily", "projects"}
+        assert nodes["USER.md"]["type"] == "file"
+        assert nodes["USER.md"]["editable"] is True
+        assert nodes["MEMORY.md"]["type"] == "file"
+        assert nodes["MEMORY.md"]["editable"] is True
+        assert nodes["SHORT_MEMORY.md"]["editable"] is False
+        assert nodes["bak.txt"]["editable"] is False
+        assert nodes["archive"]["editable"] is False
+        assert nodes["archive"]["children"][0]["path"] == "archive/2026-08-18.md"
+        assert nodes["archive"]["children"][0]["editable"] is False
+        assert nodes["daily"]["type"] == "directory"
+        assert nodes["daily"]["children"][0]["path"] == "daily/2026-03-14.md"
+        assert nodes["daily"]["children"][0]["editable"] is True
+        assert nodes["projects"]["type"] == "directory"
+        project = nodes["projects"]["children"][0]
+        assert project["path"] == "projects/prj_example"
+        assert project["children"][0]["path"] == "projects/prj_example/MEMORY.md"
+        assert project["children"][0]["editable"] is True
+
+    def test_read_memory_file(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "MEMORY.md").write_text("# Key facts\n- item1")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=MEMORY.md")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "MEMORY.md"
+        assert "Key facts" in data["content"]
+        assert data["truncated"] is False
+
+    def test_read_memory_binary_returns_400(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=image.png")
+        assert r.status_code == 400
+        assert "Binary file" in r.json()["detail"]
+
+    def test_read_large_memory_file_returns_truncated_preview(self, workspace_client, monkeypatch):
+        monkeypatch.setenv("AEGISOPS_WORKSPACE_MAX_READ_BYTES", "8")
+        mem = _mem(workspace_client)
+        (mem / "large.md").write_text("abcdefghijk", encoding="utf-8")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=large.md")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["content"] == "abcdefgh"
+        assert data["truncated"] is True
+        assert data["size"] == 11
+        assert data["preview_limit_bytes"] == 8
+
+    def test_read_memory_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=ghost.md")
+        assert r.status_code == 404
+
+    def test_memory_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=../../etc/passwd")
+        assert r.status_code == 400
+
+    def test_memory_nested_file(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "daily").mkdir(exist_ok=True)
+        (mem / "daily" / "2026-03-14.md").write_text("daily note")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=daily/2026-03-14.md")
+        assert r.status_code == 200
+        assert r.json()["content"] == "daily note"
+
+    def test_preview_memory_pdf_inline(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "report.pdf").write_bytes(b"%PDF-1.4\n")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=report.pdf")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_memory_svg_inline_with_security_headers(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "logo.svg").write_text("<svg><script>alert(1)</script></svg>")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=logo.svg")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert "script-src 'none'" in r.headers["content-security-policy"]
+
+    def test_preview_memory_unsupported_returns_415(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "archive.zip").write_bytes(b"PK\x03\x04")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=archive.zip")
+        assert r.status_code == 415
+
+    def test_download_memory_file(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/memory/download?path=image.png")
+        assert r.status_code == 200
+        assert r.content == b"\x89PNG\r\n\x1a\n"
+        assert r.headers["content-type"].startswith("application/octet-stream")
+
+    def test_memory_preview_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=../../etc/passwd")
+        assert r.status_code == 400
+
+    def test_workspace_write_cannot_escape_to_memory(self, workspace_client):
+        """The workspace write endpoint remains confined to the workspace."""
+        mem_path_attempt = "../data/memory/MEMORY.md"
+        r = _client(workspace_client).put(
+            "/api/workspace/file",
+            json={"path": mem_path_attempt, "content": "hacked"},
+        )
+        assert r.status_code == 400
+
+    def test_write_memory_file(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "daily").mkdir(exist_ok=True)
+        target = mem / "daily" / "2026-03-14.md"
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "daily/2026-03-14.md", "content": "new content"},
+        )
+
+        assert r.status_code == 200
+        assert r.json() == {
+            "path": "daily/2026-03-14.md",
+            "written": True,
+        }
+        assert target.read_text() == "new content"
+
+    def test_write_memory_file_the_stored_notes_did_not_take_is_503(self, workspace_client, monkeypatch):
+        from aegisops.memory.sync import mirror
+
+        answers = iter([True, False])
+
+        async def _reconcile_note(root, note, *, attempts=1):
+            return next(answers)
+
+        monkeypatch.setattr(mirror, "reconcile_note", _reconcile_note)
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "daily/2026-03-14.md", "content": "new content"},
+        )
+
+        assert r.status_code == 503
+        assert r.json()["detail"] == mirror.MemoryNotShared.SAVED_UNSETTLED
+        assert (_mem(workspace_client) / "daily" / "2026-03-14.md").read_text() == "new content"
+
+    def test_write_non_editable_memory_file_returns_403(self, workspace_client):
+        mem = _mem(workspace_client)
+        target = mem / "SHORT_MEMORY.md"
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "SHORT_MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
+
+    def test_write_unreadable_project_memory_returns_403(self, workspace_client, monkeypatch):
+        from aegisops.project.project import Project
+
+        monkeypatch.setattr(
+            Project,
+            "registered_project_ids",
+            classmethod(lambda cls, owner_id: {"prj_allowed"}),
+        )
+        mem = _mem(workspace_client)
+        target = mem / "projects" / "prj_stale" / "MEMORY.md"
+        target.parent.mkdir(parents=True)
+        target.write_text("old content")
+
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "projects/prj_stale/MEMORY.md", "content": "tampered"},
+        )
+
+        assert r.status_code == 403
+        assert target.read_text() == "old content"
+
+    def test_write_memory_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).put(
+            "/api/workspace/memory/file",
+            json={"path": "../../outside.md", "content": "hacked"},
+        )
+        assert r.status_code == 400

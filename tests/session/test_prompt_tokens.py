@@ -1,0 +1,793 @@
+"""
+Tests for aegisops/session/prompt.py
+
+Covers:
+- SessionPrompt.count_tokens(): token counting via chars/4 heuristic
+- SessionPrompt.estimate_tokens(): quick character-based estimate
+- SessionPrompt.count_message_tokens(): multi-message counting
+- SessionPrompt.load_template() / render_template(): template processing
+- SystemPrompt.environment(): env info injection
+- SystemPrompt.runtime_metadata(): session/model/provider tail block
+- SystemPrompt.provider(): model-to-prompt-file routing
+"""
+
+import os
+import tempfile
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from aegisops.agent.agent import AgentInfo
+from aegisops.session.prompt import (
+    PROMPT_DEFAULT,
+    get_prompt_aegisops_config_guard,
+    PromptTemplate,
+    SessionPrompt,
+    SystemPrompt,
+    TurnPromptContext,
+)
+from aegisops.session import prompt_strings
+
+
+# ---------------------------------------------------------------------------
+# count_tokens
+# ---------------------------------------------------------------------------
+
+class TestCountTokens:
+    def test_empty_string_returns_zero(self):
+        assert SessionPrompt.count_tokens("") == 0
+
+    def test_short_text_returns_positive(self):
+        result = SessionPrompt.count_tokens("hello world")
+        assert result > 0
+
+    def test_longer_text_more_tokens(self):
+        short = SessionPrompt.count_tokens("hi")
+        long_ = SessionPrompt.count_tokens("This is a much longer piece of text with many words")
+        assert long_ > short
+
+    def test_always_uses_chars_over_4(self):
+        # count_tokens now always uses chars/4 — no tiktoken path remains.
+        text = "a" * 400
+        assert SessionPrompt.count_tokens(text) == 100  # 400 // 4
+
+    def test_short_text_chars_over_4(self):
+        text = "test text"  # 9 chars -> 9 // 4 = 2
+        assert SessionPrompt.count_tokens(text) == len(text) // 4
+
+    def test_cjk_characters_count_one_token_each(self):
+        # chars/4 made a Chinese session look ~4x smaller than the provider
+        # reported, so the meter read 14% while compaction was running.
+        assert SessionPrompt.count_tokens("文件目录" * 100) == 400
+
+    def test_mixed_text_counts_cjk_and_other_characters_separately(self):
+        text = "写入 workspace/crm 目录"  # 4 CJK chars + 15 others
+        assert SessionPrompt.count_tokens(text) == 4 + 15 // 4
+
+    def test_cjk_punctuation_counts_like_cjk_text(self):
+        assert SessionPrompt.count_tokens("。、「」【】") == 6
+
+    def test_non_ascii_latin_text_keeps_chars_over_4(self):
+        text = "café résumé naïve"
+        assert SessionPrompt.count_tokens(text) == len(text) // 4
+
+
+# ---------------------------------------------------------------------------
+# estimate_tokens
+# ---------------------------------------------------------------------------
+
+class TestEstimateTokens:
+    def test_empty_returns_zero(self):
+        assert SessionPrompt.estimate_tokens("") == 0
+
+    def test_400_chars_returns_100(self):
+        text = "x" * 400
+        assert SessionPrompt.estimate_tokens(text) == 100
+
+    def test_integer_division(self):
+        text = "x" * 5  # 5 // 4 = 1
+        assert SessionPrompt.estimate_tokens(text) == 1
+
+    def test_zero_chars_returns_zero(self):
+        assert SessionPrompt.estimate_tokens("   ") == 0  # 3 // 4 = 0
+
+
+# ---------------------------------------------------------------------------
+# count_message_tokens
+# ---------------------------------------------------------------------------
+
+class TestCountMessageTokens:
+    def test_empty_list_returns_zero(self):
+        assert SessionPrompt.count_message_tokens([]) == 0
+
+    def test_dict_messages(self):
+        messages = [
+            {"role": "user", "content": "hello world"},
+            {"role": "assistant", "content": "hi there"},
+        ]
+        result = SessionPrompt.count_message_tokens(messages)
+        assert result > 0
+
+    def test_missing_content_field_returns_zero(self):
+        messages = [{"role": "user"}]
+        result = SessionPrompt.count_message_tokens(messages)
+        assert result == 0
+
+    def test_object_with_content_attr(self):
+        class FakeMsg:
+            content = "test message content"
+
+        result = SessionPrompt.count_message_tokens([FakeMsg()])
+        assert result > 0
+
+    def test_additive_across_messages(self):
+        msg1 = {"content": "a" * 40}
+        msg2 = {"content": "b" * 40}
+        total = SessionPrompt.count_message_tokens([msg1, msg2])
+        single = SessionPrompt.count_message_tokens([msg1])
+        assert total > single
+
+
+# ---------------------------------------------------------------------------
+# load_template / render_template
+# ---------------------------------------------------------------------------
+
+class TestLoadTemplate:
+    def test_load_valid_template(self, tmp_path):
+        template_file = tmp_path / "test.txt"
+        template_file.write_text("Hello {{name}}, welcome to {{place}}!", encoding="utf-8")
+
+        # Clear template cache first
+        SessionPrompt._templates.clear()
+        template = SessionPrompt.load_template(str(template_file))
+
+        assert template is not None
+        assert isinstance(template, PromptTemplate)
+        assert "name" in template.variables
+        assert "place" in template.variables
+
+    def test_load_nonexistent_returns_none(self):
+        result = SessionPrompt.load_template("/nonexistent/path/template.txt")
+        assert result is None
+
+    def test_template_cached_on_second_load(self, tmp_path):
+        template_file = tmp_path / "cached.txt"
+        template_file.write_text("content {{var}}", encoding="utf-8")
+
+        SessionPrompt._templates.clear()
+        t1 = SessionPrompt.load_template(str(template_file))
+        t2 = SessionPrompt.load_template(str(template_file))
+
+        assert t1 is t2  # same object from cache
+
+
+class TestRenderTemplate:
+    def test_render_substitutes_variables(self):
+        template = PromptTemplate(
+            name="test",
+            content="Hello {{name}}, you are {{role}}.",
+            variables=["name", "role"],
+        )
+        result = SessionPrompt.render_template(template, {"name": "Alice", "role": "admin"})
+        assert "Alice" in result
+        assert "admin" in result
+        assert "{{name}}" not in result
+        assert "{{role}}" not in result
+
+    def test_render_missing_variable_leaves_placeholder(self):
+        template = PromptTemplate(
+            name="test",
+            content="Hello {{name}}!",
+            variables=["name"],
+        )
+        result = SessionPrompt.render_template(template, {})
+        # Missing variable should either be left as-is or replaced with empty string
+        assert "Hello" in result
+
+    def test_render_no_variables(self):
+        template = PromptTemplate(
+            name="test",
+            content="Static content",
+            variables=[],
+        )
+        result = SessionPrompt.render_template(template, {})
+        assert result == "Static content"
+
+
+# ---------------------------------------------------------------------------
+# SystemPrompt.environment() — async method
+# ---------------------------------------------------------------------------
+
+class TestSystemPromptEnvironment:
+    @pytest.mark.asyncio
+    async def test_returns_list(self):
+        result = await SystemPrompt.environment("/tmp")
+        assert isinstance(result, list)
+
+    @pytest.mark.asyncio
+    async def test_includes_working_directory(self):
+        result = await SystemPrompt.environment("/my/work/dir")
+        combined = "\n".join(result)
+        assert "current working directory: /my/work/dir" in combined
+
+    def test_distinguishes_source_code_and_working_directories(self, monkeypatch):
+        monkeypatch.setenv("AEGISOPS_REPO_ROOT", "/opt/aegisops")
+
+        combined = "\n".join(SystemPrompt.environment_stable("/workspace/project"))
+
+        assert "aegisops source code directory: /opt/aegisops" in combined
+        assert "current working directory: /workspace/project" in combined
+
+    @pytest.mark.asyncio
+    async def test_includes_date_info(self):
+        result = await SystemPrompt.environment("/tmp")
+        combined = "\n".join(result)
+        from datetime import datetime
+        current_year = str(datetime.now().year)
+        assert current_year in combined
+
+    @pytest.mark.asyncio
+    async def test_non_empty(self):
+        result = await SystemPrompt.environment("/tmp")
+        assert len(result) > 0
+        assert any(len(s) > 0 for s in result)
+
+
+# ---------------------------------------------------------------------------
+# SystemPrompt.runtime_metadata()
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptRuntimeMetadata:
+    def test_includes_session_model_provider_when_set(self) -> None:
+        block = SystemPrompt.runtime_metadata(
+            session_id="ses_test",
+            model_id="claude-sonnet-4-20250514",
+            provider_id="anthropic",
+        )[0]
+        assert "Session ID: ses_test" in block
+        assert "Model: claude-sonnet-4-20250514" in block
+        assert "Provider: anthropic" in block
+
+    def test_describes_owner_safe_output_routing_without_a_host_path(self) -> None:
+        block = SystemPrompt.runtime_metadata()[0]
+
+        assert "use a filename-only path" in block
+        assert "dated Workspace outputs directory" in block
+        assert "workspace/users/" not in block
+
+    def test_omits_optional_lines_when_unset(self) -> None:
+        block = SystemPrompt.runtime_metadata()[0]
+        assert "Session ID:" not in block
+        assert "Model:" not in block
+        assert "Provider:" not in block
+        assert "## Runtime Metadata" in block
+
+
+class TestBuildSystemPrompts:
+    @pytest.mark.asyncio
+    async def test_builtin_system_subagent_child_uses_minimal_prompt(self):
+        agent = AgentInfo(
+            name="rex-junior",
+            mode="subagent",
+            tags=["system"],
+            prompt="You are Rex Junior.",
+        )
+        with (
+            patch("aegisops.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "aegisops.session.session.Session.get_by_id",
+                AsyncMock(return_value=SimpleNamespace(parent_id="ses-parent")),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-child",
+                session_directory="/tmp/project",
+                agent_name="rex-junior",
+                agent_prompt="You are Rex Junior.",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+                turn_context=TurnPromptContext(
+                    tool_catalog="SHOULD_NOT_APPEAR",
+                ),
+            )
+
+        assert len(prompts) == 3
+        assert prompts[0] == get_prompt_aegisops_config_guard().strip()
+        assert prompts[1] == "You are Rex Junior."
+        assert "## Environment" in prompts[2]
+        assert "Current working directory: /tmp/project" in prompts[2]
+        assert "Platform:" in prompts[2]
+        assert "Today's date:" in prompts[2]
+        assert "SHOULD_NOT_APPEAR" not in "\n".join(prompts)
+        assert PROMPT_DEFAULT.strip() not in "\n".join(prompts)
+
+    @pytest.mark.asyncio
+    async def test_builtin_system_subagent_root_uses_full_prompt(self):
+        agent = AgentInfo(
+            name="rex-junior",
+            mode="subagent",
+            tags=["system"],
+            prompt="You are Rex Junior.",
+        )
+        with (
+            patch("aegisops.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "aegisops.session.session.Session.get_by_id",
+                AsyncMock(return_value=SimpleNamespace(parent_id=None)),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-root",
+                session_directory="/tmp/project",
+                agent_name="rex-junior",
+                agent_prompt="You are Rex Junior.",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        assert len(prompts) > 2
+        assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+
+    @pytest.mark.asyncio
+    async def test_isolated_profile_loads_only_control_agent_skill_and_environment_prompts(
+        self,
+        tmp_path: Path,
+    ):
+        skill_file = tmp_path / "SKILL.md"
+        skill_file.write_text("Always trace findings to source lines.", encoding="utf-8")
+        skill = SimpleNamespace(name="secure-review", location=str(skill_file))
+        tool_catalog_factory = MagicMock(return_value="HOST TOOL CATALOG")
+
+        with (
+            patch("aegisops.skill.skill.Skill.get", AsyncMock(return_value=skill)),
+            patch("aegisops.skill.skill.Skill.is_disabled", return_value=False),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-isolated",
+                session_directory=str(tmp_path),
+                agent_name="isolated-reviewer",
+                agent_prompt="Review source code only.",
+                agent_skill_names=["secure-review"],
+                prompt_profile="isolated",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+                execution_mode_prompt="PLAN CONTROL",
+                memory_bootstrap_data={"instructions": "HOST MEMORY"},
+                tool_catalog_prompt_factory=tool_catalog_factory,
+                turn_context=TurnPromptContext(
+                    additional_context="HOST TURN CONTEXT",
+                    tool_catalog="HOST CATALOG SNAPSHOT",
+                    text_tool_catalog="DECLARED TEXT TOOLS",
+                    tool_results_reminder="TOOL RESULT REMINDER",
+                ),
+            )
+
+        combined = "\n\n".join(prompts)
+        assert get_prompt_aegisops_config_guard().strip() in prompts
+        assert prompt_strings._build_tool_instructions() not in prompts
+        assert "Use only tools whose callable schemas are provided" in combined
+        assert "`tool_search`" not in combined
+        assert "PLAN CONTROL" in prompts
+        assert "Review source code only." in prompts
+        assert "## Trusted Agent Skill: secure-review" in combined
+        assert "Always trace findings to source lines." in combined
+        assert "## Environment" in combined
+        assert PROMPT_DEFAULT.strip() not in combined
+        assert "HOST MEMORY" not in combined
+        assert "HOST TOOL CATALOG" not in combined
+        assert "## Runtime Metadata" not in combined
+        assert "HOST TURN CONTEXT" not in combined
+        assert "HOST CATALOG SNAPSHOT" not in combined
+        assert prompts[-2:] == ["DECLARED TEXT TOOLS", "TOOL RESULT REMINDER"]
+        tool_catalog_factory.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_configured_agent_skill_fails_closed_when_unavailable(self):
+        with patch("aegisops.skill.skill.Skill.get", AsyncMock(return_value=None)):
+            with pytest.raises(ValueError, match="unavailable: missing-skill"):
+                await SessionPrompt.build_system_prompts(
+                    session_id="ses-missing-skill",
+                    session_directory="/tmp/project",
+                    agent_name="reviewer",
+                    agent_prompt="Review source code.",
+                    agent_skill_names=["missing-skill"],
+                    provider_id="anthropic",
+                    model_id="claude-sonnet",
+                )
+
+    @pytest.mark.asyncio
+    async def test_agent_skills_do_not_leak_between_agents(self, tmp_path: Path):
+        skill_files = {}
+        for name in ("skill-a", "skill-b"):
+            path = tmp_path / name / "SKILL.md"
+            path.parent.mkdir()
+            path.write_text(f"Instructions for {name} only.", encoding="utf-8")
+            skill_files[name] = SimpleNamespace(name=name, location=str(path))
+
+        async def get_skill(name: str):
+            return skill_files.get(name)
+
+        with (
+            patch("aegisops.skill.skill.Skill.get", side_effect=get_skill),
+            patch("aegisops.skill.skill.Skill.is_disabled", return_value=False),
+            patch("aegisops.agent.registry.Agent.get", AsyncMock(return_value=None)),
+        ):
+            prompts_a = await SessionPrompt.build_system_prompts(
+                session_id="ses-a",
+                session_directory=str(tmp_path),
+                agent_name="agent-a",
+                agent_prompt="Agent A",
+                agent_skill_names=["skill-a"],
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+            prompts_b = await SessionPrompt.build_system_prompts(
+                session_id="ses-b",
+                session_directory=str(tmp_path),
+                agent_name="agent-b",
+                agent_prompt="Agent B",
+                agent_skill_names=["skill-b"],
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        combined_a = "\n".join(prompts_a)
+        combined_b = "\n".join(prompts_b)
+        assert "Instructions for skill-a only." in combined_a
+        assert "Instructions for skill-b only." not in combined_a
+        assert "Instructions for skill-b only." in combined_b
+        assert "Instructions for skill-a only." not in combined_b
+        assert PROMPT_DEFAULT.strip() in combined_a
+        assert PROMPT_DEFAULT.strip() in combined_b
+
+    @pytest.mark.asyncio
+    async def test_full_prompt_loads_worktree_and_config_instructions(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        nested = tmp_path / "src" / "package"
+        nested.mkdir(parents=True)
+        (tmp_path / "AGENTS.md").write_text("project rules", encoding="utf-8")
+        (nested / "extra-rules.md").write_text("extra rules", encoding="utf-8")
+
+        with patch.object(
+            SessionPrompt,
+            "_is_builtin_system_subagent_session",
+            AsyncMock(return_value=False),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-instructions",
+                session_directory=str(nested),
+                agent_name="rex",
+                agent_prompt="agent prompt",
+                provider_id="openai",
+                model_id="gpt-5",
+                turn_context=TurnPromptContext(
+                    worktree=str(tmp_path),
+                    config_instructions=("extra-rules.md",),
+                ),
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "project rules" in combined
+        assert "extra rules" in combined
+
+    @pytest.mark.asyncio
+    async def test_evolution_subagent_child_uses_full_prompt(self):
+        agent = AgentInfo(
+            name="self-improve",
+            mode="subagent",
+            tags=["system", "evolution"],
+            prompt="You are the self-improve Agent.",
+        )
+        with (
+            patch("aegisops.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "aegisops.session.session.Session.get_by_id",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        parent_id="ses-parent",
+                        metadata={"evolution": "self-improve"},
+                    )
+                ),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-self-improve",
+                session_directory="/tmp/project",
+                agent_name="self-improve",
+                agent_prompt=agent.prompt,
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        assert len(prompts) > 2
+        assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+        assert agent.prompt in prompts
+
+    @pytest.mark.asyncio
+    async def test_full_prompt_requires_question_approval_for_aegisops_config_operations(self):
+        prompts = await SessionPrompt.build_system_prompts(
+            session_id="ses-config-guard",
+            session_directory="/tmp/project",
+            agent_name="rex",
+            agent_prompt="You are Rex.",
+            provider_id="anthropic",
+            model_id="claude-sonnet",
+        )
+
+        guard = get_prompt_aegisops_config_guard().strip()
+        assert guard in prompts
+        assert "`aegisops.json`" in guard
+        assert "`mcp_list.json`" in guard
+        assert "MUST call the `question` tool" in guard
+        assert "user's original request is not approval" in guard
+        assert "only inspect protected configuration with non-mutating operations" in guard
+
+
+# ---------------------------------------------------------------------------
+# SystemPrompt.provider() — returns List[str]
+# ---------------------------------------------------------------------------
+
+class TestSystemPromptProvider:
+    def test_anthropic_model_returns_list(self):
+        result = SystemPrompt.provider("claude-3-5-sonnet-20241022")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+
+    def test_gemini_model_returns_list(self):
+        result = SystemPrompt.provider("gemini-1.5-pro")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+
+    def test_gpt_model_returns_list(self):
+        result = SystemPrompt.provider("gpt-4o")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+
+    def test_unknown_model_returns_list(self):
+        result = SystemPrompt.provider("totally-unknown-model")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+        assert "use the ls tool" not in result[0]
+        assert "must call the relevant tool" in result[0]
+
+    def test_minimax_model_uses_minimax_prompt(self):
+        result = SystemPrompt.provider("minimax:MiniMax-M2.5")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+        assert "prefer actually invoking the needed tool" in result[0]
+        assert "Misleading behavior" in result[0]
+
+    def test_none_model_returns_list(self):
+        # provider() may raise on None; just verify it returns a list or handle gracefully
+        try:
+            result = SystemPrompt.provider(None)
+            assert isinstance(result, list)
+        except (AttributeError, TypeError):
+            pytest.skip("provider(None) not supported by this implementation")
+
+    def test_provider_prompts_do_not_reference_retired_todo_tools(self):
+        prompt_dir = Path(__file__).resolve().parents[2] / "aegisops" / "session" / "prompt"
+        retired = ("TodoWrite", "TodoRead", "todowrite", "todoread")
+
+        for prompt_path in prompt_dir.glob("*.txt"):
+            content = prompt_path.read_text(encoding="utf-8")
+            for name in retired:
+                assert name not in content, f"{prompt_path.name} references retired tool {name}"
+
+
+class TestPromptToolInstructions:
+    def test_tool_instructions_are_platform_agnostic(self):
+        instructions = prompt_strings._build_tool_instructions()
+
+        assert "PowerShell" not in instructions
+        assert "must explicitly specify encoding" not in instructions
+        assert "Bash Tool Guidance" not in instructions
+
+    def test_tool_instructions_do_not_hardcode_tool_name_mapping(self):
+        instructions = prompt_strings._build_tool_instructions()
+
+        assert "callable schema" in instructions
+        assert "Read files: use the 'read' tool" not in instructions
+        assert "Run commands: use the 'bash' tool" not in instructions
+        assert "Search code: use the 'grep' tool" not in instructions
+
+
+# ---------------------------------------------------------------------------
+# PromptTemplate model
+# ---------------------------------------------------------------------------
+
+class TestPromptTemplate:
+    def test_basic_creation(self):
+        t = PromptTemplate(name="test", content="content", variables=["var1"])
+        assert t.name == "test"
+        assert t.content == "content"
+        assert t.variables == ["var1"]
+
+    def test_empty_variables(self):
+        t = PromptTemplate(name="test", content="no vars", variables=[])
+        assert t.variables == []
+
+
+# ---------------------------------------------------------------------------
+# estimate_full_context_tokens — B2 overhead + safety margin
+# ---------------------------------------------------------------------------
+
+class TestEstimateFullContextTokens:
+    """estimate_full_context_tokens returns pure chars/4 message sum.
+
+    No overhead fields and no safety margin are applied — the fixed
+    85 % context_window overflow threshold makes them unnecessary.
+    policy and apply_safety_margin parameters are accepted but ignored.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_message_parts(self, monkeypatch: pytest.MonkeyPatch):
+        # ``Message.parts`` requires DB lookup; stub it out so we only exercise
+        # the message-content arithmetic in this suite.
+        from aegisops.session import message as message_mod
+
+        async def _fake_parts(message_id, session_id):  # noqa: ARG001
+            return []
+
+        monkeypatch.setattr(message_mod.Message, "parts", staticmethod(_fake_parts))
+        yield
+
+    @pytest.mark.asyncio
+    async def test_empty_messages_returns_zero(self):
+        """No messages → 0 tokens (no overhead added)."""
+        result = await SessionPrompt.estimate_full_context_tokens("ses_x", [])
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_policy_arg_ignored(self):
+        """policy argument is accepted but does not change the result."""
+        from aegisops.session.lifecycle.compaction import CompactionPolicy
+
+        policy = CompactionPolicy.from_model(200_000, 8_192)
+        result_with = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [], policy=policy,
+        )
+        result_without = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [],
+        )
+        assert result_with == result_without == 0
+
+    @pytest.mark.asyncio
+    async def test_safety_margin_arg_ignored(self):
+        """apply_safety_margin=False has no effect (margin is never applied)."""
+        from aegisops.session.lifecycle.compaction import CompactionPolicy
+
+        policy = CompactionPolicy.from_model(200_000, 8_192)
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [], policy=policy, apply_safety_margin=False,
+        )
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_message_content_is_counted(self, monkeypatch: pytest.MonkeyPatch):
+        messages = [{"id": "m1", "content": "x" * 400}]  # 400 chars → 100 tokens
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", messages,
+        )
+        assert result == 100
+
+    @pytest.mark.asyncio
+    async def test_ignored_text_part_is_not_counted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from aegisops.session import message as message_mod
+
+        async def _ignored_parts(message_id, session_id):  # noqa: ARG001
+            return [
+                SimpleNamespace(
+                    type="text",
+                    text="Available Tools\n" + ("x" * 400),
+                    ignored=True,
+                ),
+            ]
+
+        monkeypatch.setattr(
+            message_mod.Message,
+            "parts",
+            staticmethod(_ignored_parts),
+        )
+        messages = [{"id": "ignored-command-output", "content": ""}]
+
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x",
+            messages,
+        )
+
+        assert result == 0
+
+
+class TestEstimateToolResultTokens:
+    @pytest.mark.asyncio
+    async def test_counts_only_results_added_after_model_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from aegisops.session import message as message_mod
+
+        parts = [
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(
+                    status="completed",
+                    input={"query": "i" * 400},
+                    output="o" * 400,
+                    time={},
+                ),
+            ),
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(
+                    status="completed",
+                    input={},
+                    output="ignored after compaction",
+                    time={"compacted": 1},
+                ),
+            ),
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(status="error", error="boom", time={}),
+            ),
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(status="running", time={}),
+            ),
+            SimpleNamespace(type="text", text="not a tool result"),
+        ]
+
+        async def _parts(message_id, session_id):  # noqa: ARG001
+            return parts
+
+        monkeypatch.setattr(message_mod.Message, "parts", staticmethod(_parts))
+
+        result = await SessionPrompt.estimate_tool_result_tokens("ses_x", "msg_x")
+
+        assert result == (
+            SessionPrompt.count_tokens("o" * 400)
+            + 10
+            + SessionPrompt.count_tokens("Error: boom")
+            + SessionPrompt.count_tokens("Error: Tool execution was interrupted")
+        )
+
+
+async def _assistant_answer_in_memory(session_id: str, answer: str):
+    """An assistant message as the runner leaves it after streaming: the
+    answer is stored as a text part and the runner also passes it as
+    ``content`` to ``Message.update``. Messages are read back from
+    PostgreSQL, which keeps the text part only, so the answer must still be
+    counted exactly once."""
+    from aegisops.session.message import Message, MessageRole, TextPart
+
+    msg = await Message.create(session_id, MessageRole.ASSISTANT, "")
+    await Message.store_part(
+        session_id,
+        msg.id,
+        TextPart(sessionID=session_id, messageID=msg.id, text=answer),
+    )
+    await Message.update(session_id, msg.id, content=answer, finish="stop")
+    return await Message.list(session_id)
+
+
+@pytest.mark.asyncio
+async def test_streamed_answer_is_counted_once():
+    answer = "Design note: customer records, stages, owners and follow-ups. " * 200
+    messages = await _assistant_answer_in_memory("ses_estimate_answer_once", answer)
+
+    result = await SessionPrompt.estimate_full_context_tokens("ses_estimate_answer_once", messages)
+
+    assert result == SessionPrompt.count_tokens(answer)

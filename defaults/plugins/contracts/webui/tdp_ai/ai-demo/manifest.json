@@ -1,0 +1,11 @@
+{
+  "id": "ai-demo",
+  "title": "TDP AI 研判 · 演示环境",
+  "route": "/contracts/webui/ai-demo",
+  "icon": "Bot",
+  "order": 11,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 0
+}

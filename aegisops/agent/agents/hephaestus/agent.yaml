@@ -1,0 +1,26 @@
+name: hephaestus
+group: 系统辅助
+name_cn: 深度执行智能体
+description: >-
+  Autonomous deep worker. Explores thoroughly with direct tools before acting
+  and completes tasks end-to-end without delegating further.
+mode: subagent
+hidden: false
+tags: [system]
+color: "#FF4500"
+delegatable: false
+tools:
+  - read
+  - glob
+  - grep
+  - bash
+  - edit
+  - write
+  - apply_patch
+  - websearch
+  - webfetch
+  - skill_load
+  - todo
+  - run_workflow
+  - run_workflow_node
+# prompt is left empty – injected dynamically by prompt_builder.py

@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+[project]
+name = "aegis-local-scenes"
+version = "1.0.0"
+description = "AegisOps installed scene adapters"
+requires-python = ">=3.11"
+[project.entry-points."aegisops.plugins"]
+aegis-scenes = "aegis_scenes:register"
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aegis_scenes*"]
+[tool.setuptools.package-data]
+"*" = ["static/*", "hub/**/*"]

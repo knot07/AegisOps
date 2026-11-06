@@ -1,0 +1,36 @@
+name: tdp-monitor-reviewer
+name_cn: TDP 只读监测研判智能体
+description: >-
+  Cross-platform read-only TDP monitoring and alert-review subagent for log queries,
+  evidence correlation, attack-result validation, compromise review, and risk classification.
+description_cn: 跨平台 TDP 只读监测与安全研判智能体，禁止执行封禁或修改设备状态。
+mode: subagent
+strategy: react
+delegatable: true
+hidden: false
+tags: [security, tdp, monitoring, triage, read-only]
+
+prompt_file: prompt.md
+color: "#38BDF8"
+temperature: 0.2
+
+tools:
+  - skill_load
+  - tdp_log_search
+  - tdp_threat_monitor_list
+  - tdp_threat_intelligent_aggregation
+  - datang_tdp_ip_reputation
+
+prompt_metadata:
+  category: security
+  cost: medium
+  triggers:
+    - domain: tdp
+      trigger: "TDP 监测、TDP 告警研判、攻击源 IP 调查、外网攻击复核、内网横向复核"
+  use_when:
+    - 用户要求只读查询或研判 TDP 告警
+    - 用户要求判断攻击是否成功或是否存在主机失陷线索
+    - 用户要求关联 TDP 日志与 ThreatBook 情报
+  avoid_when:
+    - 用户要求执行封禁、阻断、隔离或修改设备策略
+    - 与 TDP 无关的代码修改或通用任务

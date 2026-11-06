@@ -1,0 +1,967 @@
+"""Detached restart and source-upgrade handoff helper."""
+
+from __future__ import annotations
+
+import argparse
+import asyncio
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+from typing import Sequence
+
+from aegisops.cli import service_manager
+from aegisops.updater import handoff_progress
+from aegisops.updater import updater as updater_module
+from aegisops.utils.log import append_upgrade_text_log
+
+DEFAULT_PARENT_TIMEOUT_SECONDS = 20.0
+DEFAULT_PORT_TIMEOUT_SECONDS = 10.0
+POST_STOP_PORT_TIMEOUT_SECONDS = 20.0
+SUPERVISOR_STOP_TIMEOUT_SECONDS = 20.0
+FORCED_SUPERVISOR_STOP_TIMEOUT_SECONDS = 5.0
+LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS = 300.0
+DEFAULT_POLL_INTERVAL_SECONDS = 0.25
+PROGRESS_FAILURE_LINGER_SECONDS = 60.0
+
+
+class _NullConsole:
+    """Discard service-manager progress output in the detached helper."""
+
+    def print(self, *_args, **_kwargs) -> None:
+        return None
+
+
+def _record_handoff_log(message: str) -> None:
+    append_upgrade_text_log(f"restart_handoff {message}")
+
+
+def _wait_for_parent_exit(
+    parent_pid: int,
+    *,
+    timeout_seconds: float = DEFAULT_PARENT_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not service_manager.pid_is_running(parent_pid):
+            return True
+        time.sleep(poll_interval_seconds)
+    return not service_manager.pid_is_running(parent_pid)
+
+
+def _backend_port_in_use(port: int) -> bool:
+    listeners = service_manager.port_owner_pids(port)
+    return service_manager.port_is_in_use(port, listeners)
+
+
+def _wait_for_backend_port_free(
+    port: int,
+    *,
+    timeout_seconds: float = DEFAULT_PORT_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not _backend_port_in_use(port):
+            return True
+        time.sleep(poll_interval_seconds)
+    return not _backend_port_in_use(port)
+
+
+def _ensure_backend_port_free(backend_port: int) -> bool:
+    if _wait_for_backend_port_free(backend_port):
+        return True
+
+    _record_handoff_log(f"backend_port_still_in_use port={backend_port}")
+    return _wait_for_backend_port_free(backend_port, timeout_seconds=POST_STOP_PORT_TIMEOUT_SECONDS)
+
+
+def _stop_supervisor_before_restart(
+    *,
+    daemon_pid: int | None = None,
+    backend_port: int | None = None,
+    service_ports: Sequence[int] = (),
+    force_daemon_stop: bool = False,
+    timeout_seconds: float = SUPERVISOR_STOP_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> bool:
+    from aegisops.cli import service_control
+
+    paths = service_manager.runtime_paths()
+    ports = {port for port in (backend_port, *service_ports) if port is not None}
+    control_running = service_control.supervisor_is_running(paths)
+    daemon_running = service_manager.pid_is_running(daemon_pid)
+    if control_running or daemon_running:
+        try:
+            service_control.request_stop(paths=paths, timeout=timeout_seconds)
+        except Exception as exc:
+            _record_handoff_log(f"supervisor_stop_request_failed error={exc}")
+            if not force_daemon_stop or daemon_pid is None:
+                return False
+            try:
+                service_manager._terminate_orphan_pid(daemon_pid, "daemon", _NullConsole())
+            except Exception as terminate_exc:
+                _record_handoff_log(f"supervisor_force_stop_failed error={terminate_exc}")
+                return False
+
+    def stopped() -> bool:
+        return (
+            not service_control.supervisor_is_running(paths)
+            and not service_manager.pid_is_running(daemon_pid)
+            and all(not _backend_port_in_use(port) for port in ports)
+        )
+
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if stopped():
+            return True
+        time.sleep(poll_interval_seconds)
+    if stopped():
+        return True
+
+    if force_daemon_stop and daemon_pid is not None and service_manager.pid_is_running(daemon_pid):
+        try:
+            _record_handoff_log(f"supervisor_force_stop_after_timeout pid={daemon_pid}")
+            service_manager._terminate_orphan_pid(daemon_pid, "daemon", _NullConsole())
+        except Exception as exc:
+            _record_handoff_log(f"supervisor_force_stop_failed error={exc}")
+            return False
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if stopped():
+                return True
+            time.sleep(poll_interval_seconds)
+    return stopped()
+
+
+def _prepare_legacy_supervisor_for_upgrade(
+    *,
+    daemon_pid: int | None,
+    service_ports: Sequence[int],
+    timeout_seconds: float = LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> bool:
+    """Pause a v2026.7.15 supervisor after its updater parent exits."""
+    from aegisops.cli import service_control
+
+    paths = service_manager.runtime_paths()
+    ports = set(service_ports)
+
+    def paused() -> bool:
+        try:
+            status = service_control.read_supervisor_status(paths=paths, timeout=1.0)
+        except Exception:
+            return False
+        return status.backend.paused and status.webui.paused and all(not _backend_port_in_use(port) for port in ports)
+
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        response = service_control.control_api_request(
+            "POST",
+            "/upgrade/prepare",
+            paths=paths,
+            timeout=timeout_seconds,
+            json={},
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("legacy supervisor returned an invalid upgrade prepare response")
+        status = service_control.parse_supervisor_status(payload)
+        if status.backend.paused and status.webui.paused and all(not _backend_port_in_use(port) for port in ports):
+            return True
+    except Exception as exc:
+        _record_handoff_log(f"legacy_handover_prepare_request_failed error={exc}")
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in {404, 405}:
+            return False
+        if (
+            not service_manager.pid_is_running(daemon_pid)
+            and not service_control.supervisor_is_running(paths)
+            and all(not _backend_port_in_use(port) for port in ports)
+        ):
+            return True
+
+    while time.monotonic() < deadline:
+        if paused():
+            return True
+        time.sleep(poll_interval_seconds)
+    return paused()
+
+
+def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="AegisOps restart handoff helper")
+    parser.add_argument("--mode", choices=("restart", "upgrade"), default="restart")
+    parser.add_argument("--parent-pid", type=int)
+    parser.add_argument("--backend-host", required=True)
+    parser.add_argument("--backend-port", type=int, required=True)
+    parser.add_argument("--frontend-host", required=True)
+    parser.add_argument("--frontend-port", type=int, required=True)
+    parser.add_argument("--backend-pid-file")
+    parser.add_argument("--install-root", required=True)
+    parser.add_argument("--content-root")
+    parser.add_argument("--backup-path")
+    parser.add_argument("--was-running", action="store_true")
+    parser.add_argument("--daemon-pid", type=int)
+    parser.add_argument("--service-config-json")
+    parser.add_argument("--uv-path", required=True)
+    parser.add_argument("--sync-timeout", type=int, required=True)
+    parser.add_argument("--version", required=True)
+    parser.add_argument("--current-version", required=True)
+    parser.add_argument("--uv-default-index")
+    parser.add_argument("--npm-registry")
+    # Installed after the dependency sync; given by an update channel's plan.
+    parser.add_argument("--extra-wheel", action="append", default=[])
+    # JSON ``[staged, destination]``: put in place once the install succeeded.
+    parser.add_argument("--success-file", action="append", default=[])
+    parser.add_argument("--cleanup-dir")
+    parser.add_argument("--prebuilt", action="store_true")
+    parser.add_argument("--dependency-wheels-dir")
+    parser.add_argument("--prepare-handover", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("restart_argv", nargs=argparse.REMAINDER)
+    args = parser.parse_args(argv)
+    if args.restart_argv and args.restart_argv[0] == "--":
+        args.restart_argv = args.restart_argv[1:]
+    return args
+
+
+def _run_upgrade_tasks(args: argparse.Namespace) -> str | None:
+    try:
+        asyncio.run(
+            updater_module.install_or_repair_source(
+                install_root=Path(args.install_root),
+                uv_path=args.uv_path,
+                version=args.version,
+                uv_default_index=args.uv_default_index,
+                npm_registry=args.npm_registry,
+                extra_wheels=[Path(path) for path in getattr(args, "extra_wheel", None) or []],
+                success_files=_success_files(args),
+                sync_timeout=args.sync_timeout,
+                prebuilt=bool(getattr(args, "prebuilt", False)),
+                dependency_wheels_dir=(
+                    Path(args.dependency_wheels_dir) if getattr(args, "dependency_wheels_dir", None) else None
+                ),
+                on_step=getattr(args, "upgrade_step_callback", None),
+            )
+        )
+    except RuntimeError as exc:
+        return str(exc)
+    return None
+
+
+def _service_config_from_args(args: argparse.Namespace) -> service_manager.ServiceConfig:
+    """Load the captured service config without consulting the old daemon."""
+    from aegisops.cli.service_config import service_config_from_payload
+
+    try:
+        payload = json.loads(args.service_config_json or "")
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid service config JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("service config JSON must contain an object")
+    return service_config_from_payload(payload)
+
+
+def _validate_simple_upgrade_args(args: argparse.Namespace) -> None:
+    """Validate all inputs before stopping or changing the active install."""
+    if not args.content_root:
+        raise ValueError("upgrade content root is missing")
+    content_root = Path(args.content_root)
+    if not content_root.is_dir():
+        raise ValueError(f"upgrade content root does not exist: {content_root}")
+    if not args.backup_path:
+        raise ValueError("upgrade backup path is missing")
+    backup_path = Path(args.backup_path)
+    if not backup_path.is_file():
+        raise ValueError(f"upgrade backup does not exist: {backup_path}")
+    if args.was_running and not args.restart_argv:
+        raise ValueError("running service requires a restart runtime")
+    _service_config_from_args(args)
+
+
+def _service_ports(args: argparse.Namespace) -> tuple[int, ...]:
+    """Return every port that must be released before source replacement."""
+    config = _service_config_from_args(args)
+    return tuple(sorted({config.backend_port, config.frontend_port}))
+
+
+def _stop_services_before_upgrade(args: argparse.Namespace) -> bool:
+    """Stop managed services and wait for the captured daemon and port to exit."""
+    try:
+        service_manager.stop_all(_NullConsole())
+    except service_manager.ServiceError as exc:
+        _record_handoff_log(f"service_graceful_stop_failed error={exc}")
+    return _stop_supervisor_before_restart(
+        daemon_pid=args.daemon_pid,
+        backend_port=args.backend_port,
+        service_ports=_service_ports(args),
+        force_daemon_stop=True,
+        timeout_seconds=FORCED_SUPERVISOR_STOP_TIMEOUT_SECONDS,
+    )
+
+
+def _apply_new_source(args: argparse.Namespace) -> None:
+    """Replace the active source tree with the staged source tree."""
+    if not args.content_root:
+        raise RuntimeError("upgrade content root is missing")
+    content_root = Path(args.content_root)
+    if not content_root.is_dir():
+        raise RuntimeError(f"upgrade content root does not exist: {content_root}")
+    updater_module._replace_install_dir(content_root, Path(args.install_root))
+
+
+def _restore_install_from_backup(backup_path: Path, install_root: Path) -> None:
+    """Put the pre-upgrade source back from the backup archive.
+
+    备份是升级前源码的 tar.gz（排除运行时/构建目录），按升级本身同样的覆盖方式回放到安装目录，
+    半替换状态里被新版本改过的文件会全部回到旧版本；备份文件本身保留，供人工核对。
+    """
+    with tempfile.TemporaryDirectory(prefix="aegisops-restore-") as tmp:
+        content_root = updater_module._extract_archive(backup_path, Path(tmp))
+        updater_module._replace_install_dir(content_root, install_root)
+
+
+def _restore_after_failed_replace(args: argparse.Namespace, backup_path: Path) -> tuple[bool, str | None]:
+    """Roll the install back after a failed source replacement; returns (restored, error)."""
+    try:
+        _restore_install_from_backup(backup_path, Path(args.install_root))
+    except Exception as exc:  # 还原也失败：留人工路径（backup_path）
+        _record_handoff_log(f"source_restore_failed backup={backup_path} error={exc}")
+        return False, str(exc)
+    _record_handoff_log(f"source_restored_from_backup backup={backup_path}")
+    return True, None
+
+
+def _build_captured_start_argv(args: argparse.Namespace) -> list[str]:
+    """Build ``aegisops start`` directly from the pre-upgrade config snapshot."""
+    if not args.restart_argv:
+        return []
+    config = _service_config_from_args(args)
+    argv = [
+        args.restart_argv[0],
+        "-m",
+        "aegisops.cli.main",
+        "start",
+        "--host",
+        config.frontend_host,
+        "--port",
+        str(config.frontend_port),
+    ]
+    if config.no_browser:
+        argv.append("--no-browser")
+    if config.skip_frontend_build:
+        argv.append("--skip-webui-build")
+    if config.legacy_backend_host is not None:
+        argv.extend(["--server-host", config.legacy_backend_host])
+    if config.legacy_backend_port is not None:
+        argv.extend(["--server-port", str(config.legacy_backend_port)])
+    return argv
+
+
+def _run_start_command(argv: Sequence[str], *, cwd: Path) -> tuple[bool, str, str]:
+    """Run ``aegisops start`` and wait until it reports whether the service came up."""
+    completed = subprocess.run(
+        list(argv),
+        cwd=cwd,
+        capture_output=True,
+        text=False,
+        check=False,
+    )
+    stdout = updater_module._clean_process_output(completed.stdout)
+    stderr = updater_module._clean_process_output(completed.stderr)
+    if completed.returncode == 0:
+        return True, stdout, stderr
+    _record_handoff_log(f"restart_failed returncode={completed.returncode} stdout={stdout} stderr={stderr}")
+    return False, stdout, stderr
+
+
+def _start_service_after_upgrade(args: argparse.Namespace) -> tuple[bool, str, str]:
+    """Synchronously restore the service only when it ran before the upgrade."""
+    if not args.was_running:
+        return True, "", ""
+    start_argv = _build_captured_start_argv(args)
+    if not start_argv:
+        _record_handoff_log("missing_restart_argv")
+        return False, "", "missing restart runtime"
+    return _run_start_command(start_argv, cwd=Path(args.install_root))
+
+
+def _write_upgrade_result(
+    *,
+    args: argparse.Namespace,
+    phase: str,
+    failed_stage: str | None = None,
+    error: str | None = None,
+    backup_path: Path | None = None,
+    stdout: str | None = None,
+    stderr: str | None = None,
+    restored_from_backup: bool | None = None,
+    restore_error: str | None = None,
+    progress: dict[str, object] | None = None,
+) -> None:
+    """Persist a result record（自动回滚的结果也记在这里：restored_from_backup / restore_error）."""
+    try:
+        config_payload = json.loads(args.service_config_json or "{}")
+    except json.JSONDecodeError:
+        config_payload = {}
+    payload = {
+        "phase": phase,
+        "version": args.version,
+        "current_version": args.current_version,
+        "was_running": args.was_running,
+        "service_config": config_payload,
+    }
+    if error:
+        payload["last_error"] = error
+    if failed_stage:
+        payload["failed_stage"] = failed_stage
+    if backup_path is not None:
+        payload["backup_path"] = str(backup_path)
+    if restored_from_backup is not None:
+        payload["restored_from_backup"] = restored_from_backup
+    if restore_error:
+        payload["restore_error"] = restore_error
+    if stdout:
+        payload["stdout"] = stdout
+    if stderr:
+        payload["stderr"] = stderr
+    if progress is not None:
+        payload["step"] = progress.get("step")
+        payload["steps"] = progress.get("steps")
+    try:
+        updater_module._write_upgrade_result_state(payload)
+    except Exception as exc:
+        try:
+            _record_handoff_log(f"upgrade_result_write_failed phase={phase} error={exc}")
+        except Exception:
+            pass
+
+
+def _success_files(args: argparse.Namespace) -> list[tuple[Path, Path]]:
+    pairs: list[tuple[Path, Path]] = []
+    for raw in getattr(args, "success_file", None) or []:
+        staged, destination = json.loads(raw)
+        pairs.append((Path(staged), Path(destination)))
+    return pairs
+
+
+def _planned_upgrade_steps(args: argparse.Namespace, *, source_replace: bool = True) -> list[str]:
+    """Steps the upgrade dialog lists for the restart stage, in execution order."""
+    prebuilt = bool(getattr(args, "prebuilt", False))
+    steps = ["stop", "source_replace"] if source_replace else ["stop"]
+    if not prebuilt:
+        steps.append("check_runtime")
+    if not prebuilt or getattr(args, "dependency_wheels_dir", None):
+        steps.append("sync_dependencies")
+    if getattr(args, "extra_wheel", None):
+        steps.append("install_components")
+    if not prebuilt:
+        steps.append("build_webui")
+    return [*steps, "finalize", "start"]
+
+
+def _start_failure_message(stdout: str | None, stderr: str | None, limit: int = 400) -> str:
+    """Name a failed start by the end of its output, where the reason usually is."""
+    # Mask credentials before cutting: a cut inside a URL would hide it from the mask.
+    output = handoff_progress.redact_credentials((stderr or stdout or "").strip())
+    if not output:
+        return "service restart failed"
+    return "service restart failed: " + (output if len(output) <= limit else "..." + output[-limit:])
+
+
+class _UpgradeReporter:
+    """Steps, result record and status responder of one upgrade handoff.
+
+    The responder only runs for web upgrades, which pass a token: it answers on the
+    service's public port while the service is down, so the upgrade dialog can follow
+    the steps and read why a step failed.
+    """
+
+    def __init__(self, args: argparse.Namespace, token: str, steps: Sequence[str]) -> None:
+        self._args = args
+        self._token = token
+        self._responder: handoff_progress.ProgressResponder | None = None
+        self.progress = handoff_progress.UpgradeProgress(steps, on_change=self._record_running)
+
+    def _record_running(self, snapshot: dict[str, object]) -> None:
+        if snapshot.get("phase") == "running":
+            _write_upgrade_result(args=self._args, phase="running", progress=snapshot)
+
+    def start(self, step: str) -> None:
+        self.progress.start(step)
+
+    def serve(self) -> None:
+        """Answer on the public port once the old service has released it."""
+        if self._responder is not None or not self._token:
+            return
+        responder = handoff_progress.ProgressResponder(
+            self.progress,
+            self._args.frontend_host,
+            self._args.frontend_port,
+            self._token,
+        )
+        if responder.start():
+            self._responder = responder
+        else:
+            _record_handoff_log(f"progress_responder_unavailable port={self._args.frontend_port}")
+
+    def release_port(self) -> None:
+        """Free the public port for the service that starts next."""
+        if self._responder is not None:
+            self._responder.stop()
+            self._responder = None
+
+    def fail(
+        self,
+        error: str,
+        *,
+        failed_stage: str,
+        backup_path: Path | None = None,
+        stdout: str | None = None,
+        stderr: str | None = None,
+        restored_from_backup: bool | None = None,
+        restore_error: str | None = None,
+    ) -> int:
+        """Record the failed step and serve it until the upgrade dialog has read it."""
+        self.progress.fail(error)
+        _write_upgrade_result(
+            args=self._args,
+            phase="failed",
+            failed_stage=failed_stage,
+            error=error,
+            backup_path=backup_path,
+            stdout=stdout,
+            stderr=stderr,
+            restored_from_backup=restored_from_backup,
+            restore_error=restore_error,
+            progress=self.progress.snapshot(),
+        )
+        # After a stop timeout or a failed start the port may be free again.
+        self.serve()
+        if self._responder is not None:
+            self._responder.linger_for_failure(timeout=PROGRESS_FAILURE_LINGER_SECONDS)
+            self._responder = None
+        return 1
+
+    def finish(self, *, backup_path: Path | None = None) -> None:
+        self.progress.finish()
+        _write_upgrade_result(args=self._args, phase="done", backup_path=backup_path, progress=self.progress.snapshot())
+
+
+def _run_simple_upgrade(args: argparse.Namespace, progress_token: str = "") -> int:
+    """Run stop, source replacement, installation, and restart in order."""
+    try:
+        _validate_simple_upgrade_args(args)
+    except ValueError as exc:
+        error = str(exc)
+        _record_handoff_log(f"upgrade_validation_failed error={error}")
+        _write_upgrade_result(
+            args=args,
+            phase="failed",
+            failed_stage="validation",
+            error=error,
+        )
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
+    if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
+        error = f"parent exit timed out: {args.parent_pid}"
+        _record_handoff_log(error)
+        _write_upgrade_result(args=args, phase="failed", failed_stage="wait_parent", error=error)
+        return 1
+
+    reporter = _UpgradeReporter(args, progress_token, _planned_upgrade_steps(args))
+    try:
+        return _run_reported_upgrade(args, reporter)
+    except Exception as exc:
+        error = f"upgrade handoff crashed: {exc}"
+        _record_handoff_log(error)
+        return reporter.fail(error, failed_stage=reporter.progress.current_step or "unknown")
+
+
+def _run_reported_upgrade(args: argparse.Namespace, reporter: _UpgradeReporter) -> int:
+    reporter.start("stop")
+    if not _stop_services_before_upgrade(args):
+        error = "service stop timed out"
+        _record_handoff_log(error)
+        return reporter.fail(error, failed_stage="stop")
+
+    reporter.serve()
+    backup_path = Path(args.backup_path)
+
+    reporter.start("source_replace")
+    try:
+        _apply_new_source(args)
+    except Exception as exc:
+        error = str(exc)
+        _record_handoff_log(f"source_replace_failed error={error}")
+        # 替换到一半失败不能留半新半旧的目录：先从备份自动还原，还原成功再把原本在跑的服务拉起来，
+        # 保证基础 OSS 能力可用；只有还原也失败才把 backup_path 留给人工处理
+        restored, restore_error = _restore_after_failed_replace(args, backup_path)
+        stdout = stderr = ""
+        if restored:
+            # The restored service binds the public port the progress responder holds.
+            reporter.release_port()
+            try:
+                _started, stdout, stderr = _start_service_after_upgrade(args)
+            except Exception as restart_exc:
+                _started, stdout, stderr = False, "", str(restart_exc)
+            if not _started:
+                _record_handoff_log("service_restart_after_restore_failed")
+        return reporter.fail(
+            error,
+            failed_stage="source_replace",
+            backup_path=backup_path,
+            stdout=stdout or None,
+            stderr=stderr or None,
+            restored_from_backup=restored,
+            restore_error=restore_error,
+        )
+
+    args.upgrade_step_callback = reporter.start
+    try:
+        task_error = _run_upgrade_tasks(args)
+    except Exception as exc:
+        task_error = f"upgrade tasks crashed: {exc}"
+    if task_error is not None:
+        _record_handoff_log(f"install_failed error={task_error}")
+        return reporter.fail(task_error, failed_stage="install", backup_path=backup_path, stderr=task_error)
+
+    reporter.start("start")
+    # The upgraded service binds the same port.
+    reporter.release_port()
+    try:
+        started, stdout, stderr = _start_service_after_upgrade(args)
+    except Exception as exc:
+        _record_handoff_log(f"restart_failed error={exc}")
+        started, stdout, stderr = False, "", str(exc)
+    if not started:
+        return reporter.fail(
+            _start_failure_message(stdout, stderr),
+            failed_stage="start",
+            backup_path=backup_path,
+            stdout=stdout,
+            stderr=stderr,
+        )
+
+    reporter.finish(backup_path=backup_path)
+    _cleanup_dir(args.cleanup_dir)
+    return 0
+
+
+def _cleanup_dir(path_value: str | None) -> None:
+    if not path_value:
+        return
+    shutil.rmtree(Path(path_value), ignore_errors=True)
+
+
+def _legacy_upgrade_page_pids(args: argparse.Namespace, page_dir: Path, pid_path: Path) -> list[int]:
+    """Find trusted temporary upgrade-page processes from older handoffs."""
+    candidates: set[int] = set()
+    try:
+        candidates.update(service_manager.port_owner_pids(args.frontend_port))
+    except Exception:
+        pass
+    try:
+        candidates.add(int(pid_path.read_text(encoding="utf-8").strip()))
+    except (OSError, ValueError):
+        pass
+
+    page_dir_text = str(page_dir).lower()
+    matches: list[int] = []
+    for pid in sorted(candidates):
+        try:
+            command_line = service_manager._process_command_line(pid).lower()
+        except Exception:
+            continue
+        if "http.server" in command_line and "upgrade-page" in command_line and page_dir_text in command_line:
+            matches.append(pid)
+    return matches
+
+
+def _cleanup_legacy_upgrade_handover(args: argparse.Namespace) -> bool:
+    """Stop and remove upgrade-page artifacts left by old handoff protocols."""
+    run_dir = updater_module._aegisops_root() / "run"
+    state_path = run_dir / "upgrade-state.json"
+    pid_path = run_dir / "upgrade_server.pid"
+    page_dir = run_dir / "upgrade-page"
+    if not state_path.exists() and not pid_path.exists() and not page_dir.exists():
+        return True
+    page_pids = _legacy_upgrade_page_pids(args, page_dir, pid_path)
+
+    try:
+        for pid in page_pids:
+            service_manager._terminate_orphan_pid(pid, "升级临时页", _NullConsole())
+    except Exception as exc:
+        _record_handoff_log(f"legacy_handover_stop_failed error={exc}")
+        return False
+
+    remaining = _legacy_upgrade_page_pids(args, page_dir, pid_path)
+    if remaining:
+        _record_handoff_log(f"legacy_handover_still_running pids={remaining}")
+        return False
+
+    state_path.unlink(missing_ok=True)
+    pid_path.unlink(missing_ok=True)
+    shutil.rmtree(page_dir, ignore_errors=True)
+    if page_pids:
+        _record_handoff_log(f"legacy_handover_cleaned pids={page_pids}")
+    return True
+
+
+def _legacy_supervisor_pid(args: argparse.Namespace) -> int | None:
+    """Capture the daemon PID associated with an older handoff request."""
+    try:
+        # The pid may be force-stopped below; only a daemon proven to serve this runtime
+        # root qualifies, never an old daemon of another root sharing the install.
+        candidates = service_manager.trusted_daemon_process_pids(root=Path(args.install_root), confirmed_only=True)
+    except Exception as exc:
+        _record_handoff_log(f"legacy_daemon_scan_failed error={exc}")
+        return None
+
+    port_tokens = (f"--server-port {args.backend_port}", f"--server-port={args.backend_port}")
+    matches: list[int] = []
+    for pid in candidates:
+        try:
+            command_line = service_manager._process_command_line(pid).lower()
+        except Exception:
+            continue
+        if any(token in command_line for token in port_tokens):
+            matches.append(pid)
+    if len(matches) == 1:
+        return matches[0]
+    if not matches and len(candidates) == 1:
+        return candidates[0]
+    if candidates:
+        _record_handoff_log(f"legacy_daemon_scan_ambiguous pids={candidates}")
+    return None
+
+
+def _cli_subcommand(argv: Sequence[str]) -> str | None:
+    """Return the aegisops.cli.main subcommand embedded in a Python argv."""
+    for index, value in enumerate(argv[:-2]):
+        if value == "-m" and argv[index + 1] == "aegisops.cli.main":
+            return argv[index + 2]
+    return None
+
+
+def _restore_legacy_handoff_endpoints(args: argparse.Namespace) -> None:
+    """Restore endpoints lost by pre-v2026.7.8 split-service handoffs."""
+    if not args.backend_pid_file or _cli_subcommand(args.restart_argv) != "serve":
+        return
+
+    state_path = updater_module._aegisops_root() / "run" / "upgrade-state.json"
+    try:
+        payload = json.loads(state_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return
+    except (OSError, json.JSONDecodeError) as exc:
+        _record_handoff_log(f"legacy_service_config_invalid error={exc}")
+        return
+
+    if not isinstance(payload, dict):
+        _record_handoff_log("legacy_service_config_invalid error=state is not an object")
+        return
+
+    hosts = (payload.get("backend_host"), payload.get("frontend_host"))
+    ports = (payload.get("backend_port"), payload.get("frontend_port"))
+    if not all(isinstance(host, str) and host.strip() for host in hosts) or not all(
+        isinstance(port, int) and not isinstance(port, bool) and 0 < port <= 65535 for port in ports
+    ):
+        _record_handoff_log("legacy_service_config_invalid error=invalid host or port")
+        return
+
+    args.backend_host, args.frontend_host = hosts
+    args.backend_port, args.frontend_port = ports
+    _record_handoff_log(
+        "legacy_service_config_restored "
+        f"backend={args.backend_host}:{args.backend_port} frontend={args.frontend_host}:{args.frontend_port}"
+    )
+
+
+def _restart_argv_for_current_runtime(args: argparse.Namespace, restart_argv: Sequence[str]) -> list[str]:
+    if _cli_subcommand(restart_argv) != "serve":
+        return list(restart_argv)
+
+    argv = [
+        restart_argv[0],
+        "-m",
+        "aegisops.cli.main",
+        "start",
+        "--no-browser",
+        "--skip-webui-build",
+        "--host",
+        str(args.frontend_host),
+        "--port",
+        str(args.frontend_port),
+        "--server-host",
+        str(args.backend_host),
+        "--server-port",
+        str(args.backend_port),
+    ]
+    _record_handoff_log(f"legacy_serve_restart_migrated argv={argv}")
+    return argv
+
+
+def _restart_failed(reporter: _UpgradeReporter | None, error: str, failed_stage: str) -> int:
+    return reporter.fail(error, failed_stage=failed_stage) if reporter is not None else 1
+
+
+def run(argv: Sequence[str] | None = None) -> int:
+    args = _parse_args(argv)
+    # Only web upgrades pass a token. Take it out first so no mode hands it on to the
+    # service it starts.
+    progress_token = os.environ.pop(handoff_progress.UPGRADE_PROGRESS_TOKEN_ENV, "")
+    if args.mode == "upgrade":
+        return _run_simple_upgrade(args, progress_token)
+
+    _restore_legacy_handoff_endpoints(args)
+    restart_argv = _restart_argv_for_current_runtime(args, args.restart_argv)
+    if not restart_argv:
+        _record_handoff_log("missing_restart_argv")
+        return 2
+
+    _record_handoff_log(
+        "started "
+        f"parent_pid={args.parent_pid} backend={args.backend_host}:{args.backend_port} "
+        f"frontend={args.frontend_host}:{args.frontend_port}"
+    )
+    legacy_daemon_pid = _legacy_supervisor_pid(args) if args.prepare_handover else None
+    legacy_service_ports = tuple(sorted({args.backend_port, args.frontend_port}))
+    supervisor_stopped = False
+    component_install = bool(getattr(args, "extra_wheel", None) or getattr(args, "success_file", None))
+    # A web upgrade that only changes an extension's component restarts through this mode.
+    reporter = (
+        _UpgradeReporter(args, progress_token, _planned_upgrade_steps(args, source_replace=False))
+        if progress_token and component_install and not args.prepare_handover
+        else None
+    )
+
+    if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
+        _record_handoff_log(f"parent_exit_timeout parent_pid={args.parent_pid}")
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
+    if args.prepare_handover:
+        legacy_prepared = _prepare_legacy_supervisor_for_upgrade(
+            daemon_pid=legacy_daemon_pid,
+            service_ports=legacy_service_ports,
+            timeout_seconds=max(
+                LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS,
+                float(args.sync_timeout),
+            ),
+        )
+        if not legacy_prepared:
+            _record_handoff_log("legacy_handover_pause_timeout")
+            supervisor_stopped = _stop_supervisor_before_restart(
+                daemon_pid=legacy_daemon_pid,
+                backend_port=args.backend_port,
+                service_ports=(args.frontend_port,),
+                force_daemon_stop=True,
+            )
+            if not supervisor_stopped:
+                _record_handoff_log("legacy_handover_stop_timeout")
+                _cleanup_dir(args.cleanup_dir)
+                return 1
+    elif component_install:
+        # A change that keeps the local source (an extension's component): the
+        # service still has to be down while its runtime changes under it.
+        if reporter is not None:
+            reporter.start("stop")
+        supervisor_stopped = _stop_supervisor_before_restart(
+            backend_port=args.backend_port,
+            service_ports=(args.frontend_port,),
+        )
+        if not supervisor_stopped:
+            _record_handoff_log("component_handover_stop_timeout")
+            _cleanup_dir(args.cleanup_dir)
+            return _restart_failed(reporter, "service stop timed out", "stop")
+        if not _ensure_backend_port_free(args.backend_port):
+            _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
+            _cleanup_dir(args.cleanup_dir)
+            return _restart_failed(reporter, f"backend port {args.backend_port} is still in use", "stop")
+        if reporter is not None:
+            reporter.serve()
+    elif not args.prepare_handover and not _ensure_backend_port_free(args.backend_port):
+        _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
+    if reporter is not None:
+        args.upgrade_step_callback = reporter.start
+    try:
+        task_error = _run_upgrade_tasks(args)
+    except Exception as exc:
+        task_error = f"upgrade tasks crashed: {exc}"
+    if task_error is not None:
+        _record_handoff_log(f"upgrade_tasks_failed error={task_error}")
+        _cleanup_dir(args.cleanup_dir)
+        return _restart_failed(reporter, task_error, "install")
+
+    uses_legacy_protocol = bool(args.backup_path or args.prepare_handover or args.backend_pid_file)
+    if uses_legacy_protocol and not _cleanup_legacy_upgrade_handover(args):
+        _record_handoff_log("legacy_handover_cleanup_failed")
+        _cleanup_dir(args.cleanup_dir)
+        return _restart_failed(reporter, "old upgrade page could not be stopped", "start")
+
+    if args.prepare_handover and not supervisor_stopped:
+        supervisor_stopped = _stop_supervisor_before_restart(
+            daemon_pid=legacy_daemon_pid,
+            backend_port=args.backend_port,
+            service_ports=(args.frontend_port,),
+            force_daemon_stop=True,
+        )
+    elif not supervisor_stopped:
+        supervisor_stopped = _stop_supervisor_before_restart()
+
+    if not supervisor_stopped:
+        _record_handoff_log("supervisor_stop_timeout")
+        _cleanup_dir(args.cleanup_dir)
+        return _restart_failed(reporter, "service stop timed out", "start")
+
+    if reporter is not None:
+        # The upgrade dialog waits for the outcome, so wait for `aegisops start` here too.
+        reporter.start("start")
+        reporter.release_port()
+        try:
+            started, stdout, stderr = _run_start_command(restart_argv, cwd=Path(args.install_root))
+        except Exception as exc:
+            _record_handoff_log(f"restart_failed error={exc}")
+            started, stdout, stderr = False, "", str(exc)
+        _cleanup_dir(args.cleanup_dir)
+        if not started:
+            return reporter.fail(
+                _start_failure_message(stdout, stderr),
+                failed_stage="start",
+                stdout=stdout,
+                stderr=stderr,
+            )
+        reporter.finish()
+        return 0
+
+    try:
+        process = subprocess.Popen(
+            restart_argv,
+            cwd=Path(args.install_root),
+            close_fds=True,
+        )
+    except OSError as exc:
+        _record_handoff_log(f"restart_spawn_failed error={exc}")
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
+    _record_handoff_log(f"restart_spawned pid={process.pid}")
+    _cleanup_dir(args.cleanup_dir)
+    return 0
+
+
+def main() -> None:
+    raise SystemExit(run())
+
+
+if __name__ == "__main__":
+    main()

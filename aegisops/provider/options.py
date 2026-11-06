@@ -1,0 +1,659 @@
+"""
+Provider-specific options builder.
+
+Centralises the logic for assembling thinking / reasoning / token-limit
+kwargs that get forwarded to each provider's ``chat_stream`` call.
+
+Both ``SessionRunner`` (session/runner.py) and ``AgentExecutor``
+(agent/runtime/executor.py) delegate to :func:`build_provider_options`
+so that provider rules are maintained in exactly one place.
+"""
+
+from typing import Any, Dict, Mapping, Optional, Tuple
+
+from aegisops.provider.interleaved import (
+    REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
+    REASONING_TRANSPORT_GENERIC_CHAT,
+    is_kimi_k27_code_model,
+    is_kimi_k3_model,
+    resolve_interleaved_capability,
+    resolve_reasoning_transport,
+)
+
+from aegisops.utils.log import Log
+
+log = Log.create(service="provider.options")
+
+# ---------------------------------------------------------------------------
+# Defaults (override via function args or, later, config)
+# ---------------------------------------------------------------------------
+DEFAULT_THINKING_BUDGET = 16000
+DEFAULT_OUTPUT_BUFFER = 8192
+DEFAULT_REASONING_EFFORT = "high"
+
+# ``enable_thinking`` controls off; this tuple orders provider-agnostic levels.
+_REASONING_EFFORT_LEVELS = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
+
+_GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS = {
+    "reasoning_content": "enable_thinking",
+    "reasoning_details": "reasoning_split",
+}
+
+
+def _coerce_optional_bool(value: Any) -> Optional[bool]:
+    """Coerce config values to bool while preserving None."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _resolve_reasoning_enabled(provider_id: str, model_id: str) -> Optional[bool]:
+    """Read model-level default reasoning settings from aegisops.json."""
+    try:
+        from aegisops.provider.model_manager import get_model_manager
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if not setting:
+            return None
+
+        default_parameters = setting.default_parameters or {}
+        return _coerce_optional_bool(default_parameters.get("enable_thinking"))
+    except Exception as exc:
+        log.debug("options.reasoning_setting_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_reasoning_effort(provider_id: str, model_id: str) -> Optional[str]:
+    """Read the effective reasoning effort from aegisops.json."""
+    try:
+        from aegisops.provider.model_manager import get_model_manager
+
+        default_parameters = get_model_manager().get_effective_default_parameters(
+            provider_id,
+            model_id,
+        )
+        value = default_parameters.get("reasoning_effort")
+        return value.strip().lower() if isinstance(value, str) else None
+    except Exception as exc:
+        log.debug("options.reasoning_effort_setting_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _get_reasoning_effort_map(
+    provider_id: str,
+    model_id: str,
+) -> Optional[Mapping[str, Optional[str]]]:
+    """Return the model-declared semantic-to-provider effort mapping."""
+    model = _lookup_raw_model_metadata(provider_id, model_id)
+    metadata_provider_id = getattr(model, "provider_id", None) if model else None
+    accepted_provider_ids = {provider_id.strip().lower()}
+    if "azure" in accepted_provider_ids:
+        accepted_provider_ids.add("azure-openai")
+    elif "azure-openai" in accepted_provider_ids:
+        accepted_provider_ids.add("azure")
+    if (
+        isinstance(metadata_provider_id, str)
+        and metadata_provider_id.strip().lower() not in accepted_provider_ids
+    ):
+        model = None
+    capabilities = getattr(model, "capabilities", None) if model else None
+    effort_map = (
+        getattr(capabilities, "thinking_level_map", None)
+        if capabilities
+        else None
+    )
+
+    if not effort_map:
+        try:
+            from aegisops.provider.model_catalog import get_provider_model_definitions
+
+            catalog_provider_id = (
+                "azure-openai" if provider_id.strip().lower() == "azure" else provider_id
+            )
+            definitions = get_provider_model_definitions(catalog_provider_id) or []
+            catalog_model = next(
+                (model for model in definitions if model.id == model_id),
+                None,
+            )
+            catalog_capabilities = (
+                getattr(catalog_model, "capabilities", None)
+                if catalog_model
+                else None
+            )
+            effort_map = (
+                getattr(catalog_capabilities, "thinking_level_map", None)
+                if catalog_capabilities
+                else None
+            )
+        except Exception as exc:
+            log.debug("options.reasoning_effort.catalog_lookup_failed", {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "error": str(exc),
+            })
+
+    if not isinstance(effort_map, Mapping):
+        return None
+
+    normalized: Dict[str, Optional[str]] = {}
+    for semantic_level, provider_level in effort_map.items():
+        if not isinstance(semantic_level, str):
+            continue
+        if provider_level is not None and not isinstance(provider_level, str):
+            continue
+        normalized[semantic_level.strip().lower()] = provider_level
+    return normalized or None
+
+
+def _map_reasoning_effort(
+    provider_id: str,
+    model_id: str,
+    reasoning_effort: Optional[str],
+) -> Optional[str]:
+    """Clamp a semantic reasoning level and map it to the provider value."""
+    effort_map = _get_reasoning_effort_map(provider_id, model_id)
+    if not effort_map:
+        return None
+
+    requested = reasoning_effort or DEFAULT_REASONING_EFFORT
+    if effort_map.get(requested) is not None:
+        return effort_map[requested]
+
+    supported_levels = {
+        level: provider_level
+        for level, provider_level in effort_map.items()
+        if provider_level is not None
+    }
+    if not supported_levels:
+        return None
+
+    fallback = supported_levels.get(DEFAULT_REASONING_EFFORT) or next(
+        iter(supported_levels.values())
+    )
+    if requested not in _REASONING_EFFORT_LEVELS:
+        log.warning(
+            "options.reasoning_effort.invalid",
+            {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "reasoning_effort": requested,
+                "fallback": fallback,
+            },
+        )
+        return fallback
+
+    requested_index = _REASONING_EFFORT_LEVELS.index(requested)
+    higher_levels = _REASONING_EFFORT_LEVELS[requested_index + 1 :]
+    lower_levels = reversed(_REASONING_EFFORT_LEVELS[:requested_index])
+    for candidate in (*higher_levels, *lower_levels):
+        mapped_effort = effort_map.get(candidate)
+        if mapped_effort is not None:
+            log.warning(
+                "options.reasoning_effort.clamped",
+                {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "reasoning_effort": requested,
+                    "resolved_reasoning_effort": candidate,
+                    "provider_reasoning_effort": mapped_effort,
+                },
+            )
+            return mapped_effort
+
+    return fallback
+
+
+def _resolve_default_extra_body(provider_id: str, model_id: str) -> Optional[Dict[str, Any]]:
+    """Read model-level OpenAI-compatible extra_body from aegisops.json."""
+    try:
+        from aegisops.provider.model_manager import get_model_manager
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if not setting:
+            return None
+
+        default_parameters = setting.default_parameters or {}
+        extra_body = default_parameters.get("extra_body")
+        return dict(extra_body) if isinstance(extra_body, dict) else None
+    except Exception as exc:
+        log.debug("options.extra_body_setting_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _lookup_raw_model_metadata(provider_id: str, model_id: str) -> Optional[Any]:
+    """Return provider/model metadata without applying inferred defaults."""
+    try:
+        from aegisops.provider.provider import Provider
+
+        provider = Provider.get(provider_id)
+        if provider is not None:
+            try:
+                for model in provider.get_model_definitions():
+                    if getattr(model, "id", None) == model_id:
+                        return model
+            except Exception as exc:
+                log.debug("options.raw_model_lookup.definitions_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+            for model in getattr(provider, "_config_models", []):
+                if getattr(model, "id", None) == model_id:
+                    return model
+
+            try:
+                for model in provider.get_models():
+                    if getattr(model, "id", None) == model_id:
+                        return model
+            except Exception as exc:
+                log.debug("options.raw_model_lookup.runtime_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+        return Provider.get_model(model_id)
+    except Exception as exc:
+        log.debug("options.raw_model_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_provider_base_url(provider_id: str) -> Optional[str]:
+    """Return the active provider base URL when configured."""
+    try:
+        from aegisops.provider.provider import Provider
+
+        provider = Provider.get(provider_id)
+        if provider is None:
+            return None
+        provider_config = getattr(provider, "_config", None)
+        return (
+            getattr(provider_config, "base_url", None)
+            or getattr(provider, "_base_url", None)
+        )
+    except Exception as exc:
+        log.debug("options.provider_base_url_lookup_failed", {
+            "provider_id": provider_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_model_reasoning_context(
+    provider_id: str,
+    model_id: str,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Resolve replay capability and transport through separate paths."""
+    model = _lookup_raw_model_metadata(provider_id, model_id)
+    capabilities = getattr(model, "capabilities", None) if model else None
+    explicit_interleaved = (
+        getattr(capabilities, "interleaved", None) if capabilities else None
+    )
+    base_url = _resolve_provider_base_url(provider_id)
+    interleaved = resolve_interleaved_capability(
+        provider_id=provider_id,
+        model_id=model_id,
+        explicit_capability=explicit_interleaved,
+        base_url=base_url,
+    )
+    transport = resolve_reasoning_transport(
+        provider_id=provider_id,
+        model_id=model_id,
+        base_url=base_url,
+    )
+    return interleaved, transport
+
+
+def _resolve_interleaved_capability(
+    provider_id: str,
+    model_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the active model's interleaved replay capability."""
+    interleaved, _transport = _resolve_model_reasoning_context(provider_id, model_id)
+    return interleaved
+
+
+def _resolve_reasoning_transport(provider_id: str, model_id: str) -> str:
+    """Resolve the active model's request transport family."""
+    _interleaved, transport = _resolve_model_reasoning_context(provider_id, model_id)
+    return transport
+
+
+def _build_generic_chat_extra_body(
+    provider_id: str,
+    model_id: str,
+    interleaved_capability: Optional[Dict[str, Any]],
+    reasoning_enabled: Optional[bool],
+    reasoning_effort: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    """Build OpenAI-compatible reasoning params for the active replay field."""
+    provider_lower = provider_id.lower()
+    model_lower = model_id.lower()
+    enabled = reasoning_enabled is not False
+
+    if is_kimi_k3_model(model_id):
+        effort = _map_reasoning_effort(provider_id, model_id, reasoning_effort)
+        return {"reasoning_effort": effort} if effort else None
+
+    if "deepseek" in model_lower or provider_lower == "deepseek":
+        extra_body = {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+        if enabled and model_lower.startswith("deepseek-v4"):
+            effort = _map_reasoning_effort(
+                provider_id,
+                model_id,
+                reasoning_effort,
+            )
+            if effort:
+                extra_body["reasoning_effort"] = effort
+        return extra_body
+
+    if "glm" in model_lower or provider_lower == "zhipu":
+        return {
+            "thinking": (
+                {"type": "enabled", "clear_thinking": False}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if "mimo" in model_lower:
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if is_kimi_k27_code_model(model_id):
+        # K2.7 cannot disable thinking. Send the enabled form explicitly
+        # because OpenAI-compatible gateways may not apply Moonshot's default.
+        return {"thinking": {"type": "enabled"}}
+
+    if "kimi" in model_lower:
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if isinstance(interleaved_capability, dict):
+        field = interleaved_capability.get("field")
+        key = _GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS.get(field)
+        if key:
+            return {key: enabled}
+
+    if reasoning_enabled is True:
+        return {"enable_thinking": True}
+
+    return None
+
+
+def build_provider_options(
+    provider_id: str,
+    model_id: str,
+    *,
+    reasoning_enabled: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
+    thinking_budget: int = DEFAULT_THINKING_BUDGET,
+    resolve_max_tokens: bool = True,
+) -> Dict[str, Any]:
+    """Build provider-specific kwargs for a chat / chat_stream call.
+
+    Parameters
+    ----------
+    provider_id:
+        Canonical provider identifier (e.g. ``"anthropic"``, ``"openai"``).
+    model_id:
+        The model being called (e.g. ``"claude-sonnet-4"``).
+    thinking_budget:
+        Token budget for extended-thinking / reasoning where applicable.
+    reasoning_effort:
+        Provider-agnostic reasoning effort. Unsupported levels are clamped to
+        the nearest model-supported level, preferring higher levels.
+    resolve_max_tokens:
+        If *True*, fall back to the model's configured ``max_tokens`` when
+        no provider-specific logic has already set it.
+
+    Returns
+    -------
+    Dict that can be unpacked as ``**kwargs`` into the provider call.
+    """
+    options: Dict[str, Any] = {}
+    model_lower = model_id.lower()
+    interleaved_capability = _resolve_interleaved_capability(provider_id, model_id)
+    reasoning_transport = _resolve_reasoning_transport(provider_id, model_id)
+    reasoning_effort_explicit = isinstance(reasoning_effort, str)
+    reasoning_enabled = (
+        _coerce_optional_bool(reasoning_enabled)
+        if reasoning_enabled is not None
+        else _resolve_reasoning_enabled(provider_id, model_id)
+    )
+    reasoning_effort = (
+        reasoning_effort.strip().lower()
+        if isinstance(reasoning_effort, str)
+        else _resolve_reasoning_effort(provider_id, model_id)
+    )
+    configured_extra_body = _resolve_default_extra_body(provider_id, model_id)
+    interleaved_enabled = interleaved_capability is not None
+    if interleaved_enabled and reasoning_enabled is None:
+        reasoning_enabled = True
+
+    # -- Anthropic Messages thinking -----------------------------------------
+    if (
+        reasoning_transport == REASONING_TRANSPORT_ANTHROPIC_MESSAGES
+        and "claude" in model_lower
+    ):
+        # Use the model's catalog API limit as max_tokens so the full output
+        # capacity is available after thinking.  Provider.get_model() returns
+        # the catalog entry (catalog takes priority over aegisops.json overrides
+        # per anthropic.py get_model_definitions), so api_limit reflects the
+        # real Anthropic limit (e.g. 64 000 for claude-sonnet-4-20250514).
+        if reasoning_enabled is not False:
+            api_limit = _get_catalog_model_max_tokens(model_id)
+            effective_budget = min(thinking_budget, api_limit // 2) if api_limit else thinking_budget
+            options["thinking"] = {
+                "type": "enabled",
+                "budget_tokens": effective_budget,
+            }
+            options["max_tokens"] = api_limit if api_limit else (thinking_budget + DEFAULT_OUTPUT_BUFFER)
+            effort = _map_reasoning_effort(
+                provider_id,
+                model_id,
+                reasoning_effort,
+            )
+            if effort:
+                options["output_config"] = {"effort": effort}
+
+    # -- OpenAI reasoning (o1 / o3 / gpt-5) --------------------------------
+    elif provider_id in {"openai", "azure", "azure-openai"}:
+        if reasoning_enabled is not False and any(tag in model_lower for tag in ("o1", "o3", "gpt-5")):
+            effort = _map_reasoning_effort(
+                provider_id,
+                model_id,
+                reasoning_effort,
+            )
+            if effort:
+                options["reasoningEffort"] = effort
+
+    # -- Google Gemini thinking ---------------------------------------------
+    elif provider_id == "google":
+        if reasoning_enabled is not False and "gemini" in model_lower:
+            if "2.5" in model_lower:
+                options["thinkingConfig"] = {
+                    "includeThoughts": True,
+                    "thinkingBudget": thinking_budget,
+                }
+            elif "gemini-3" in model_lower:
+                options["thinkingConfig"] = {
+                    "includeThoughts": True,
+                    "thinkingLevel": "high",
+                }
+
+    # -- Groq thinking ------------------------------------------------------
+    elif provider_id == "groq":
+        if reasoning_enabled is not False:
+            options["thinkingLevel"] = "high"
+
+    # -- Generic-chat (OpenAI-compat) interleaved thinking --------------------
+    # The Anthropic branch above handles ``anthropic_messages`` transport.
+    # Generic-chat endpoints expose provider-specific extra_body toggles:
+    # most reasoning_content models use enable_thinking, while MiniMax's
+    # OpenAI-compatible interleaved format uses reasoning_split so the model
+    # returns reasoning_details that can be replayed in later tool turns.
+    elif reasoning_transport == REASONING_TRANSPORT_GENERIC_CHAT and (
+        configured_extra_body
+        or interleaved_enabled
+        or reasoning_enabled is True
+        or is_kimi_k27_code_model(model_id)
+        or is_kimi_k3_model(model_id)
+    ):
+        automatic_extra_body = _build_generic_chat_extra_body(
+            provider_id,
+            model_id,
+            interleaved_capability,
+            reasoning_enabled,
+            reasoning_effort,
+        )
+        extra_body = dict(configured_extra_body or automatic_extra_body or {})
+        if configured_extra_body and (
+            "deepseek" in model_lower or provider_id.lower() == "deepseek"
+        ):
+            extra_body = dict(automatic_extra_body or {})
+            extra_body.update(configured_extra_body)
+        if is_kimi_k3_model(model_id):
+            # K3 is always a reasoning model and uses the top-level
+            # reasoning_effort field instead of the K2.x thinking object.
+            extra_body.pop("thinking", None)
+            if reasoning_effort_explicit:
+                resolved_effort = (automatic_extra_body or {}).get(
+                    "reasoning_effort"
+                )
+                if resolved_effort:
+                    extra_body["reasoning_effort"] = resolved_effort
+                else:
+                    extra_body.pop("reasoning_effort", None)
+            else:
+                configured_effort = extra_body.get("reasoning_effort")
+                supported_efforts = {
+                    value
+                    for value in (_get_reasoning_effort_map(provider_id, model_id) or {}).values()
+                    if value is not None
+                }
+                if supported_efforts and configured_effort not in supported_efforts:
+                    resolved_effort = (automatic_extra_body or {}).get(
+                        "reasoning_effort"
+                    )
+                    if resolved_effort:
+                        extra_body["reasoning_effort"] = resolved_effort
+                    else:
+                        extra_body.pop("reasoning_effort", None)
+        elif is_kimi_k27_code_model(model_id):
+            # K2.7 rejects disabled thinking. Normalize configured values so
+            # direct and gateway-backed endpoints always request reasoning.
+            extra_body["thinking"] = {"type": "enabled"}
+        if extra_body:
+            options["extra_body"] = extra_body
+            log.debug("options.thinking_params.resolved", {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "extra_body_keys": list(options["extra_body"].keys()),
+            })
+
+    # -- max_tokens fallback from model config ------------------------------
+    if resolve_max_tokens and "max_tokens" not in options:
+        _apply_max_tokens_from_config(options, provider_id, model_id)
+
+    return options
+
+
+def _get_catalog_model_max_tokens(model_id: str) -> Optional[int]:
+    """Return the catalog-level max_output_tokens for *model_id*, or None.
+
+    Uses ``Provider.get_model()`` which resolves against the global model
+    registry.  For the Anthropic provider the registry is populated with
+    catalog entries taking priority over aegisops.json overrides (see
+    ``AnthropicProvider.get_model_definitions``), so the value returned here
+    is the real Anthropic API limit, not the conservative aegisops.json value.
+    """
+    try:
+        from aegisops.provider.provider import Provider
+        model_info = Provider.get_model(model_id)
+        if model_info and model_info.capabilities and model_info.capabilities.max_tokens:
+            return model_info.capabilities.max_tokens
+    except Exception:
+        pass
+    return None
+
+def _apply_max_tokens_from_config(
+    options: Dict[str, Any],
+    provider_id: str,
+    model_id: str,
+) -> None:
+    """Set ``max_tokens`` from provider / model config when available."""
+    from aegisops.provider.provider import Provider
+
+    provider = Provider.get(provider_id)
+    if not provider:
+        return
+
+    model_info = None
+    for m in getattr(provider, "_config_models", []):
+        if m.id == model_id:
+            model_info = m
+            break
+    if model_info is None:
+        model_info = Provider.get_model(model_id)
+
+    if model_info and model_info.capabilities and model_info.capabilities.max_tokens:
+        from aegisops.provider.output_limits import effective_max_tokens
+
+        configured = model_info.capabilities.max_tokens
+        options["max_tokens"] = effective_max_tokens(provider_id, model_id, configured)
+        log.debug("options.max_tokens.from_config", {
+            "model_id": model_id,
+            "max_tokens": options["max_tokens"],
+            "configured_max_tokens": configured,
+        })

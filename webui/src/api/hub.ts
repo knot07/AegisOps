@@ -1,0 +1,290 @@
+import client, { getApiBase } from './client';
+
+export type HubPluginType = 'skill' | 'agent' | 'tool' | 'device' | 'workflow' | 'webui' | 'component';
+export type HubPluginState =
+  | 'available'
+  | 'installed'
+  | 'partial'
+  | 'updateAvailable'
+  | 'localOnly'
+  | 'broken'
+  | 'incompatible';
+
+export interface HubCatalogEntry {
+  id: string;
+  type: HubPluginType;
+  name: string;
+  nameCn?: string;
+  description: string;
+  descriptionCn?: string;
+  version: string;
+  category: string;
+  tags: string[];
+  useCases: string[];
+  domains: string[];
+  capabilities: string[];
+  trust: string;
+  riskLevel: string;
+  state: HubPluginState;
+  installedVersion?: string;
+  source: string;
+  manifestPath: string;
+  installPath?: string;
+  native: boolean;
+  brokenReason?: string;
+  /** Installed through a Atlas conversation instead of copying files (``rea``: the REA plugin). */
+  guidedInstall?: { kind: string; title?: string } | null;
+}
+
+export interface HubManifest extends HubCatalogEntry {
+  schemaVersion: string;
+  author?: string;
+  license?: string;
+  homepage?: string;
+  components?: Array<{
+    type: HubPluginType;
+    id: string;
+    optional?: boolean;
+  }>;
+  dependencies: Record<string, string[]>;
+  permissions: {
+    tools: string[];
+    network: boolean;
+    shell: boolean;
+    filesystem: string;
+  };
+  risk: {
+    level: string;
+    reasons: string[];
+  };
+  entrypoints: string[];
+  checksums: Record<string, string>;
+}
+
+export type HubInstallProgressStatus = 'pending' | 'installing' | 'installed' | 'skipped' | 'failed' | 'completed';
+
+export interface HubInstallProgressItem {
+  type: HubPluginType;
+  id: string;
+  name?: string;
+  nameCn?: string;
+  optional?: boolean;
+  status: HubInstallProgressStatus;
+  message?: string;
+}
+
+export interface HubInstallProgressEvent {
+  event: 'start' | 'item' | 'complete' | 'error';
+  id: string;
+  type: HubPluginType;
+  name: string;
+  nameCn?: string;
+  total: number;
+  item?: HubInstallProgressItem;
+  items?: HubInstallProgressItem[];
+  record?: unknown;
+  message?: string;
+}
+
+export interface HubFileNode {
+  name: string;
+  path: string;
+  type: 'file' | 'directory';
+  size: number;
+  checksum?: string;
+  previewable: boolean;
+  children: HubFileNode[];
+}
+
+export interface HubFileContent {
+  path: string;
+  content: string;
+  size: number;
+  checksum?: string;
+  language?: string;
+}
+
+export interface HubCatalogParams {
+  type?: HubPluginType;
+  category?: string;
+  tags?: string;
+  useCases?: string;
+  state?: string;
+  trust?: string;
+  risk?: string;
+  q?: string;
+  /** Place updateable and installed plugins before other catalog entries. */
+  prioritizeInstalled?: boolean;
+}
+
+export interface HubCatalogPageParams extends HubCatalogParams {
+  offset?: number;
+  limit?: number;
+}
+
+export interface HubCatalogFacets {
+  type: Record<string, number>;
+  category: Record<string, number>;
+  tags: Record<string, number>;
+  useCases: Record<string, number>;
+  state: Record<string, number>;
+  trust: Record<string, number>;
+  riskLevel: Record<string, number>;
+}
+
+export interface HubCatalogPageResponse {
+  items: HubCatalogEntry[];
+  total: number;
+  offset: number;
+  limit: number;
+  facets: HubCatalogFacets;
+}
+
+export interface HubSceneSuite {
+  id: string;
+  name: string;
+  nameCn?: string | null;
+  description: string;
+  descriptionCn?: string | null;
+  version: string;
+  installedVersion?: string | null;
+  /** `oss` for the open product's own suites; an extension may name others. */
+  edition: string;
+  state: HubPluginState;
+  workspaceId?: string | null;
+  workspaceTitle?: string | null;
+  workspaceRoute?: string | null;
+  workspaceEnabled?: boolean | null;
+  /** Installed / latest version of the suite's page package (can lag behind the suite). */
+  workspaceVersion?: string | null;
+  workspaceLatestVersion?: string | null;
+  /** Set by an extension's hub access policy: a locked suite is listed but does not install. */
+  locked?: boolean | null;
+  /** The policy's own reason, handed to its `sceneSuites.lockedAction` component. */
+  lockReason?: string | null;
+  /** What the policy knows about the suite, for its own components on the page. */
+  annotations?: Record<string, unknown>;
+}
+
+export interface HubUpdatePlanPage {
+  id: string;
+  title: string;
+  /** Page directory inside the installed package. */
+  path: string;
+}
+
+export interface HubUpdatePlan {
+  type: HubPluginType;
+  id: string;
+  scope: string;
+  token: string;
+  requiresConfirmation: boolean;
+  items: Array<{
+    type: HubPluginType;
+    id: string;
+    name: string;
+    requiresConfirmation: boolean;
+    /** WebUI packages: pages admins added, carried into the new release. */
+    keepPages?: HubUpdatePlanPage[];
+    /** WebUI packages: added pages the release replaces (same page id, or a folder the release uses). */
+    replacePages?: HubUpdatePlanPage[];
+  }>;
+}
+
+export const hubAPI = {
+  sceneSuites: () => client.get<HubSceneSuite[]>('/api/hub/scene-suites'),
+
+  catalog: (params?: HubCatalogParams) =>
+    client.get<HubCatalogEntry[]>('/api/hub/catalog', { params }),
+
+  catalogPage: (params?: HubCatalogPageParams) =>
+    client.get<HubCatalogPageResponse>('/api/hub/catalog', { params }),
+
+  categories: (params?: { includeCounts?: boolean }) =>
+    client.get('/api/hub/categories', {
+      params: params ? { include_counts: params.includeCounts } : undefined,
+    }),
+
+  get: (type: HubPluginType, id: string) =>
+    client.get<HubManifest>(`/api/hub/plugins/${type}/${id}`),
+
+  files: (type: HubPluginType, id: string) =>
+    client.get<HubFileNode>(`/api/hub/plugins/${type}/${id}/files`),
+
+  fileContent: (type: HubPluginType, id: string, path: string) =>
+    client.get<HubFileContent>(`/api/hub/plugins/${type}/${id}/files/content`, { params: { path } }),
+
+  install: (type: HubPluginType, id: string, scope = 'global') =>
+    client.post(`/api/hub/plugins/${type}/${id}/install`, { scope }),
+
+  installStream: (
+    type: HubPluginType,
+    id: string,
+    onProgress: (progress: HubInstallProgressEvent) => void,
+    scope = 'global',
+  ): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      fetch(`${getApiBase()}/api/hub/plugins/${type}/${id}/install/stream`, {
+        method: 'POST',
+        credentials: 'include',
+        signal: AbortSignal.timeout(15 * 60_000),
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ scope }),
+      })
+        .then(async (res) => {
+          if (!res.ok || !res.body) {
+            const payload = await res.json().catch(() => null) as { detail?: unknown } | null;
+            reject(new Error(typeof payload?.detail === 'string' ? payload.detail : `HTTP ${res.status}`));
+            return;
+          }
+
+          const reader = res.body.getReader();
+          const decoder = new TextDecoder();
+          let buffer = '';
+
+          const pump = (): Promise<void> =>
+            reader.read().then(({ done, value }) => {
+              if (done) {
+                resolve();
+                return;
+              }
+
+              buffer += decoder.decode(value, { stream: true });
+              const lines = buffer.split('\n');
+              buffer = lines.pop() ?? '';
+
+              for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                try {
+                  const progress = JSON.parse(line.slice(6)) as HubInstallProgressEvent;
+                  onProgress(progress);
+                  if (progress.event === 'error') {
+                    reject(new Error(progress.message || 'Install failed'));
+                    return;
+                  }
+                } catch {
+                  // Ignore malformed SSE frames.
+                }
+              }
+
+              return pump();
+            });
+
+          pump().catch(reject);
+        })
+        .catch(reject);
+    });
+  },
+
+  previewUpdate: (type: HubPluginType, id: string, scope = 'global') =>
+    client.post<HubUpdatePlan>(`/api/hub/plugins/${type}/${id}/update/preview`, { scope }),
+
+  update: (type: HubPluginType, id: string, scope = 'global', confirmation?: { confirmationToken: string; confirmChanges: boolean }) =>
+    client.post<{ backupPath?: string | null }>(`/api/hub/plugins/${type}/${id}/update`, { scope, ...confirmation }),
+
+  uninstall: (type: HubPluginType, id: string) =>
+    client.delete(`/api/hub/plugins/${type}/${id}`),
+
+  refresh: () =>
+    client.post('/api/hub/refresh'),
+};

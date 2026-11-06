@@ -1,0 +1,1082 @@
+"""
+Atomic CRUD operations for the provider section of aegisops.json.
+
+All writes follow: read raw JSON → modify in-memory → atomic write (tmp + rename) → clear Config cache.
+
+This module is the single entry point for programmatic writes to aegisops.json provider config.
+Secrets (API keys) are NOT written here — use SecretManager for those.
+"""
+
+import json
+import os
+import shutil
+import tempfile
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+from aegisops.config.config import Config, normalize_fallback_provider_entries
+from aegisops.utils.log import Log
+
+log = Log.create(service="config.writer")
+
+
+_FALLBACK_CONFIG_TEMPLATES: Dict[str, Dict[str, Any]] = {
+    "aegisops.json": {
+        "default_models": {
+            "default_parameters": {
+                "reasoning_effort": "high",
+            },
+        },
+    },
+    ".secret.json": {},
+    "mcp_list.json": {
+        "version": "1.0.0",
+        "categories": {},
+        "servers": [],
+    },
+}
+
+def _get_example_config_dir() -> Path:
+    """Return the bundled example directory used for first-run initialization."""
+    return Path(__file__).resolve().parents[2] / ".aegisops"
+
+
+def ensure_config_files() -> None:
+    """
+    Initialize configuration files from examples if they don't exist.
+    
+    This function is called during server startup to ensure that
+    aegisops.json, .secret.json, and mcp_list.json exist. If they don't,
+    they are copied from their .example counterparts.
+    """
+    config_dir = Config.get_config_path()
+    config_dir.mkdir(parents=True, exist_ok=True)
+    example_dir = _get_example_config_dir()
+
+    for target_name, example_name in [
+        ("aegisops.json", "aegisops.json.example"),
+        (".secret.json", ".secret.json.example"),
+        ("mcp_list.json", "mcp_list.json.example"),
+    ]:
+        target_file = config_dir / target_name
+        example_file = example_dir / example_name
+
+        if target_file.exists():
+            continue
+
+        try:
+            if target_name == ".secret.json":
+                # Created under the secret store's lock: a writer that got there first wins.
+                from aegisops.security.secrets import initialize_secret_file
+
+                template = (
+                    example_file.read_text(encoding="utf-8")
+                    if example_file.exists()
+                    else json.dumps(_FALLBACK_CONFIG_TEMPLATES[target_name], indent=2) + "\n"
+                )
+                if not initialize_secret_file(target_file, template):
+                    continue
+            elif example_file.exists():
+                shutil.copy2(example_file, target_file)
+            else:
+                target_file.write_text(
+                    json.dumps(_FALLBACK_CONFIG_TEMPLATES[target_name], indent=2, ensure_ascii=False) + "\n",
+                    encoding="utf-8",
+                )
+            log.info("config.initialized", {
+                "file": target_name,
+                "source": str(example_file) if example_file.exists() else "fallback-template",
+            })
+        except Exception as e:
+            log.error("config.init_failed", {
+                "file": target_name,
+                "error": str(e),
+            })
+
+    ConfigWriter.ensure_memory_config()
+
+
+class ConfigWriter:
+    """Atomic read-modify-write operations on the provider section of aegisops.json."""
+
+    @classmethod
+    def _get_config_path(cls) -> Path:
+        """Return the unified user aegisops.json path."""
+        config_dir = Config.get_config_path()
+        jsonc_path = config_dir / "aegisops.jsonc"
+        if jsonc_path.exists():
+            return jsonc_path
+        return Config.get_config_file()
+
+    @classmethod
+    def _read_raw(cls) -> Dict[str, Any]:
+        """Read aegisops.json as raw dict (no secret resolution)."""
+        from aegisops.config.runtime import runtime_config
+        override = runtime_config.get()
+        if override is not None:
+            return override.model_dump(by_alias=True, exclude_none=True)
+        return cls._read_path_raw(cls._get_config_path())
+
+    @classmethod
+    def _read_path_raw(
+        cls,
+        path: Path,
+        *,
+        strict: bool = False,
+    ) -> Dict[str, Any]:
+        """Read a JSON/JSONC file without resolving secrets or references."""
+        if not path.exists():
+            return {}
+        try:
+            text = path.read_text(encoding="utf-8")
+            if not text.strip():
+                return {}
+            return Config.parse_jsonc(text, path)
+        except (ValueError, OSError) as exc:
+            log.error("config_writer.read_failed", {"path": str(path), "error": str(exc)})
+            if strict:
+                raise ValueError(
+                    f"Unable to read config file {path}: {exc}"
+                ) from exc
+            return {}
+
+    @classmethod
+    def get_fallback_override_source(cls) -> Optional[str]:
+        """Return a higher-priority source overriding the writable fallback list."""
+        writable_path = cls._get_config_path().resolve()
+        global_config = Config.get_global()
+
+        inline_content = global_config.config_content
+        if inline_content:
+            try:
+                inline_data = json.loads(inline_content)
+            except json.JSONDecodeError:
+                inline_data = None
+            if (
+                isinstance(inline_data, dict)
+                and inline_data.get("fallback_providers") is not None
+            ):
+                return "AEGISOPS_CONFIG_CONTENT"
+
+        candidates = []
+        if global_config.config_path:
+            candidates.append(("AEGISOPS_CONFIG", Path(global_config.config_path)))
+        candidates.append(("config.json", global_config.config_dir / "config.json"))
+
+        for source, path in candidates:
+            if not path.exists() or path.resolve() == writable_path:
+                continue
+            data = cls._read_path_raw(path, strict=True)
+            if data.get("fallback_providers") is not None:
+                return source
+        return None
+
+    @classmethod
+    def _write_raw(
+        cls,
+        data: Dict[str, Any],
+        path: Optional[Path] = None,
+    ) -> None:
+        """Atomic write: write to tmp file then rename, then clear Config cache."""
+        from aegisops.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            raise RuntimeError("Configuration writes are disabled during a runtime override")
+        path = path or cls._get_config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Atomic write via temp file in same directory
+        fd, tmp_path = tempfile.mkstemp(
+            dir=str(path.parent), suffix=".tmp", prefix=".aegisops_"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+                f.write("\n")
+            os.replace(tmp_path, str(path))
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+
+        # Clear Config cache so next Config.get() reloads from disk
+        try:
+            Config.clear_cache()
+        except Exception:
+            pass
+        try:
+            from aegisops.channel.inbound.dispatcher import invalidate_channel_config_cache
+
+            channels = data.get("channels")
+            if isinstance(channels, dict):
+                for channel_id in channels:
+                    invalidate_channel_config_cache(str(channel_id))
+        except Exception:
+            pass
+
+        log.debug("config_writer.written", {"path": str(path)})
+
+    @classmethod
+    def update_config_section(cls, section: str, values: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge *values* into the object at the dotted *section*, e.g. ``channels.feishu``.
+
+        Keys *values* does not name keep what they hold; missing objects on the
+        way are created. Returns the section as written.
+        """
+        keys = section.split(".")
+        if not all(keys):
+            raise ValueError(f"Invalid configuration section: {section!r}")
+        if not isinstance(values, dict):
+            raise ValueError("Configuration section values must be an object")
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict=True)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
+        node = data
+        for depth, key in enumerate(keys, 1):
+            child = node.setdefault(key, {})
+            if not isinstance(child, dict):
+                raise ValueError(f"{'.'.join(keys[:depth])} configuration must be an object")
+            node = child
+        node.update(values)
+        cls._write_raw(data, path)
+        log.info("config_writer.section_updated", {"section": section, "keys": sorted(values)})
+        return node
+
+    @classmethod
+    def ensure_memory_config(cls) -> bool:
+        """Persist editable Memory Search and Dream config when absent."""
+        path = Config.get_config_file()
+        try:
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            data = json.loads(text) if text.strip() else {}
+        except (json.JSONDecodeError, OSError) as exc:
+            log.error(
+                "config_writer.memory_config_init_failed",
+                {"path": str(path), "error": str(exc)},
+            )
+            return False
+
+        if not isinstance(data, dict):
+            log.error(
+                "config_writer.memory_config_init_failed",
+                {"path": str(path), "error": "top-level config must be an object"},
+            )
+            return False
+        if "memory" in data:
+            return False
+
+        from aegisops.memory.config import MemoryConfig
+
+        default_config = MemoryConfig()
+        data["memory"] = {
+            "search": {
+                "embedding": default_config.search.embedding.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                ),
+            },
+            "dream": default_config.dream.model_dump(
+                mode="json",
+                exclude_none=True,
+            ),
+        }
+        cls._write_raw(data, path=path)
+        log.info("config_writer.memory_config_initialized", {"path": str(path)})
+        return True
+
+    @classmethod
+    def enable_memory_source(cls, source: str) -> bool:
+        """Persist a Memory source without rewriting unrelated config."""
+        data = cls._read_raw()
+        memory = data.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+        sources = memory.get("sources")
+        if not isinstance(sources, list):
+            sources = ["memory"]
+        if source in sources:
+            return False
+        memory["sources"] = [*sources, source]
+        data["memory"] = memory
+        cls._write_raw(data)
+        log.info("config_writer.memory_source_enabled", {"source": source})
+        return True
+
+    # ------------------------------------------------------------------
+    # Provider-level CRUD
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_provider_raw(cls, provider_id: str) -> Optional[Dict[str, Any]]:
+        """Read a single provider entry from aegisops.json (raw, secrets unresolved).
+
+        Returns:
+            The provider config dict, or None if not found.
+        """
+        data = cls._read_raw()
+        providers = data.get("provider", {})
+        return providers.get(provider_id)
+
+    @classmethod
+    def list_provider_ids(cls) -> list[str]:
+        """Return all provider IDs present in aegisops.json."""
+        data = cls._read_raw()
+        providers = data.get("provider", {})
+        return list(providers.keys())
+    
+    @classmethod
+    def get_all_providers(cls) -> Dict[str, Any]:
+        """Get all provider configurations from aegisops.json (raw, secrets unresolved).
+        
+        Returns:
+            Dictionary of provider_id -> provider_config
+        """
+        data = cls._read_raw()
+        return data.get("provider", {})
+
+    @classmethod
+    def add_provider(cls, provider_id: str, provider_config: Dict[str, Any]) -> None:
+        """Add or replace a provider entry in aegisops.json.
+
+        Args:
+            provider_id: e.g. "anthropic", "custom-my-llm"
+            provider_config: Full provider config dict with npm, options, models, etc.
+        """
+        data = cls._read_raw()
+        if "provider" not in data:
+            data["provider"] = {}
+        data["provider"][provider_id] = provider_config
+        cls._write_raw(data)
+        log.info("config_writer.provider_added", {"provider_id": provider_id})
+
+    @classmethod
+    def remove_provider(cls, provider_id: str) -> bool:
+        """Remove a provider entry from aegisops.json.
+
+        Returns:
+            True if the provider existed and was removed.
+        """
+        data = cls._read_raw()
+        providers = data.get("provider", {})
+        if provider_id not in providers:
+            return False
+        del providers[provider_id]
+        data["provider"] = providers
+        cls._write_raw(data)
+        log.info("config_writer.provider_removed", {"provider_id": provider_id})
+        return True
+
+    @classmethod
+    def update_provider_field(
+        cls,
+        provider_id: str,
+        field_path: str,
+        value: Any,
+    ) -> bool:
+        """Update a nested field inside a provider entry.
+
+        Args:
+            provider_id: Provider ID
+            field_path: Dot-separated path, e.g. "options.baseURL"
+            value: New value
+
+        Returns:
+            True if updated successfully.
+        """
+        data = cls._read_raw()
+        providers = data.get("provider", {})
+        pconfig = providers.get(provider_id)
+        if pconfig is None:
+            return False
+
+        keys = field_path.split(".")
+        target = pconfig
+        for key in keys[:-1]:
+            if key not in target or not isinstance(target[key], dict):
+                target[key] = {}
+            target = target[key]
+        target[keys[-1]] = value
+
+        data["provider"][provider_id] = pconfig
+        cls._write_raw(data)
+        log.info("config_writer.field_updated", {
+            "provider_id": provider_id,
+            "field": field_path,
+        })
+        return True
+
+    # ------------------------------------------------------------------
+    # Model-level operations inside a provider
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def add_model(
+        cls,
+        provider_id: str,
+        model_id: str,
+        model_config: Dict[str, Any],
+    ) -> bool:
+        """Add or update a model entry inside a provider's models dict.
+
+        Returns:
+            True if provider exists and model was added.
+        """
+        data = cls._read_raw()
+        pconfig = data.get("provider", {}).get(provider_id)
+        if pconfig is None:
+            return False
+
+        if "models" not in pconfig:
+            pconfig["models"] = {}
+        pconfig["models"][model_id] = model_config
+        data["provider"][provider_id] = pconfig
+        cls._write_raw(data)
+        log.info("config_writer.model_added", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+        })
+        return True
+
+    @classmethod
+    def remove_model(cls, provider_id: str, model_id: str) -> bool:
+        """Permanently delete a user-selected model and its exact references.
+
+        Both user deletion routes call this method; catalog retirement uses
+        its own migration helper. Inventory ownership and reference cleanup
+        are committed in the same atomic write as the removal.
+
+        Returns:
+            True if the model existed and was removed. A missing model does
+            not change configuration or the provider's sync policy.
+        """
+        data = cls._read_raw()
+        pconfig = data.get("provider", {}).get(provider_id)
+        if not isinstance(pconfig, dict):
+            return False
+
+        models = pconfig.get("models", {})
+        if not isinstance(models, dict) or model_id not in models:
+            return False
+
+        del models[model_id]
+        pconfig["models"] = models
+        pconfig["model_sync"] = "manual"
+
+        def is_deleted_reference(value: Any) -> bool:
+            return (
+                isinstance(value, dict)
+                and value.get("provider_id") == provider_id
+                and value.get("model_id") == model_id
+            )
+
+        identity = f"{provider_id}/{model_id}"
+        settings = data.get("model_settings")
+        if isinstance(settings, dict):
+            settings.pop(identity, None)
+        defaults = data.get("default_models")
+        if isinstance(defaults, dict):
+            for model_type, value in list(defaults.items()):
+                if is_deleted_reference(value):
+                    del defaults[model_type]
+        for field in ("model", "small_model", "smallModel"):
+            if data.get(field) == identity:
+                del data[field]
+        fallbacks = data.get("fallback_providers")
+        if isinstance(fallbacks, list):
+            data["fallback_providers"] = [entry for entry in fallbacks if not is_deleted_reference(entry)]
+
+        cls._write_raw(data)
+        log.info("config_writer.model_removed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+        })
+        return True
+
+    # ------------------------------------------------------------------
+    # Model settings (model_settings section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_model_setting(cls, provider_id: str, model_id: str) -> Optional[Dict[str, Any]]:
+        """Get setting for a specific model from aegisops.json model_settings section."""
+        data = cls._read_raw()
+        settings = data.get("model_settings", {})
+        key = f"{provider_id}/{model_id}"
+        return settings.get(key)
+
+    @classmethod
+    def set_model_setting(
+        cls,
+        provider_id: str,
+        model_id: str,
+        setting: Dict[str, Any],
+    ) -> None:
+        """Set or update model setting in aegisops.json model_settings section."""
+        data = cls._read_raw()
+        if "model_settings" not in data:
+            data["model_settings"] = {}
+        key = f"{provider_id}/{model_id}"
+        existing = data["model_settings"].get(key, {})
+        existing.update(setting)
+        data["model_settings"][key] = existing
+        cls._write_raw(data)
+        log.info("config_writer.model_setting_updated", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+        })
+
+    @classmethod
+    def remove_model_setting(cls, provider_id: str, model_id: str) -> bool:
+        """Remove a model setting from aegisops.json."""
+        data = cls._read_raw()
+        settings = data.get("model_settings", {})
+        key = f"{provider_id}/{model_id}"
+        if key not in settings:
+            return False
+        del settings[key]
+        data["model_settings"] = settings
+        cls._write_raw(data)
+        return True
+
+    @classmethod
+    def get_all_model_settings(cls) -> Dict[str, Dict[str, Any]]:
+        """Get all model settings. Returns dict keyed by 'provider_id/model_id'."""
+        data = cls._read_raw()
+        return data.get("model_settings", {})
+
+    @classmethod
+    def get_effective_model_default_parameters(
+        cls,
+        provider_id: str,
+        model_id: str,
+    ) -> Dict[str, Any]:
+        """Resolve global defaults with model-specific overrides."""
+        data = cls._read_raw()
+        result: Dict[str, Any] = {}
+        default_models = data.get("default_models")
+        global_parameters = (
+            default_models.get("default_parameters", {})
+            if isinstance(default_models, dict)
+            else {}
+        )
+        if isinstance(global_parameters, dict):
+            result.update(global_parameters)
+
+        settings = data.get("model_settings", {})
+        setting = settings.get(f"{provider_id}/{model_id}", {})
+        model_parameters = setting.get("default_parameters", {})
+        if isinstance(model_parameters, dict):
+            result.update(model_parameters)
+        return result
+
+    # ------------------------------------------------------------------
+    # Default models (default_models section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_default_model(cls, model_type: str) -> Optional[Dict[str, Any]]:
+        """Get default model config for a given model type."""
+        data = cls._read_raw()
+        defaults = data.get("default_models", {})
+        return defaults.get(model_type)
+
+    @classmethod
+    def set_default_model(
+        cls,
+        model_type: str,
+        provider_id: str,
+        model_id: str,
+    ) -> None:
+        """Set default model for a given model type."""
+        data = cls._read_raw()
+        if "default_models" not in data:
+            data["default_models"] = {}
+        data["default_models"][model_type] = {
+            "provider_id": provider_id,
+            "model_id": model_id,
+        }
+        cls._write_raw(data)
+        log.info("config_writer.default_model_set", {
+            "model_type": model_type,
+            "provider_id": provider_id,
+            "model_id": model_id,
+        })
+
+    @classmethod
+    def delete_default_model(cls, model_type: str) -> bool:
+        """Delete default model for a given model type."""
+        data = cls._read_raw()
+        defaults = data.get("default_models", {})
+        if model_type not in defaults:
+            return False
+        del defaults[model_type]
+        data["default_models"] = defaults
+        cls._write_raw(data)
+        return True
+
+    @classmethod
+    def get_all_default_models(cls) -> Dict[str, Dict[str, Any]]:
+        """Get all default model configs."""
+        data = cls._read_raw()
+        defaults = data.get("default_models")
+        if not isinstance(defaults, dict):
+            return {}
+        return {
+            model_type: config
+            for model_type, config in defaults.items()
+            if model_type != "default_parameters" and isinstance(config, dict)
+        }
+
+    # ------------------------------------------------------------------
+    # Runtime model fallbacks (fallback_providers section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_fallback_providers(cls) -> List[Dict[str, str]]:
+        """Return ordered, structurally valid runtime fallback models."""
+        data = cls._read_raw()
+        return normalize_fallback_provider_entries(
+            data.get("fallback_providers", [])
+        )
+
+    @classmethod
+    def set_fallback_providers(
+        cls,
+        fallbacks: List[Dict[str, str]],
+    ) -> None:
+        """Atomically replace the ordered runtime fallback model list."""
+        data = cls._read_path_raw(cls._get_config_path(), strict=True)
+        if fallbacks:
+            data["fallback_providers"] = [
+                {
+                    "provider_id": fallback["provider_id"],
+                    "model_id": fallback["model_id"],
+                }
+                for fallback in fallbacks
+            ]
+        else:
+            data.pop("fallback_providers", None)
+        cls._write_raw(data)
+        log.info("config_writer.fallback_providers_set", {
+            "count": len(fallbacks),
+        })
+
+    # ------------------------------------------------------------------
+    # Agent metadata (agent section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def set_agent_group(cls, name: str, group: Optional[str]) -> None:
+        """Update one validated Agent's group without resolving other config."""
+        from aegisops.agent.agent import normalize_agent_group
+
+        if not name:
+            raise ValueError("Agent name must be a non-empty string")
+        value = normalize_agent_group(group) or ""
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict=True)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
+        agents = data.get("agent", {})
+        if not isinstance(agents, dict):
+            raise ValueError("agent configuration must be an object")
+        existing = agents.get(name, {})
+        if not isinstance(existing, dict):
+            raise ValueError(f"Agent configuration must be an object: {name}")
+        data["agent"] = {**agents, name: {**existing, "group": value}}
+        cls._write_raw(data, path)
+        log.info("config_writer.agent_group_updated", {"name": name})
+
+    # ------------------------------------------------------------------
+    # MCP server CRUD (mcp section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_mcp_server(cls, name: str) -> Optional[Dict[str, Any]]:
+        """Get a single MCP server config from aegisops.json (raw, secrets unresolved)."""
+        data = cls._read_raw()
+        return data.get("mcp", {}).get(name)
+
+    @classmethod
+    def list_mcp_servers(cls) -> Dict[str, Any]:
+        """Return all MCP server configs from aegisops.json (raw, secrets unresolved)."""
+        data = cls._read_raw()
+        return data.get("mcp", {})
+
+    @classmethod
+    def add_mcp_server(cls, name: str, server_config: Dict[str, Any]) -> None:
+        """Add or replace an MCP server entry in aegisops.json.
+
+        Args:
+            name: MCP server name (key in mcp section)
+            server_config: Full server config dict (McpLocalConfig or McpRemoteConfig)
+        """
+        from aegisops.mcp.types import normalize_mcp_group
+
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict=True)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
+        mcp = data.get("mcp", {})
+        if not isinstance(mcp, dict):
+            raise ValueError("mcp configuration must be an object")
+        existing = mcp.get(name)
+        incoming = dict(server_config)
+        if "group" in incoming:
+            incoming["group"] = normalize_mcp_group(incoming["group"]) or ""
+        elif isinstance(existing, dict) and "group" in existing:
+            incoming["group"] = existing["group"] if existing["group"] is not None else ""
+        data["mcp"] = {**mcp, name: incoming}
+        cls._write_raw(data, path)
+        log.info("config_writer.mcp_server_added", {"name": name})
+
+    @classmethod
+    def remove_mcp_server(cls, name: str) -> bool:
+        """Remove an MCP server entry from aegisops.json.
+
+        Returns:
+            True if the server existed and was removed.
+        """
+        data = cls._read_raw()
+        mcp = data.get("mcp", {})
+        if name not in mcp:
+            return False
+        del mcp[name]
+        data["mcp"] = mcp
+        cls._write_raw(data)
+        log.info("config_writer.mcp_server_removed", {"name": name})
+        return True
+
+    @classmethod
+    def update_mcp_server_field(cls, name: str, field: str, value: Any) -> bool:
+        """Update a single field in an MCP server's config.
+
+        Returns:
+            True if the server existed and the field was updated.
+        """
+        if field == "group":
+            from aegisops.mcp.types import normalize_mcp_group
+
+            value = normalize_mcp_group(value) or ""
+        data = cls._read_raw()
+        mcp = data.get("mcp", {})
+        if name not in mcp:
+            return False
+        mcp[name][field] = value
+        data["mcp"] = mcp
+        cls._write_raw(data)
+        log.info("config_writer.mcp_server_field_updated", {"name": name, "field": field})
+        return True
+
+    # ------------------------------------------------------------------
+    # API Services CRUD  (api_services section)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_api_service_config(service_config: Dict[str, Any]) -> Dict[str, Any]:
+        """Canonicalize API service config keys before persisting.
+
+        ``verify_ssl`` is the canonical field. ``ssl_verify`` remains a
+        read-time compatibility alias, but writers should never persist both
+        fields at once or keep writing the legacy alias forward.
+        """
+        normalized = dict(service_config)
+        if "verify_ssl" in normalized:
+            normalized.pop("ssl_verify", None)
+            return normalized
+        if "ssl_verify" in normalized:
+            normalized["verify_ssl"] = normalized.pop("ssl_verify")
+        return normalized
+
+    @classmethod
+    def get_api_service_raw(cls, service_id: str) -> Optional[Dict[str, Any]]:
+        """Read a single ``api_services`` entry (raw, secrets unresolved).
+
+        Version-aware: delegates the storage-key/legacy-id resolution to
+        :func:`aegisops.config.api_versioning.resolve_api_service`.
+        Falls back to a plain dict lookup if the versioning module is
+        unavailable, so a bug there cannot break credential reads.
+
+        Per-device credential context (Method-A multi-instance) takes priority
+        over the shared ``aegisops.json`` value when an override is active.
+        """
+        # Per-device config override (activated by ToolRegistry for device_id calls)
+        try:
+            from aegisops.tool.credential_context import get_config_override
+            override = get_config_override(service_id)
+            if override is not None:
+                return override
+        except Exception:
+            pass
+
+        raw = cls._read_raw().get("api_services")
+        services = raw if isinstance(raw, dict) else {}
+        try:
+            from aegisops.config.api_versioning import resolve_api_service
+            return resolve_api_service(service_id, services)
+        except Exception:
+            return services.get(service_id)
+
+    @classmethod
+    def list_api_services_raw(cls) -> Dict[str, Any]:
+        """Return all raw api_services entries from aegisops.json."""
+        data = cls._read_raw()
+        return data.get("api_services", {})
+
+    @classmethod
+    def set_api_service(cls, service_id: str, service_config: Dict[str, Any]) -> None:
+        """Create or replace an api_services entry in aegisops.json.
+
+        Uses the same ``{secret:xxx}`` reference format as LLM providers::
+
+            ConfigWriter.set_api_service(
+                "threatbook_api",
+                {"apiKey": "{secret:threatbook_api_key}"},
+            )
+
+        ``service_id`` is the literal storage key — writes are NOT redirected
+        to a versioned shadow even when one exists. New callers should pass
+        the versioned storage key (e.g. ``tdp_api_v3_3_10``); see
+        :mod:`aegisops.config.api_versioning`. Writes that target a
+        shadowed legacy id emit a warning, since
+        :meth:`get_api_service_raw` would prefer the shadow and silently
+        ignore them.
+        """
+        data = cls._read_raw()
+        services = data.setdefault("api_services", {})
+        services[service_id] = cls._normalize_api_service_config(service_config)
+        cls._write_raw(data)
+        log.info("config_writer.api_service_set", {"service_id": service_id})
+
+        try:
+            from aegisops.config.api_versioning import warn_if_shadowing_legacy
+            warn_if_shadowing_legacy(service_id, services)
+        except Exception:
+            pass
+
+    @classmethod
+    def remove_api_service(cls, service_id: str) -> bool:
+        """Remove an api_services entry from aegisops.json.
+
+        Returns:
+            True if the entry existed and was removed.
+        """
+        data = cls._read_raw()
+        services = data.get("api_services", {})
+        if service_id not in services:
+            return False
+        del services[service_id]
+        data["api_services"] = services
+        cls._write_raw(data)
+        log.info("config_writer.api_service_removed", {"service_id": service_id})
+        return True
+
+    # ------------------------------------------------------------------
+    # Tool settings  (tool_settings section)
+    # ------------------------------------------------------------------
+    #
+    # User-level overlay for per-tool settings (``enabled`` and native ``group``).
+    # The section mirrors ``model_settings`` for naming consistency —
+    # both are flat maps keyed by the entity's unique id.
+    #
+    # Why this exists:  YAML plugin tool files under
+    # ``<project>/.aegisops/plugins/tools/`` are tracked by git and may be
+    # overwritten on upgrade.  Writing a user toggle (e.g. enable/disable)
+    # back into the YAML pollutes git diffs and breaks upgrades.  We keep
+    # the YAML as "factory defaults" and store the user's choice in
+    # ``aegisops.json`` instead.
+    #
+    # The same overlay applies uniformly to user-level YAML files under
+    # ``~/.aegisops/plugins/tools/`` so that UI behaviour is consistent
+    # regardless of where the YAML lives.
+
+    @classmethod
+    def list_tool_settings(cls) -> Dict[str, Dict[str, Any]]:
+        """Return all raw tool_settings entries from aegisops.json."""
+        data = cls._read_raw()
+        settings = data.get("tool_settings", {})
+        return settings if isinstance(settings, dict) else {}
+
+    @classmethod
+    def get_tool_setting(cls, tool_name: str) -> Optional[Dict[str, Any]]:
+        """Read a single tool_settings entry, or None if not set."""
+        settings = cls.list_tool_settings()
+        entry = settings.get(tool_name)
+        return entry if isinstance(entry, dict) else None
+
+    @classmethod
+    def set_tool_setting(cls, tool_name: str, setting: Dict[str, Any]) -> None:
+        """Merge ``setting`` into the tool_settings[tool_name] entry.
+
+        Existing keys not present in ``setting`` are preserved so callers
+        can update a single field (e.g. ``{"enabled": False}``) without
+        wiping other overlay fields that may be added later.
+        """
+        if not tool_name:
+            raise ValueError("tool_name must be a non-empty string")
+        incoming = dict(setting or {})
+        if "group" in incoming:
+            from aegisops.tool.registry import ToolRegistry, normalize_tool_group
+
+            incoming["group"] = normalize_tool_group(incoming["group"]) or ""
+            ToolRegistry.validate_group_settings({tool_name: incoming})
+        path = cls._get_config_path()
+        data = cls._read_path_raw(path, strict="group" in incoming)
+        if not isinstance(data, dict):
+            raise ValueError("Configuration must be an object")
+        settings = data.get("tool_settings")
+        if not isinstance(settings, dict):
+            if "group" in incoming and settings is not None:
+                raise ValueError("tool_settings configuration must be an object")
+            settings = {}
+        existing = settings.get(tool_name)
+        if not isinstance(existing, dict):
+            if "group" in incoming and existing is not None:
+                raise ValueError(f"Tool setting must be an object: {tool_name}")
+            existing = {}
+        merged = {**existing, **incoming}
+        settings[tool_name] = merged
+        data["tool_settings"] = settings
+        cls._write_raw(data, path)
+        log.info("config_writer.tool_setting_set", {
+            "tool": tool_name,
+            "fields": sorted(merged.keys()),
+        })
+
+    @classmethod
+    def delete_tool_setting(cls, tool_name: str, *, field: Optional[str] = None) -> bool:
+        """Remove a tool setting, or only ``field`` while retaining other metadata.
+
+        Pops the whole ``tool_settings`` key when the last entry is
+        removed so aegisops.json doesn't accumulate empty container objects
+        as users toggle their last customised tool back to default.
+
+        Returns True if an entry existed and was removed.
+        """
+        data = cls._read_raw()
+        settings = data.get("tool_settings")
+        if not isinstance(settings, dict) or tool_name not in settings:
+            return False
+        if field is not None:
+            entry = settings[tool_name]
+            if not isinstance(entry, dict) or field not in entry:
+                return False
+            del entry[field]
+            if not entry:
+                del settings[tool_name]
+        else:
+            del settings[tool_name]
+        if settings:
+            data["tool_settings"] = settings
+        else:
+            data.pop("tool_settings", None)
+        cls._write_raw(data)
+        log.info("config_writer.tool_setting_removed", {"tool": tool_name})
+        return True
+
+    # ------------------------------------------------------------------
+    # Default model cleanup helpers
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def clear_default_models_for_provider(cls, provider_id: str) -> List[str]:
+        """Remove all default model entries that reference a given provider.
+
+        Called automatically when a provider is deleted so no stale default
+        model references remain in aegisops.json.
+
+        Args:
+            provider_id: The provider being removed.
+
+        Returns:
+            List of model_type keys that were cleared (e.g. ["llm"]).
+        """
+        all_defaults = cls.get_all_default_models()
+        cleared: List[str] = []
+        for model_type, cfg in all_defaults.items():
+            if cfg.get("provider_id") == provider_id:
+                cls.delete_default_model(model_type)
+                cleared.append(model_type)
+                log.info("config_writer.default_model_cleared", {
+                    "model_type": model_type,
+                    "reason": "provider_deleted",
+                    "provider_id": provider_id,
+                })
+        return cleared
+
+    @classmethod
+    def clear_default_models_for_model(cls, provider_id: str, model_id: str) -> List[str]:
+        """Remove all default model entries that reference a specific model.
+
+        Called automatically when a model definition is deleted.
+
+        Args:
+            provider_id: Provider that owns the model.
+            model_id: The model being removed.
+
+        Returns:
+            List of model_type keys that were cleared (e.g. ["llm"]).
+        """
+        all_defaults = cls.get_all_default_models()
+        cleared: List[str] = []
+        for model_type, cfg in all_defaults.items():
+            if cfg.get("provider_id") == provider_id and cfg.get("model_id") == model_id:
+                cls.delete_default_model(model_type)
+                cleared.append(model_type)
+                log.info("config_writer.default_model_cleared", {
+                    "model_type": model_type,
+                    "reason": "model_deleted",
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                })
+        return cleared
+
+    # ------------------------------------------------------------------
+    # Helper: build a standard provider config dict
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def build_provider_config(
+        cls,
+        provider_id: str,
+        *,
+        npm: str = "@ai-sdk/openai-compatible",
+        base_url: Optional[str] = None,
+        models: Optional[Dict[str, Dict[str, Any]]] = None,
+        extra_options: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Build a standard provider config dict for aegisops.json.
+
+        The apiKey field always uses {secret:<provider_id>_llm_key} reference.
+
+        Args:
+            provider_id: Provider identifier
+            npm: NPM package name (for TUI compatibility)
+            base_url: Base URL for the API
+            models: Dict of model_id -> model config
+            extra_options: Additional options to merge into provider options
+
+        Returns:
+            Provider config dict ready for add_provider()
+        """
+        options: Dict[str, Any] = {
+            "apiKey": f"{{secret:{provider_id}_llm_key}}",
+        }
+        if base_url:
+            options["baseURL"] = base_url
+        if extra_options:
+            options.update(extra_options)
+
+        config: Dict[str, Any] = {
+            "npm": npm,
+            "options": options,
+        }
+        if models:
+            config["models"] = models
+        else:
+            config["models"] = {}
+
+        return config

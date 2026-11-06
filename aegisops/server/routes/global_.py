@@ -1,0 +1,84 @@
+"""
+Global routes for AegisOps TUI compatibility
+
+Provides /global/* endpoints that AegisOps SDK expects.
+
+AegisOps expects health response:
+{
+    "healthy": true,
+    "version": "x.x.x"
+}
+"""
+
+import asyncio
+import json
+from typing import AsyncGenerator, Literal
+
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+
+from aegisops.server.auth import require_user
+from aegisops.utils.log import Log
+from aegisops.server.routes.event import EventBroadcaster, sse_generator
+
+
+router = APIRouter()
+log = Log.create(service="global-routes")
+
+
+class HealthResponse(BaseModel):
+    healthy: Literal[True] = True
+    version: str = "unknown"
+
+
+@router.get(
+    "/health",
+    response_model=HealthResponse,
+    summary="Get health",
+    description="Get health information about the AegisOps server"
+)
+async def get_health() -> HealthResponse:
+    """Health check endpoint for AegisOps TUI"""
+    from aegisops.updater import get_current_version
+    return HealthResponse(version=get_current_version())
+
+
+@router.get(
+    "/event",
+    summary="Get global events",
+    description="Subscribe to global events using server-sent events"
+)
+async def get_global_events(request: Request):
+    """
+    Subscribe to global SSE event stream
+    
+    This is the main event endpoint that AegisOps TUI uses.
+    """
+    user = require_user(request)
+    queue = await EventBroadcaster.get().subscribe(user)
+    
+    log.info("global.event.subscribe", {
+        "clients": EventBroadcaster.get().client_count,
+    })
+    
+    return StreamingResponse(
+        sse_generator(queue, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+@router.post(
+    "/dispose",
+    summary="Dispose instance",
+    description="Clean up and dispose all AegisOps instances"
+)
+async def dispose_global():
+    """Dispose all instances"""
+    log.info("global.dispose")
+    return {"success": True}

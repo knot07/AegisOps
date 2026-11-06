@@ -1,0 +1,81 @@
+{
+  "schemaVersion": "hub.index.v1",
+  "plugins": [
+    {
+      "id": "tdp_ai",
+      "type": "webui",
+      "name": "TDP AI 研判",
+      "nameCn": "TDP AI 研判",
+      "description": "面向 TDP 的告警聚合、AI 研判与处置，包含独立演示环境。",
+      "descriptionCn": "面向 TDP 的告警聚合、AI 研判与处置，包含独立演示环境。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "community",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/webuis/tdp_ai/manifest.json"
+    },
+    {
+      "id": "tdp-ai-scene",
+      "type": "component",
+      "name": "TDP AI 研判",
+      "nameCn": "TDP AI 研判",
+      "description": "面向 TDP 的告警聚合、AI 研判与处置，包含独立演示环境。",
+      "descriptionCn": "面向 TDP 的告警聚合、AI 研判与处置，包含独立演示环境。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "community",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/components/tdp-ai-scene/manifest.json"
+    },
+    {
+      "id": "vuln_ops",
+      "type": "webui",
+      "name": "漏洞运营",
+      "nameCn": "漏洞运营",
+      "description": "漏洞台账、资产目录、整改复测、成员权限与操作审计。",
+      "descriptionCn": "漏洞台账、资产目录、整改复测、成员权限与操作审计。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "community",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/webuis/vuln_ops/manifest.json"
+    },
+    {
+      "id": "vuln-ops-scene",
+      "type": "component",
+      "name": "漏洞运营",
+      "nameCn": "漏洞运营",
+      "description": "漏洞台账、资产目录、整改复测、成员权限与操作审计。",
+      "descriptionCn": "漏洞台账、资产目录、整改复测、成员权限与操作审计。",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "community",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/components/vuln-ops-scene/manifest.json"
+    }
+  ]
+}

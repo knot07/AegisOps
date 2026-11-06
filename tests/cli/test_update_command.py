@@ -1,0 +1,648 @@
+from io import StringIO
+from pathlib import Path
+
+import pytest
+import typer
+from rich.console import Console
+from typer.testing import CliRunner
+
+import aegisops.cli.commands.update as update_cmd
+import aegisops.cli.main as cli_main
+import aegisops.updater as updater_pkg
+from aegisops.updater.models import UpdateProgress, VersionInfo
+
+runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_upgrade_logs(monkeypatch, tmp_path):
+    # `aegisops update` appends to the upgrade text log (AEGISOPS_LOG_DIR, else ~/.aegisops/logs);
+    # keep every test in this module out of the developer's real ~/.aegisops
+    monkeypatch.setenv("AEGISOPS_LOG_DIR", str(tmp_path / "logs"))
+
+
+async def _noop_log_init(**_: object) -> None:
+    return None
+
+
+def test_updater_package_exports_shared_installer() -> None:
+    from aegisops.updater import updater as updater_module
+
+    assert updater_pkg.install_or_repair_source is updater_module.install_or_repair_source
+
+
+def test_update_cli_accepts_force_option(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+
+    captured: dict[str, object] = {}
+
+    async def fake_update(*, check: bool, yes: bool, force: bool, region: str | None) -> None:
+        captured["check"] = check
+        captured["yes"] = yes
+        captured["force"] = force
+        captured["region"] = region
+
+    monkeypatch.setattr(update_cmd, "_update", fake_update)
+
+    result = runner.invoke(cli_main.app, ["update", "--force", "--yes", "--region", "cn"])
+
+    assert result.exit_code == 0, result.stdout
+    assert captured == {"check": False, "yes": True, "force": True, "region": "cn"}
+
+
+def test_update_uses_install_profile_language_as_default_region(monkeypatch, tmp_path) -> None:
+    output = StringIO()
+    monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path))
+    (tmp_path / "install_profile.json").write_text('{"Language": "zh-CN"}', encoding="utf-8")
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    check_regions: list[str | None] = []
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        check_regions.append(region)
+        return VersionInfo(
+            current_version="2026.4.1",
+            latest_version="2026.4.2",
+            has_update=True,
+            zipball_url="https://gitee.example.com/aegisops.zip",
+            tarball_url="https://gitee.example.com/aegisops.tar.gz",
+            deploy_mode="source",
+            update_allowed=True,
+        )
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+
+    import asyncio
+
+    asyncio.run(update_cmd._update(check=True, yes=False, force=False, region=None))
+
+    assert check_regions == ["cn"]
+    assert "aegisops update" in output.getvalue()
+
+
+def test_update_prompts_for_cn_mirror_before_upgrade_confirmation(monkeypatch, tmp_path) -> None:
+    output = StringIO()
+    monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("AEGISOPS_INSTALL_LANGUAGE", raising=False)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    check_regions: list[str | None] = []
+    confirm_prompts: list[str] = []
+    captured: dict[str, object] = {}
+    answers = iter([True, True])
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        check_regions.append(region)
+        zipball_url = "https://example.com/aegisops.zip"
+        tarball_url = "https://example.com/aegisops.tar.gz"
+        if region == "cn":
+            zipball_url = "https://gitee.example.com/aegisops.zip"
+            tarball_url = "https://gitee.example.com/aegisops.tar.gz"
+        return VersionInfo(
+            current_version="2026.4.1",
+            latest_version="2026.4.2",
+            has_update=True,
+            zipball_url=zipball_url,
+            tarball_url=tarball_url,
+            deploy_mode="source",
+            update_allowed=True,
+        )
+
+    async def fake_perform_update(
+        latest_tag: str,
+        *,
+        zipball_url: str | None = None,
+        tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
+        restart: bool = True,
+        locale: str | None = None,
+        region: str | None = None,
+        wait_for_handoff: bool = False,
+    ):
+        captured["latest_tag"] = latest_tag
+        captured["zipball_url"] = zipball_url
+        captured["tarball_url"] = tarball_url
+        captured["bundle_sha256"] = bundle_sha256
+        captured["bundle_format"] = bundle_format
+        captured["perform_region"] = region
+        captured["restart"] = restart
+        captured["wait_for_handoff"] = wait_for_handoff
+        async for step in _fake_progress():
+            yield step
+
+    def fake_confirm(prompt: str, default: bool = False) -> bool:
+        confirm_prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(update_cmd.typer, "confirm", fake_confirm)
+
+    import asyncio
+
+    asyncio.run(update_cmd._update(check=False, yes=False, force=False, region=None))
+
+    assert check_regions == ["cn"]
+    assert confirm_prompts == ["\n是否使用中国镜像进行升级？", "\n是否立即升级？"]
+    assert captured == {
+        "latest_tag": "2026.4.2",
+        "zipball_url": "https://gitee.example.com/aegisops.zip",
+        "tarball_url": "https://gitee.example.com/aegisops.tar.gz",
+        "bundle_sha256": None,
+        "bundle_format": None,
+        "perform_region": "cn",
+        "restart": True,
+        "wait_for_handoff": True,
+    }
+    assert "已切换为中国镜像源" not in output.getvalue()
+
+
+async def _fake_progress():
+    yield UpdateProgress(stage="fetching", message="fetching")
+    yield UpdateProgress(stage="backing_up", message="backing up")
+    yield UpdateProgress(stage="applying", message="applying")
+    yield UpdateProgress(stage="restarting", message="restarting")
+    yield UpdateProgress(stage="done", message="done", success=True)
+
+
+def test_update_force_reinstalls_latest_release_when_already_up_to_date(monkeypatch) -> None:
+    output = StringIO()
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        captured["check_region"] = region
+        return VersionInfo(
+            current_version="2026.4.2",
+            latest_version="2026.4.2",
+            has_update=False,
+            zipball_url="https://example.com/aegisops.zip",
+            tarball_url="https://example.com/aegisops.tar.gz",
+            deploy_mode="source",
+            update_allowed=True,
+        )
+
+    captured: dict[str, object] = {}
+
+    async def fake_perform_update(
+        latest_tag: str,
+        *,
+        zipball_url: str | None = None,
+        tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
+        restart: bool = True,
+        locale: str | None = None,
+        region: str | None = None,
+        wait_for_handoff: bool = False,
+    ):
+        captured["latest_tag"] = latest_tag
+        captured["zipball_url"] = zipball_url
+        captured["tarball_url"] = tarball_url
+        captured["bundle_sha256"] = bundle_sha256
+        captured["bundle_format"] = bundle_format
+        captured["perform_region"] = region
+        captured["restart"] = restart
+        captured["wait_for_handoff"] = wait_for_handoff
+        async for step in _fake_progress():
+            yield step
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+
+    import asyncio
+
+    asyncio.run(update_cmd._update(check=False, yes=True, force=True, region="cn"))
+
+    assert captured == {
+        "latest_tag": "2026.4.2",
+        "zipball_url": "https://example.com/aegisops.zip",
+        "tarball_url": "https://example.com/aegisops.tar.gz",
+        "bundle_sha256": None,
+        "bundle_format": None,
+        "check_region": "cn",
+        "perform_region": "cn",
+        "restart": True,
+        "wait_for_handoff": True,
+    }
+    assert "强制重新安装 v2026.4.2" in output.getvalue()
+    assert "[3/3] 应用新版本...  ✓" in output.getvalue()
+    assert "重启服务" not in output.getvalue()
+    assert "升级完成" in output.getvalue()
+
+
+def test_update_delegates_stop_install_build_and_restart_to_handoff(monkeypatch, tmp_path) -> None:
+    output = StringIO()
+    monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("AEGISOPS_INSTALL_LANGUAGE", raising=False)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    confirm_prompts: list[str] = []
+    answers = iter([False, True])
+    events: list[str] = []
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        return VersionInfo(
+            current_version="2026.4.1",
+            latest_version="2026.4.2",
+            has_update=True,
+            zipball_url="https://example.com/aegisops.zip",
+            tarball_url="https://example.com/aegisops.tar.gz",
+            deploy_mode="source",
+            update_allowed=True,
+        )
+
+    async def fake_perform_update(
+        latest_tag: str,
+        *,
+        zipball_url: str | None = None,
+        tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
+        restart: bool = True,
+        locale: str | None = None,
+        region: str | None = None,
+        wait_for_handoff: bool = False,
+    ):
+        events.append(f"perform_update:{wait_for_handoff}")
+        async for step in _fake_progress():
+            yield step
+
+    def fake_confirm(prompt: str, default: bool = False) -> bool:
+        confirm_prompts.append(prompt)
+        return next(answers)
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+    monkeypatch.setattr(update_cmd.typer, "confirm", fake_confirm)
+
+    import asyncio
+
+    asyncio.run(update_cmd._update(check=False, yes=False, force=False, region=None))
+
+    assert confirm_prompts == ["\n是否使用中国镜像进行升级？", "\n是否立即升级？"]
+    assert events == ["perform_update:True"]
+    assert "已执行 aegisops stop" not in output.getvalue()
+
+
+def test_update_reports_handoff_preparation_failure(monkeypatch, tmp_path) -> None:
+    output = StringIO()
+    monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.delenv("AEGISOPS_INSTALL_LANGUAGE", raising=False)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=120),
+    )
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        return VersionInfo(
+            current_version="2026.4.1",
+            latest_version="2026.4.2",
+            has_update=True,
+            zipball_url="https://example.com/aegisops.zip",
+            tarball_url="https://example.com/aegisops.tar.gz",
+            deploy_mode="source",
+            update_allowed=True,
+        )
+
+    async def fake_perform_update(
+        latest_tag: str,
+        *,
+        zipball_url: str | None = None,
+        tarball_url: str | None = None,
+        bundle_sha256: str | None = None,
+        bundle_format: str | None = None,
+        restart: bool = True,
+        locale: str | None = None,
+        region: str | None = None,
+        wait_for_handoff: bool = False,
+    ):
+        yield UpdateProgress(stage="error", message="handoff preparation failed", success=False)
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "source")
+
+    import asyncio
+
+    with pytest.raises(typer.Exit) as excinfo:
+        asyncio.run(update_cmd._update(check=False, yes=True, force=False, region=None))
+
+    assert excinfo.value.exit_code == 1
+    assert "handoff preparation failed" in output.getvalue()
+
+
+class _CliChannel:
+    """An update channel an installed extension would provide."""
+
+    name = "extension"
+
+    def __init__(self) -> None:
+        self.released: list[object] = []
+
+    async def check(self, *, locale=None, remote=True):
+        return VersionInfo(current_version="v2026.9.14", latest_version="v2026.9.20", has_update=True)
+
+    async def release(self, *, version=None):
+        from aegisops.updater.channels import ChannelRelease, InstallPlan
+
+        self.released.append(version)
+        return ChannelRelease(
+            version="v2026.9.20",
+            plan=lambda root, current, work: InstallPlan(source_root=None, version=current),
+            archive_path=Path("/opt/aegisops/bundle"),
+            label="extension bundle",
+        )
+
+
+@pytest.fixture
+def cli_channel():
+    from aegisops.updater.channels import register_update_channel, unregister_update_channel
+
+    channel = _CliChannel()
+    register_update_channel(channel)
+    yield channel
+    unregister_update_channel(channel.name)
+
+
+def _capture_console(monkeypatch) -> StringIO:
+    output = StringIO()
+    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, color_system=None, width=160))
+    return output
+
+
+def test_update_channel_option_installs_what_the_channel_releases(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def fail_update(**_: object) -> None:
+        raise AssertionError("the project's own update must not run with --channel")
+
+    monkeypatch.setattr(update_cmd, "_update", fail_update)
+
+    captured: dict[str, object] = {}
+
+    async def fake_perform_update(version, *, release, restart):
+        captured.update(version=version, release=release, restart=restart)
+        yield UpdateProgress(stage="fetching", message="Using local extension bundle /opt/aegisops/bundle...")
+        yield UpdateProgress(stage="applying", message="Keeping local AegisOps v2026.9.14 and installing the extension bundle...")
+        yield UpdateProgress(stage="done", message="Upgraded to v2026.9.14", success=True)
+
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+
+    result = runner.invoke(cli_main.app, ["update", "--channel", "extension", "--no-restart"])
+
+    assert result.exit_code == 0, output.getvalue()
+    assert captured["version"] == "v2026.9.20" and captured["restart"] is False
+    assert captured["release"].label == "extension bundle"
+    assert cli_channel.released == [None]
+    assert "已安装 extension bundle v2026.9.20" in output.getvalue()
+
+
+def test_update_channel_option_reports_error_stage(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def fake_perform_update(version, *, release, restart):
+        yield UpdateProgress(stage="error", message="Cannot install this extension bundle: missing wheel", success=False)
+
+    monkeypatch.setattr(updater_pkg, "perform_update", fake_perform_update)
+
+    result = runner.invoke(cli_main.app, ["update", "--channel", "extension"])
+
+    assert result.exit_code == 1
+    assert "missing wheel" in output.getvalue()
+
+
+def test_update_channel_option_reports_a_channel_that_cannot_release(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def refuse(*, version=None):
+        raise RuntimeError("Console unreachable and no local bundle")
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("nothing to install without a release")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(cli_channel, "release", refuse)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+
+    result = runner.invoke(cli_main.app, ["update", "--channel", "extension"])
+
+    assert result.exit_code == 1
+    assert "Console unreachable" in output.getvalue()
+
+
+def test_update_channel_option_names_the_channels_there_are(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    result = runner.invoke(cli_main.app, ["update", "--channel", "nobody"])
+
+    assert result.exit_code == 1
+    assert "没有名为 nobody 的更新通道" in output.getvalue() and "extension" in output.getvalue()
+
+
+def test_update_cli_explains_offline_install(monkeypatch, tmp_path) -> None:
+    import aegisops.updater.deploy as deploy_mod
+
+    output = StringIO()
+    monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=200),
+    )
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "offline")
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "offline")
+
+    async def fake_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        return VersionInfo(
+            current_version="2026.9.14",
+            latest_version="2026.10.1",
+            has_update=True,
+            deploy_mode="offline",
+            update_allowed=False,
+        )
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("perform_update must not run on an offline install")
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+
+    result = runner.invoke(cli_main.app, ["update", "--yes", "--region", "cn"])
+
+    assert result.exit_code == 0, result.stdout
+    assert "aegisops-offline.run" in output.getvalue()
+
+
+def test_update_cli_offline_install_gets_run_guidance_even_when_the_version_check_fails(monkeypatch, tmp_path) -> None:
+    """R9: on an offline deployment the .run guidance comes first; a failed remote check is not an error."""
+    import aegisops.updater.deploy as deploy_mod
+
+    output = StringIO()
+    monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    monkeypatch.setattr(
+        update_cmd,
+        "console",
+        Console(file=output, force_terminal=False, color_system=None, width=200),
+    )
+    monkeypatch.setattr(deploy_mod, "detect_deploy_mode", lambda: "offline")
+    monkeypatch.setattr(updater_pkg, "detect_deploy_mode", lambda: "offline")
+
+    async def local_only_check_update(*, locale: str | None = None, region: str | None = None) -> VersionInfo:
+        # what check_update returns on an offline deployment: local state, no latest, no error
+        return VersionInfo(current_version="2026.9.14", deploy_mode="offline", update_allowed=False)
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("perform_update must not run on an offline install")
+
+    monkeypatch.setattr(updater_pkg, "check_update", local_only_check_update)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+
+    # the third form has no --yes / --region: on an online install it would prompt for the CN
+    # mirror first; an offline install must answer before asking anything (stdin is closed here)
+    for args in (["update", "--check", "--region", "cn"], ["update", "--yes", "--region", "cn"], ["update"]):
+        output.seek(0)
+        output.truncate(0)
+        result = runner.invoke(cli_main.app, args)
+        text = output.getvalue()
+        assert result.exit_code == 0, text
+        assert "aegisops-offline.run" in text
+        assert "检查失败" not in text and "是否使用中国镜像" not in text
+        assert "v2026.9.14" in text
+        # the guidance is printed before the version info, not after it
+        assert text.index("aegisops-offline.run") < text.index("v2026.9.14")
+
+
+def test_update_check_with_channel_only_reports_and_never_installs(monkeypatch, tmp_path, cli_channel) -> None:
+    """`--check --channel` describes what the channel would install and stops: no install, no restart."""
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def fail_perform_update(*_args, **_kwargs):
+        raise AssertionError("--check must not install anything")
+        yield  # pragma: no cover - makes this an async generator like the real one
+
+    async def fail_update(**_: object) -> None:
+        raise AssertionError("the project's own update must not run with --channel")
+
+    async def describe():
+        return [("来源", "本地离线包 /opt/aegisops/bundle"), ("组件版本", "2026.8.12"), ("release id", "rel_offline_test_1")]
+
+    monkeypatch.setattr(cli_channel, "describe", describe, raising=False)
+    monkeypatch.setattr(updater_pkg, "perform_update", fail_perform_update)
+    monkeypatch.setattr(update_cmd, "_update", fail_update)
+
+    for args in (["update", "--check", "--channel", "extension"], ["update", "--check", "--channel", "extension", "--no-restart"]):
+        output.seek(0)
+        output.truncate(0)
+        result = runner.invoke(cli_main.app, args)
+        text = output.getvalue()
+        assert result.exit_code == 0, text
+        assert "/opt/aegisops/bundle" in text and "2026.8.12" in text and "rel_offline_test_1" in text
+        assert "本次未安装任何东西" in text
+    assert cli_channel.released == []
+
+
+def test_update_check_with_channel_reports_lookup_failure(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def describe():
+        raise RuntimeError("Console unreachable and no local bundle")
+
+    monkeypatch.setattr(cli_channel, "describe", describe, raising=False)
+    result = runner.invoke(cli_main.app, ["update", "--check", "--channel", "extension"])
+    assert result.exit_code == 1
+    assert "检查失败" in output.getvalue() and "Console unreachable" in output.getvalue()
+
+
+def test_update_check_with_channel_falls_back_to_the_version_check(monkeypatch, tmp_path, cli_channel) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+    asked: list[object] = []
+
+    async def fake_check_update(**kwargs):
+        asked.append(kwargs)
+        return VersionInfo(current_version="v2026.9.14", latest_version="v2026.9.20", has_update=True)
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    result = runner.invoke(cli_main.app, ["update", "--check", "--channel", "extension"])
+    assert result.exit_code == 0, output.getvalue()
+    assert asked == [{"channel": "extension"}]
+    assert "2026.9.20" in output.getvalue()
+
+
+def test_update_check_with_channel_reports_a_failed_version_check(monkeypatch, tmp_path, cli_channel) -> None:
+    """A channel without describe() whose check fails ends like the project's own check: error, exit 1."""
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    output = _capture_console(monkeypatch)
+
+    async def fake_check_update(**kwargs):
+        return VersionInfo(
+            current_version="v2026.9.14",
+            error="Failed to check for updates. Please check your network connection.",
+        )
+
+    monkeypatch.setattr(updater_pkg, "check_update", fake_check_update)
+    result = runner.invoke(cli_main.app, ["update", "--check", "--channel", "extension"])
+    assert result.exit_code == 1, output.getvalue()
+    assert "检查失败" in output.getvalue() and "network connection" in output.getvalue()
+    assert cli_channel.released == []
+
+
+def test_update_says_where_the_previous_enterprise_edition_went(monkeypatch, tmp_path) -> None:
+    """A machine with the Python enterprise package of before: aegisops update upgrades the open
+    part only, and says so, with the way to the new enterprise edition."""
+    from aegisops.updater import enterprise
+
+    output = StringIO()
+    monkeypatch.setattr(update_cmd, "console", Console(file=output, force_terminal=False, width=200))
+    monkeypatch.setattr(enterprise, "previous_edition", lambda: {"version": "2026.10.19", "license_id": "lic-old-7"})
+    monkeypatch.setattr(enterprise, "situation", lambda: {"manual_command": "bash aegisopspro-<版本>-linux-arm64.run"})
+
+    update_cmd._print_previous_edition_notice()
+
+    text = output.getvalue()
+    assert "老企业版（Python 版 2026.10.19）" in text and "授权 lic-old-7" in text
+    assert "账号菜单 → AegisOps Pro" in text and "bash aegisopspro-<版本>-linux-arm64.run" in text
+
+    output.truncate(0)
+    monkeypatch.setattr(enterprise, "previous_edition", lambda: None)
+    update_cmd._print_previous_edition_notice()
+    assert output.getvalue().strip() == ""

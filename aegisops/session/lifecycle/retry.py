@@ -1,0 +1,341 @@
+"""
+Session Retry module
+
+Handles retry logic for LLM API failures with exponential backoff.
+Based on AegisOps' ported src/session/retry.ts
+"""
+
+import asyncio
+import random
+import re
+from typing import Optional, Dict, Any
+
+from aegisops.utils.log import Log
+
+
+log = Log.create(service="session.retry")
+
+
+# Constants matching AegisOps
+RETRY_INITIAL_DELAY = 2000  # 2 seconds in milliseconds
+RETRY_BACKOFF_FACTOR = 2
+RETRY_MAX_DELAY_NO_HEADERS = 30_000  # 30 seconds
+RETRY_MAX_DELAY = 2_147_483_647  # max 32-bit signed integer
+MAX_ERROR_RETRIES = 5
+MODEL_QUOTA_EXHAUSTED = "model_quota_exhausted"
+
+
+class ModelQuotaExhaustedError(RuntimeError):
+    """A provider quota that cannot be recovered by retrying this audit."""
+
+    code = MODEL_QUOTA_EXHAUSTED
+
+
+CONNECTION_ERROR_DISPLAY_MESSAGE = (
+    "Model is unavailable. Please check the provider connection and model configuration."
+)
+CONNECTION_ERROR_PATTERNS = [
+    "connection error",
+    "connection reset",
+    "connection refused",
+    "could not connect",
+    "failed to connect",
+    "api connection",
+    "remote protocol error",
+    "peer closed",
+    "incomplete chunked read",
+    "model unavailable",
+    "model is unavailable",
+    "model not available",
+]
+
+
+class SessionRetry:
+    """
+    Session Retry namespace
+    
+    Handles retry logic for API failures with exponential backoff.
+    Matches AegisOps SessionRetry namespace.
+    """
+
+    @staticmethod
+    def is_alibaba_rate_limit(error: Dict[str, Any]) -> bool:
+        """Alibaba uses insufficient_quota for TPS/TPM throttling."""
+        data = error.get("data") or {}
+        if data.get("providerID") != "alibaba" or data.get("statusCode") != 429:
+            return False
+        code = str(data.get("providerCode") or "").lower()
+        if code:
+            return code in {"insufficient_quota", "throttling.allocationquota"}
+        message = str(data.get("message") or error.get("message") or "")
+        return bool(re.search(r"\binsufficient_quota\b", message, re.IGNORECASE))
+
+    @staticmethod
+    def is_quota_exhausted(error: Dict[str, Any]) -> bool:
+        """Recognize explicit quota errors, never generic 429/TPM exhaustion."""
+        data = error.get("data") or {}
+        if data.get("error_code") == MODEL_QUOTA_EXHAUSTED:
+            return True
+        if SessionRetry.is_alibaba_rate_limit(error):
+            return False
+        code = str(data.get("providerCode") or "").lower()
+        if code in {"insufficient_quota", "billing_hard_limit_reached"}:
+            return True
+        message = str(data.get("message") or error.get("message") or "")
+        return bool(re.search(
+            r"\b(?:insufficient[ _-]quota|billing[ _-]hard[ _-]limit[ _-]reached)\b",
+            message,
+            re.IGNORECASE,
+        ))
+    
+    @staticmethod
+    async def sleep(ms: int, abort_event: asyncio.Event) -> None:
+        """
+        Sleep for ms milliseconds, can be aborted
+        
+        Args:
+            ms: Milliseconds to sleep
+            abort_event: Event to check for abort
+            
+        Raises:
+            asyncio.CancelledError: If aborted
+        """
+        delay_seconds = min(ms, RETRY_MAX_DELAY) / 1000.0
+        
+        try:
+            await asyncio.wait_for(
+                abort_event.wait(),
+                timeout=delay_seconds
+            )
+            # If we got here, abort was triggered
+            raise asyncio.CancelledError("Aborted")
+        except asyncio.TimeoutError:
+            # Normal completion - timeout elapsed
+            pass
+    
+    @staticmethod
+    def delay(attempt: int, error: Optional[Dict[str, Any]] = None, *, jitter: bool = False) -> int:
+        """
+        Calculate retry delay in milliseconds
+        
+        Supports retry-after headers and exponential backoff.
+        
+        Args:
+            attempt: Current retry attempt number (1-indexed)
+            error: Error object with optional responseHeaders
+            jitter: Randomize backoff without shortening server-provided delays
+            
+        Returns:
+            Delay in milliseconds
+        """
+        if error and isinstance(error, dict):
+            data = error.get("data", {})
+            headers = {str(key).lower(): value for key, value in data.get("responseHeaders", {}).items()}
+            
+            if headers:
+                # Check retry-after-ms header
+                retry_after_ms = headers.get("retry-after-ms")
+                if retry_after_ms:
+                    try:
+                        parsed_ms = float(retry_after_ms)
+                        if 0 < parsed_ms < float('inf'):
+                            return int(parsed_ms)
+                    except (ValueError, TypeError):
+                        pass
+                
+                # Check retry-after header (in seconds)
+                retry_after = headers.get("retry-after")
+                if retry_after:
+                    try:
+                        # Try parsing as seconds
+                        parsed_seconds = float(retry_after)
+                        if 0 < parsed_seconds < float('inf'):
+                            return int(parsed_seconds * 1000)
+                    except (ValueError, TypeError):
+                        pass
+                    
+                    # Try parsing as HTTP date (not implemented for simplicity)
+                    # In production, use email.utils.parsedate_to_datetime
+
+        # No usable server delay: use capped exponential backoff
+        delay_ms = RETRY_INITIAL_DELAY * (RETRY_BACKOFF_FACTOR ** (attempt - 1))
+        delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
+        return int(random.uniform(delay_ms / 2, delay_ms)) if jitter else int(delay_ms)
+
+    @staticmethod
+    def retry_after_ms(error: Optional[Dict[str, Any]]) -> Optional[int]:
+        """Return the provider's ``retry-after`` hint in milliseconds, if any."""
+        if not error or not isinstance(error, dict):
+            return None
+        headers = (error.get("data") or {}).get("responseHeaders") or {}
+        if not isinstance(headers, dict):
+            return None
+        lowered = {str(key).lower(): value for key, value in headers.items()}
+        for header, scale in (("retry-after-ms", 1.0), ("retry-after", 1000.0)):
+            raw = lowered.get(header)
+            if raw is None:
+                continue
+            try:
+                parsed = float(raw)
+            except (TypeError, ValueError):
+                continue
+            if 0 < parsed < float("inf"):
+                return int(parsed * scale)
+        return None
+
+    @staticmethod
+    def jittered_delay(
+        attempt: int,
+        error: Optional[Dict[str, Any]] = None,
+        *,
+        max_delay_ms: int = RETRY_MAX_DELAY_NO_HEADERS,
+    ) -> int:
+        """``delay()`` with jitter so concurrent callers do not retry in lockstep.
+
+        N sessions rejected by the same 429 would otherwise all sleep the same
+        2/4/8/16/30 s schedule and hit the provider together again. A
+        ``retry-after`` hint is honoured as a lower bound (plus up to 25 %);
+        plain backoff uses "equal jitter": ``[base / 2, base]``. The result
+        never exceeds ``max_delay_ms``.
+        """
+        cap = max(1, int(max_delay_ms))
+        hinted = SessionRetry.retry_after_ms(error)
+        if hinted is not None:
+            return max(1, min(cap, int(min(hinted, cap) * random.uniform(1.0, 1.25))))
+        base = min(SessionRetry.delay(attempt, error), cap)
+        half = base / 2.0
+        return max(1, int(half + random.uniform(0.0, half)))
+
+    @staticmethod
+    def is_rate_limited(error: Dict[str, Any]) -> bool:
+        """Return True when the provider rejected the request as rate-limited (429).
+
+        A usable status code decides on its own: provider errors carry request
+        ids and quota hints, so a 401 whose body happens to contain "429" must
+        not put the whole provider into cooldown. Text matching is only a
+        fallback for errors that arrive without a status code.
+        """
+        data = error.get("data") or {}
+        status_code = data.get("statusCode")
+        try:
+            normalized = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            normalized = None
+        if normalized is not None:
+            return normalized == 429
+        message = data.get("message") or error.get("message") or ""
+        if not isinstance(message, str):
+            return False
+        lowered = message.lower()
+        return any(
+            pattern in lowered
+            for pattern in ("rate limit", "rate_limit", "too many requests", "429")
+        )
+    
+    @staticmethod
+    def retryable(error: Dict[str, Any]) -> Optional[str]:
+        """
+        Check if an error is retryable
+        
+        Args:
+            error: Error object from MessageV2.fromError
+            
+        Returns:
+            Error message string if retryable, None if not retryable
+        """
+        if SessionRetry.is_quota_exhausted(error):
+            return None
+        error_name = error.get("name", "")
+        error_data = error.get("data", {})
+
+        if error_name == "OutputLimitRejectedError":
+            return "Output token limit not accepted, retrying with the configured limit"
+
+        if error_name == "StreamToolArgumentsTruncatedError":
+            # The runner turns a cut-off tool call into a tool error the model
+            # can react to. Replaying the request would stack a second attempt
+            # onto the same assistant message, and whatever cut the stream
+            # usually cuts the identical retry at the same place.
+            return None
+
+        # Check if it's an APIError with isRetryable flag
+        if error_name == "APIError":
+            if not error_data.get("isRetryable", False):
+                return None
+            
+            message = error_data.get("message", "")
+            if "Overloaded" in message:
+                return "Provider is overloaded"
+            return message
+        
+        # Check error message for retryable patterns
+        message = error_data.get("message", "")
+        if isinstance(message, str):
+            try:
+                # Try parsing as JSON for structured errors
+                import json
+                json_data = json.loads(message)
+                
+                # Anthropic too_many_requests
+                if json_data.get("type") == "error":
+                    error_type = json_data.get("error", {}).get("type", "")
+                    error_code = json_data.get("error", {}).get("code", "")
+                    
+                    if error_type == "too_many_requests":
+                        return "Too Many Requests"
+                    
+                    if error_type == "server_error":
+                        return "Provider Server Error"
+                    
+                    if "rate_limit" in error_code:
+                        return "Rate Limited"
+                
+                # Check for exhausted/unavailable codes
+                code = json_data.get("code", "")
+                if "exhausted" in code or "unavailable" in code:
+                    return "Provider is overloaded"
+                
+                # Check for no_kv_space or other server errors
+                error_msg = json_data.get("error", {}).get("message", "")
+                if "no_kv_space" in error_msg:
+                    return "Provider Server Error"
+                
+                # Generic error object present
+                if json_data.get("error"):
+                    return "Provider Server Error"
+                    
+            except (json.JSONDecodeError, ValueError, AttributeError):
+                pass
+        
+        # Check common error patterns in message string
+        if isinstance(message, str):
+            message_lower = message.lower()
+            rate_limit_patterns = [
+                "rate limit", "too many requests", "429",
+                "overloaded",
+            ]
+            transient_patterns = [
+                "unavailable", "503", "502",
+                "timeout", "timed out",
+                *CONNECTION_ERROR_PATTERNS,
+                "null message", "returned choice with null",
+                "empty streaming response", "empty choices",
+            ]
+            if any(p in message_lower for p in rate_limit_patterns):
+                return "Rate Limited"
+            if any(p in message_lower for p in transient_patterns):
+                return "Connection or Server Error"
+        
+        return None
+
+    @staticmethod
+    def is_connection_error(error: Dict[str, Any]) -> bool:
+        """Return True for provider/model connection failures."""
+        data = error.get("data", {})
+        if data.get("isConnectionError") is True:
+            return True
+        message = data.get("message") or error.get("message", "")
+        if not isinstance(message, str):
+            return False
+        message_lower = message.lower()
+        return any(pattern in message_lower for pattern in CONNECTION_ERROR_PATTERNS)

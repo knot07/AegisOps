@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "hub.component.v1",
+  "id": "vuln-ops-scene",
+  "name": "漏洞运营",
+  "components": [
+    {
+      "type": "webui",
+      "id": "vuln_ops"
+    }
+  ]
+}

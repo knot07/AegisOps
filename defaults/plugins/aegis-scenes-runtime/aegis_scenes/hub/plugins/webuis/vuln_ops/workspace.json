@@ -1,0 +1,24 @@
+{
+  "id": "vuln_ops",
+  "version": "1.0.0",
+  "title": "漏洞运营",
+  "icon": "ScanSearch",
+  "order": 20,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "vuln-ops",
+  "sections": [
+    {
+      "id": "overview",
+      "label": "运营总览",
+      "pageIds": [
+        "vuln-ops"
+      ],
+      "defaultPageId": "vuln-ops",
+      "query": {},
+      "flat": true,
+      "icon": "LayoutDashboard",
+      "contentPadding": "none"
+    }
+  ]
+}

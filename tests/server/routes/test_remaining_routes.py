@@ -1,0 +1,1091 @@
+"""
+Remaining route tests: Workflow, Provider, Task, Config, Permission
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+
+import pytest
+from fastapi import APIRouter, HTTPException, status
+from httpx import AsyncClient
+from unittest.mock import AsyncMock, Mock
+
+
+# ---------------------------------------------------------------------------
+# Minimal workflow JSON (valid structure)
+# ---------------------------------------------------------------------------
+
+def _admin_request():
+    """Minimal request carrying an admin identity for update_config's admin guard."""
+    from types import SimpleNamespace
+    from aegisops.auth.context import AuthUser
+
+    return SimpleNamespace(state=SimpleNamespace(auth_user=AuthUser(
+        id="admin", username="admin", role="admin", status="active", must_reset_password=False,
+    )))
+
+_WORKFLOW_JSON = {
+    "start": "node_1",
+    "nodes": [
+        {
+            "id": "node_1",
+            "type": "python",
+            "code": "result = {'done': True}",
+        }
+    ],
+    "edges": [],
+}
+
+_WORKFLOW_PAYLOAD = {
+    "name": "test-workflow",
+    "description": "A test workflow",
+    "workflowJson": _WORKFLOW_JSON,
+}
+
+
+async def _wait_for_execution_terminal_state(
+    client: AsyncClient,
+    workflow_id: str,
+    exec_id: str,
+    *,
+    timeout_s: float = 3.0,
+) -> dict:
+    """Poll execution details until the workflow leaves the running state."""
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    while True:
+        resp = await client.get(f"/api/workflow/{workflow_id}/history/{exec_id}")
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        if data["status"] != "running":
+            return data
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError(f"Execution {exec_id} did not finish within {timeout_s} seconds")
+        await asyncio.sleep(0.05)
+@pytest.fixture(autouse=True)
+def isolated_workflow_filesystem(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    """Redirect workflow route filesystem writes into a per-test temp dir."""
+    from aegisops.server.routes import workflow as workflow_routes
+    from aegisops.workflow import center, fs_store
+
+    workspace_root = tmp_path / "workspace"
+    project_root = workspace_root / ".aegisops" / "plugins" / "workflows"
+    global_root = tmp_path / "home" / ".aegisops" / "plugins" / "workflows"
+    legacy_project_plugin = workspace_root / ".aegisops" / "plugins" / "workflow"
+    legacy_project_main = workspace_root / ".aegisops" / "workflow"
+    legacy_global_plugin = tmp_path / "home" / ".aegisops" / "plugins" / "workflow"
+    legacy_global_main = tmp_path / "home" / ".aegisops" / "workflow"
+
+    for root in [
+        workspace_root / ".aegisops",
+        project_root,
+        global_root,
+        legacy_project_plugin,
+        legacy_project_main,
+        legacy_global_plugin,
+        legacy_global_main,
+    ]:
+        root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(workflow_routes, "_find_workspace_root", lambda: workspace_root)
+    monkeypatch.setattr(workflow_routes, "_workflow_dir", lambda workflow_id: project_root / workflow_id)
+    monkeypatch.setattr(workflow_routes, "_global_workflow_dir", lambda workflow_id: global_root / workflow_id)
+    monkeypatch.setattr(fs_store, "_workspace_root", workspace_root)
+    monkeypatch.setattr(fs_store, "find_workspace_root", lambda: workspace_root)
+    # fs_store delegates to center.resolve_workflow_scan_roots; patch its real
+    # root resolvers rather than silently creating unused fs_store attributes.
+    monkeypatch.setattr(
+        center,
+        "resolve_project_workflow_roots",
+        lambda workspace=None: [legacy_project_plugin, legacy_project_main, project_root],
+    )
+    monkeypatch.setattr(
+        center,
+        "resolve_global_workflow_roots",
+        lambda: [legacy_global_plugin, legacy_global_main, global_root],
+    )
+
+    yield {
+        "workspace_root": workspace_root,
+        "project_root": project_root,
+        "global_root": global_root,
+    }
+
+
+# ===========================================================================
+# Workflow routes
+# ===========================================================================
+
+class TestWorkflowRoutes:
+
+    @pytest.mark.asyncio
+    async def test_list_workflows_returns_array(self, client: AsyncClient):
+        """GET /api/workflow returns a list."""
+        resp = await client.get("/api/workflow")
+        assert resp.status_code == status.HTTP_200_OK
+        assert isinstance(resp.json(), list)
+
+    @pytest.mark.asyncio
+    async def test_create_workflow(
+        self,
+        client: AsyncClient,
+        isolated_workflow_filesystem,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """POST /api/workflow creates a workflow and returns it."""
+        from aegisops.server import auth as auth_module
+
+        class _SecretManagerStub:
+            def get(self, key: str):
+                if key == auth_module.API_TOKEN_SECRET_ID:
+                    return "abc123"
+                return None
+
+        monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _SecretManagerStub())
+
+        resp = await client.post(
+            "/api/workflow",
+            json=_WORKFLOW_PAYLOAD,
+            headers={"Authorization": "Bearer abc123"},
+        )
+        assert resp.status_code in (
+            status.HTTP_200_OK,
+            status.HTTP_201_CREATED,
+        ), resp.text
+        data = resp.json()
+        assert data["name"] == "test-workflow"
+        assert "id" in data
+        assert data["source"] == "global"
+        assert (isolated_workflow_filesystem["global_root"] / data["id"] / "workflow.json").is_file()
+        assert not (isolated_workflow_filesystem["project_root"] / data["id"] / "workflow.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_import_workflow_defaults_to_global_storage(
+        self,
+        client: AsyncClient,
+        isolated_workflow_filesystem,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """POST /api/workflow/import stores imported workflows under global user storage by default."""
+        from aegisops.server import auth as auth_module
+
+        class _SecretManagerStub:
+            def get(self, key: str):
+                if key == auth_module.API_TOKEN_SECRET_ID:
+                    return "abc123"
+                return None
+
+        monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _SecretManagerStub())
+
+        payload = {
+            **_WORKFLOW_JSON,
+            "name": "imported-workflow",
+            "metadata": {
+                "description": "Imported workflow",
+                "category": "default",
+            },
+        }
+
+        resp = await client.post(
+            "/api/workflow/import",
+            json=payload,
+            headers={"Authorization": "Bearer abc123"},
+        )
+        assert resp.status_code in (
+            status.HTTP_200_OK,
+            status.HTTP_201_CREATED,
+        ), resp.text
+
+        data = resp.json()
+        assert data["name"] == "imported-workflow"
+        assert data["source"] == "global"
+        assert (isolated_workflow_filesystem["global_root"] / data["id"] / "workflow.json").is_file()
+        assert not (isolated_workflow_filesystem["project_root"] / data["id"] / "workflow.json").exists()
+
+    @pytest.mark.asyncio
+    async def test_get_workflow(self, client: AsyncClient):
+        """GET /api/workflow/{id} returns the workflow."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        resp = await client.get(f"/api/workflow/{wf_id}")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["id"] == wf_id
+
+    @pytest.mark.asyncio
+    async def test_get_unknown_workflow_returns_404(self, client: AsyncClient):
+        """GET for a non-existent workflow returns 404."""
+        resp = await client.get("/api/workflow/wf_nonexistent_id")
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_update_workflow(self, client: AsyncClient):
+        """PUT /api/workflow/{id} updates the workflow."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        resp = await client.put(
+            f"/api/workflow/{wf_id}",
+            json={"name": "updated-workflow"},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["name"] == "updated-workflow"
+
+    @pytest.mark.asyncio
+    async def test_update_workflow_writes_workflow_md_only(
+        self,
+        client: AsyncClient,
+        isolated_workflow_filesystem,
+    ):
+        """PUT /api/workflow/{id} stores editable markdown in workflow.md."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+        workflow_dir = isolated_workflow_filesystem["global_root"] / wf_id
+        legacy_edit_file = workflow_dir / "workflow.edit.md"
+        legacy_edit_file.write_text("# legacy\n", encoding="utf-8")
+
+        resp = await client.put(
+            f"/api/workflow/{wf_id}",
+            json={"markdownContent": "# current\n"},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert resp.json()["markdownContent"] == "# current\n"
+        assert resp.json()["editMarkdownContent"] == "# current\n"
+        assert (workflow_dir / "workflow.md").read_text(encoding="utf-8") == "# current\n"
+        assert not legacy_edit_file.exists()
+
+    @pytest.mark.asyncio
+    async def test_delete_workflow(self, client: AsyncClient):
+        """DELETE /api/workflow/{id} removes the workflow."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        resp = await client.delete(f"/api/workflow/{wf_id}")
+        assert resp.status_code in (status.HTTP_200_OK, status.HTTP_204_NO_CONTENT)
+
+        get_resp = await client.get(f"/api/workflow/{wf_id}")
+        assert get_resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_workflow_creation_missing_name_returns_422(self, client: AsyncClient):
+        """Creating a workflow without a name returns 422."""
+        resp = await client.post(
+            "/api/workflow",
+            json={"workflowJson": _WORKFLOW_JSON},
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    @pytest.mark.asyncio
+    async def test_workflow_history_endpoint(self, client: AsyncClient):
+        """GET /api/workflow/{id}/history returns a list."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        resp = await client.get(f"/api/workflow/{wf_id}/history")
+        assert resp.status_code == status.HTTP_200_OK
+        assert isinstance(resp.json(), list)
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_returns_running_execution(self, client: AsyncClient):
+        """POST /api/workflow/{id}/run should return immediately with a running execution."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {"topic": "demo"}})
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+
+        data = resp.json()
+        assert data["workflowId"] == wf_id
+        assert data["status"] == "running"
+        assert data["id"]
+        assert data["inputParams"] == {"topic": "demo"}
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_marks_business_failure_as_error(self, client: AsyncClient):
+        """A workflow that reports workflow_success=false should count as a failed run."""
+        payload = {
+            "name": "business-failure-workflow",
+            "description": "workflow that reports business failure",
+            "workflowJson": {
+                "start": "node_1",
+                "nodes": [
+                    {
+                        "id": "node_1",
+                        "type": "python",
+                        "code": (
+                            "outputs['workflow_success'] = False\n"
+                            "outputs['reason'] = 'Script file not found'"
+                        ),
+                    }
+                ],
+                "edges": [],
+            },
+        }
+        create_resp = await client.post("/api/workflow", json=payload)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        assert run_resp.status_code == status.HTTP_200_OK, run_resp.text
+        exec_id = run_resp.json()["id"]
+
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "error"
+        assert final["errorMessage"] == "Script file not found"
+        assert final["outputResults"]["workflow_success"] is False
+
+        workflow_resp = await client.get(f"/api/workflow/{wf_id}")
+        assert workflow_resp.status_code == status.HTTP_200_OK, workflow_resp.text
+        stats = workflow_resp.json()["stats"]
+        assert stats["callCount"] == 1
+        assert stats["successCount"] == 0
+        assert stats["errorCount"] == 1
+
+    @pytest.mark.asyncio
+    async def test_run_workflow_success_updates_success_stats(self, client: AsyncClient):
+        """A normal successful workflow should remain successful in execution and stats."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        assert run_resp.status_code == status.HTTP_200_OK, run_resp.text
+        exec_id = run_resp.json()["id"]
+
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "success"
+        assert final.get("errorMessage") in (None, "")
+
+        workflow_resp = await client.get(f"/api/workflow/{wf_id}")
+        assert workflow_resp.status_code == status.HTTP_200_OK, workflow_resp.text
+        stats = workflow_resp.json()["stats"]
+        assert stats["callCount"] == 1
+        assert stats["successCount"] == 1
+        assert stats["errorCount"] == 0
+
+    @pytest.mark.asyncio
+    async def test_cancel_running_workflow_execution(self, client: AsyncClient):
+        """Cancelling a running workflow should eventually mark it as cancelled."""
+        payload = {
+            "name": "slow-workflow",
+            "description": "workflow that can be cancelled",
+            "workflowJson": {
+                "start": "step1",
+                "nodes": [
+                    {
+                        "id": "step1",
+                        "type": "python",
+                        "code": "import time\ntime.sleep(0.2)\noutputs['value'] = 1",
+                    },
+                    {
+                        "id": "step2",
+                        "type": "python",
+                        "code": "outputs['value'] = inputs['value'] + 1",
+                    },
+                ],
+                "edges": [
+                    {"from": "step1", "to": "step2", "mapping": {"value": "value"}},
+                ],
+            },
+        }
+        create_resp = await client.post("/api/workflow", json=payload)
+        assert create_resp.status_code == status.HTTP_201_CREATED, create_resp.text
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        assert run_resp.status_code == status.HTTP_200_OK, run_resp.text
+        exec_id = run_resp.json()["id"]
+
+        cancel_resp = await client.post(f"/api/workflow/{wf_id}/history/{exec_id}/cancel")
+        assert cancel_resp.status_code == status.HTTP_200_OK, cancel_resp.text
+        assert cancel_resp.json()["status"] == "accepted"
+
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "cancelled"
+        assert len(final["executionLog"]) == 1
+        assert final["executionLog"][0]["node_id"] == "step1"
+
+    @pytest.mark.asyncio
+    async def test_cancel_completed_workflow_execution_is_ignored(self, client: AsyncClient):
+        """Cancelling an already-finished workflow should return an ignored response."""
+        create_resp = await client.post("/api/workflow", json=_WORKFLOW_PAYLOAD)
+        wf_id = create_resp.json()["id"]
+
+        run_resp = await client.post(f"/api/workflow/{wf_id}/run", json={"inputs": {}})
+        exec_id = run_resp.json()["id"]
+        final = await _wait_for_execution_terminal_state(client, wf_id, exec_id)
+        assert final["status"] == "success"
+
+        cancel_resp = await client.post(f"/api/workflow/{wf_id}/history/{exec_id}/cancel")
+        assert cancel_resp.status_code == status.HTTP_200_OK, cancel_resp.text
+        assert cancel_resp.json()["status"] == "ignored"
+
+
+# ===========================================================================
+# Provider routes
+# ===========================================================================
+
+class TestProviderRoutes:
+
+    @pytest.mark.asyncio
+    async def test_list_providers_returns_expected_shape(self, client: AsyncClient, monkeypatch):
+        """GET /api/provider returns dict with all/default/connected keys."""
+        from aegisops.config.config_writer import ConfigWriter
+
+        monkeypatch.setattr(ConfigWriter, "list_provider_ids", lambda: ["anthropic"])
+        resp = await client.get("/api/provider")
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()
+        assert "all" in data
+        assert isinstance(data["all"], list)
+        assert len(data["all"]) > 0
+        assert [item["id"] for item in data["all"]] == ["anthropic"]
+        assert data["connected"] == ["anthropic"]
+
+    @pytest.mark.asyncio
+    async def test_provider_model_fields(self, client: AsyncClient):
+        """Each provider has the required fields."""
+        resp = await client.get("/api/provider")
+        for provider in resp.json()["all"]:
+            assert "id" in provider
+            assert "name" in provider
+            assert "models" in provider
+
+    @pytest.mark.asyncio
+    async def test_get_specific_provider(self, client: AsyncClient):
+        """GET /api/provider/anthropic returns anthropic provider details."""
+        resp = await client.get("/api/provider/anthropic")
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()
+        assert data["id"] == "anthropic"
+
+    @pytest.mark.asyncio
+    async def test_get_unknown_provider_returns_404(self, client: AsyncClient):
+        """GET for a non-existent provider returns 404."""
+        resp = await client.get("/api/provider/this_provider_does_not_exist")
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_provider_models_endpoint(self, client: AsyncClient):
+        """GET /api/provider/openai/models returns a list of models."""
+        resp = await client.get("/api/provider/openai/models")
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()
+        assert isinstance(data, list)
+        if data:
+            model = data[0]
+            assert "id" in model
+            assert "name" in model
+
+    @pytest.mark.asyncio
+    async def test_set_credential_unknown_provider_returns_error(
+        self, client: AsyncClient
+    ):
+        """Updating an unknown provider via PUT /{id} returns 400 or 404."""
+        resp = await client.put(
+            "/api/provider/nonexistent_prov_xyz",
+            json={"apiKey": "fake-key"},
+        )
+        # PUT /{provider_id} should fail for a completely unknown provider
+        assert resp.status_code in (
+            status.HTTP_400_BAD_REQUEST,
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_405_METHOD_NOT_ALLOWED,
+            status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status.HTTP_200_OK,  # some providers may create on upsert
+        )
+
+
+# ===========================================================================
+# Config routes
+# ===========================================================================
+
+def test_http_mutation_routers_do_not_wrap_action_lifecycle() -> None:
+    """HTTP mutation routes must not enter generic action approval hooks."""
+    from aegisops.server.routes import agent as agent_routes
+    from aegisops.server.routes import channel as channel_routes
+    from aegisops.server.routes import config as config_routes
+    from aegisops.server.routes import mcp as mcp_routes
+    from aegisops.server.routes import skill as skill_routes
+    from aegisops.server.routes import workflow as workflow_routes
+
+    routers = (
+        agent_routes.router,
+        channel_routes.router,
+        config_routes.router,
+        mcp_routes.router,
+        skill_routes.router,
+        workflow_routes.router,
+        workflow_routes.webhook_router,
+    )
+
+    assert all(type(router) is APIRouter for router in routers)
+
+
+class TestConfigRoutes:
+    @pytest.mark.asyncio
+    async def test_get_config_returns_object(self, client: AsyncClient):
+        """GET /api/config returns a configuration object."""
+        resp = await client.get("/api/config")
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()
+        assert isinstance(data, dict)
+
+    @pytest.mark.asyncio
+    async def test_update_config_invalidates_channel_config_cache(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """PATCH /api/config must invalidate in-memory channel config cache."""
+        from aegisops.server.routes import config as config_routes
+
+        invalidate_calls: list[str | None] = []
+
+        monkeypatch.setattr(
+            config_routes.Config,
+            "update",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            config_routes.Config,
+            "clear_cache",
+            lambda: None,
+        )
+
+        def _invalidate(channel_id: str | None = None) -> None:
+            invalidate_calls.append(channel_id)
+
+        monkeypatch.setattr(
+            "aegisops.channel.inbound.dispatcher.invalidate_channel_config_cache",
+            _invalidate,
+        )
+        monkeypatch.setattr(
+            config_routes,
+            "get_config",
+            AsyncMock(return_value={}),
+        )
+
+        resp = await client.patch(
+            "/api/config/",
+            json={
+                "channels": {
+                    "weixin": {"enabled": True},
+                    "feishu": {"enabled": False},
+                }
+            },
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert invalidate_calls == ["weixin", "feishu"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section,name", [
+        ("agent", "rex"), ("agent", "sisyphus"), ("mode", "sisyphus"),
+        ("tool_settings", "get_time"),
+    ])
+    @pytest.mark.parametrize("group", ["Changed", "", None])
+    async def test_locked_group_preflight_precedes_config_and_secret_writes(
+        self, monkeypatch, section, name, group,
+    ):
+        from aegisops.agent.registry import Agent
+        from aegisops.server.routes import config as config_routes
+        from aegisops.security import channel_secrets
+        from aegisops.tool.registry import ToolRegistry
+
+        update = AsyncMock()
+        extract = Mock()
+        agent_check = AsyncMock(side_effect=ValueError("System definition group is read-only"))
+        tool_check = Mock(side_effect=ValueError("System definition group is read-only"))
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
+        monkeypatch.setattr(Agent, "validate_group_settings", agent_check)
+        monkeypatch.setattr(ToolRegistry, "validate_group_settings", tool_check)
+        payload = {
+            section: {name: {"group": group}},
+            "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
+        }
+
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config(_admin_request(), payload)
+
+        assert exc.value.status_code == status.HTTP_403_FORBIDDEN
+        update.assert_not_awaited()
+        extract.assert_not_called()
+        if section == "tool_settings":
+            tool_check.assert_called_once_with(payload[section])
+            agent_check.assert_not_awaited()
+        else:
+            agent_check.assert_awaited_once_with(payload[section])
+            tool_check.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_non_group_settings_and_user_instances_do_not_enter_definition_guard(
+        self, monkeypatch,
+    ):
+        from aegisops.agent.registry import Agent
+        from aegisops.server.routes import config as config_routes
+        from aegisops.tool.registry import ToolRegistry
+
+        agent_check = AsyncMock(side_effect=AssertionError("No definition group was supplied"))
+        tool_check = Mock(side_effect=AssertionError("No definition group was supplied"))
+        update = AsyncMock()
+        monkeypatch.setattr(Agent, "validate_group_settings", agent_check)
+        monkeypatch.setattr(ToolRegistry, "validate_group_settings", tool_check)
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(config_routes.Config, "clear_cache", lambda: None)
+        monkeypatch.setattr(config_routes, "get_config", AsyncMock(return_value={"saved": True}))
+        payload = {
+            "agent": {"rex": {"temperature": 0.2}},
+            "tool_settings": {"get_time": {"enabled": False}},
+            "mcp": {"configured-server": {"type": "remote", "url": "http://127.0.0.1:9/unused", "group": "Personal"}},
+            "api_services": {"configured_v1": {"group": None}},
+        }
+
+        assert await config_routes.update_config(_admin_request(), payload) == {"saved": True}
+
+        agent_check.assert_not_awaited()
+        tool_check.assert_not_called()
+        update.assert_awaited_once()
+        saved = update.await_args.args[0]
+        assert saved.agent["rex"].temperature == 0.2
+        assert saved.api_services["configured_v1"]["group"] == ""
+
+    @pytest.mark.asyncio
+    async def test_invalid_group_fails_before_secret_extraction(self, monkeypatch):
+        from aegisops.server.routes import config as config_routes
+        from aegisops.security import channel_secrets
+
+        update = AsyncMock()
+        extract = Mock()
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config(_admin_request(), {
+                "agent": {"custom": {"group": ["invalid"]}},
+                "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
+            })
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        update.assert_not_awaited()
+        extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["mcp", "api_services"])
+    @pytest.mark.parametrize("group", [["invalid"], {"bad": True}, 1, True, "x" * 33, "line\nbreak", "nul\x00value"])
+    async def test_invalid_service_group_is_rejected_before_any_side_effect(self, monkeypatch, section, group):
+        from aegisops.server.routes import config as config_routes
+        from aegisops.security import channel_secrets
+
+        update = AsyncMock()
+        extract = Mock(side_effect=AssertionError("Group must be validated before secrets are extracted"))
+        monkeypatch.setattr(config_routes.Config, "update", update)
+        monkeypatch.setattr(channel_secrets, "extract_channel_secrets", extract)
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config(_admin_request(), {
+                section: {"configured-instance": {"group": group}},
+                "channels": {"slack": {"botToken": "synthetic-not-a-real-token"}},
+            })
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        update.assert_not_awaited()
+        extract.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("section", ["mcp", "api_services"])
+    @pytest.mark.parametrize("group", [None, "", "  Operations  ", "安" * 32])
+    async def test_service_group_preflight_accepts_valid_instance_values(self, section, group):
+        from aegisops.server.routes import config as config_routes
+
+        payload = {section: {"configured-instance": {"group": group}}}
+        await config_routes._validate_plugin_group_updates(payload)
+        assert payload[section]["configured-instance"]["group"] == group
+
+    @pytest.mark.asyncio
+    async def test_failed_agent_config_write_keeps_agent_cache(self, monkeypatch):
+        from aegisops.agent.registry import Agent
+        from aegisops.server.routes import config as config_routes
+
+        invalidate = Mock()
+        monkeypatch.setattr(Agent, "validate_group_settings", AsyncMock())
+        monkeypatch.setattr(Agent, "invalidate_cache", invalidate)
+        monkeypatch.setattr(config_routes.Config, "update", AsyncMock(side_effect=OSError("write failed")))
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config(_admin_request(), {"agent": {"custom": {"group": "After"}}})
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        invalidate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_config_has_expected_top_level_keys(self, client: AsyncClient):
+        """Config response contains expected top-level keys."""
+        resp = await client.get("/api/config")
+        data = resp.json()
+        # At least one of these should be present
+        expected_keys = {"model", "provider", "agent", "theme", "memory", "mcp"}
+        present = expected_keys.intersection(data.keys())
+        assert len(present) > 0, (
+            f"No expected keys found. Got: {list(data.keys())}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_null_allow_from_deletes_existing_channel_field(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """channels.<id>.allowFrom=null removes the persisted allowlist."""
+        from aegisops.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "aegisops.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(
+            json.dumps(
+                {
+                    "channels": {
+                        "slack": {
+                            "enabled": False,
+                            "allowFrom": ["U123"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        async def fake_get_config(*_args):
+            return {}
+
+        monkeypatch.setattr(config_routes, "get_config", fake_get_config)
+
+        await config_routes.update_config(_admin_request(),
+            {"channels": {"slack": {"enabled": False, "allowFrom": None}}}
+        )
+
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "allowFrom" not in saved["channels"]["slack"]
+        assert saved["channels"]["slack"]["dmPolicy"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_slack_allow_from_save_sets_dm_policy_allowlist(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Slack allowFrom must also enable DM allowlist enforcement."""
+        from aegisops.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "aegisops.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        async def fake_get_config(*_args):
+            return {}
+
+        monkeypatch.setattr(config_routes, "get_config", fake_get_config)
+
+        await config_routes.update_config(_admin_request(),
+            {"channels": {"slack": {"enabled": False, "allowFrom": ["U123"]}}}
+        )
+
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert saved["channels"]["slack"]["allowFrom"] == ["U123"]
+        assert saved["channels"]["slack"]["dmPolicy"] == "allowlist"
+
+    @pytest.mark.asyncio
+    async def test_invalid_patch_does_not_delete_channel_allow_from(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A failing PATCH must not relax persisted channel allowlists."""
+        from aegisops.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "aegisops.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(
+            json.dumps(
+                {
+                    "share": "manual",
+                    "channels": {
+                        "slack": {
+                            "enabled": False,
+                            "allowFrom": ["U123"],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config(_admin_request(),
+                {
+                    "share": "invalid-mode",
+                    "channels": {"slack": {"allowFrom": None}},
+                }
+            )
+
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert saved["channels"]["slack"]["allowFrom"] == ["U123"]
+
+    @pytest.mark.asyncio
+    async def test_tool_failure_preference_defaults_on_and_updates_only_its_section(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        from aegisops.config.config import Config
+        from aegisops.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path / "config"))
+        Config._global_config = None
+        Config._cached_config = None
+        ConfigWriter._write_raw({"theme": "dark"})
+
+        resp = await client.get("/api/config/tool-failure")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": True}
+
+        resp = await client.patch(
+            "/api/config/tool-failure",
+            json={"disableOnRepeatedFailure": False},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": False}
+        assert ConfigWriter._read_raw() == {
+            "theme": "dark",
+            "toolFailure": {"disableOnRepeatedFailure": False},
+        }
+
+        resp = await client.get("/api/config/tool-failure")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": False}
+
+        resp = await client.patch("/api/config/tool-failure", json={})
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+    @pytest.mark.asyncio
+    async def test_ui_display_defaults_and_updates(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        """UI display-name endpoints expose only the visible product name."""
+        from aegisops.config.config import Config
+        from aegisops.server import branding
+
+        monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path / "config"))
+        # 没有任何 branding 扩展注册时用开源默认名
+        monkeypatch.setattr(branding, "_providers", [])
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "AegisOps",
+            "configuredDisplayName": None,
+            "faviconUrl": None,
+        }
+
+        resp = await client.patch("/api/config/ui", json={"displayName": "  Acme SOC  "})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Acme SOC",
+            "configuredDisplayName": "Acme SOC",
+            "faviconUrl": None,
+        }
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Acme SOC"
+
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"></svg>'
+        resp = await client.post(
+            "/api/config/ui/favicon",
+            files={"file": ("favicon.svg", svg, "image/svg+xml")},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        assert data["displayName"] == "Acme SOC"
+        assert data["faviconUrl"].startswith("/api/config/ui-favicon?v=")
+
+        favicon_resp = await client.get(data["faviconUrl"])
+        assert favicon_resp.status_code == status.HTTP_200_OK
+        assert favicon_resp.content == svg
+        assert (tmp_path / "config" / "assets" / "favicon.svg").is_file()
+
+        resp = await client.delete("/api/config/ui/favicon")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["faviconUrl"] is None
+
+    @pytest.mark.asyncio
+    async def test_ui_display_defaults_to_the_registered_branding_provider(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Empty display-name config falls back to the registered branding provider."""
+        from aegisops.config.config import Config
+        from aegisops.server import branding
+
+        class _CustomBranding:
+            # Any extension may supply a display name through the branding protocol.
+            def display_name(self):
+                return "Sample Workspace"
+
+        monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(branding, "_providers", [])
+        branding.register_branding_provider(_CustomBranding())
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Sample Workspace",
+            "configuredDisplayName": None,
+            "faviconUrl": None,
+        }
+
+        resp = await client.patch("/api/config/ui", json={"displayName": "  Acme Pro  "})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Acme Pro"
+        assert resp.json()["configuredDisplayName"] == "Acme Pro"
+
+        resp = await client.patch("/api/config/ui", json={"displayName": ""})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Sample Workspace"
+        assert resp.json()["configuredDisplayName"] is None
+
+    @pytest.mark.parametrize(
+        "svg",
+        [
+            b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.com/x.png"/></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><path fill="url(https://example.com/g)"/></svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg"></svg>'.encode("utf-16"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_ui_favicon_rejects_unsafe_svg(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+        svg: bytes,
+    ):
+        """SVG favicons are accepted only when they fit the safe favicon subset."""
+        from aegisops.config.config import Config
+
+        monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(tmp_path / "config"))
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.post(
+            "/api/config/ui/favicon",
+            files={"file": ("favicon.svg", svg, "image/svg+xml")},
+        )
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert not (tmp_path / "config" / "assets" / "favicon.svg").exists()
+
+        display_resp = await client.get("/api/config/ui-display")
+        assert display_resp.status_code == status.HTTP_200_OK
+        assert display_resp.json()["faviconUrl"] is None
+
+
+# ===========================================================================
+# Permission routes
+# ===========================================================================
+
+class TestPermissionRoutes:
+
+    @pytest.mark.asyncio
+    async def test_list_permissions_returns_array(self, client: AsyncClient):
+        """GET /permission returns a list (may be empty)."""
+        resp = await client.get("/permission")
+        assert resp.status_code == status.HTTP_200_OK
+        data = resp.json()
+        assert isinstance(data, list)
+
+    @pytest.mark.asyncio
+    async def test_reply_to_unknown_permission_returns_404(
+        self, client: AsyncClient
+    ):
+        """POST /permission/{id}/reply for non-existent permission returns 404."""
+        resp = await client.post(
+            "/permission/perm_nonexistent_000000/reply",
+            json={"allow": True, "always": False},
+        )
+        assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_reply_missing_allow_field_returns_422(self, client: AsyncClient):
+        """Permission reply without 'allow' field returns 422."""
+        resp = await client.post(
+            "/permission/perm_some_id/reply",
+            json={},
+        )
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    @pytest.mark.asyncio
+    async def test_permission_routes_preserve_request_created_time(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+        """List/detail routes should expose the stored permission request timestamp."""
+        from aegisops.permission.next import PermissionRequestInfo
+        from aegisops.session.session import SessionInfo
+
+        info = PermissionRequestInfo(
+            id="perm_time_test",
+            sessionID="ses_time_test",
+            permission="bash",
+            patterns=["*"],
+            metadata={"messageID": "msg_time_test"},
+            always=["*"],
+            tool={"name": "bash"},
+            time={"created": 1234567890},
+        )
+
+        monkeypatch.setattr(
+            "aegisops.server.routes.permission.PermissionNext.list_pending_infos",
+            AsyncMock(return_value=[info]),
+        )
+        monkeypatch.setattr(
+            "aegisops.server.routes.permission.PermissionNext.get_pending_info",
+            AsyncMock(return_value=info),
+        )
+        monkeypatch.setattr(
+            "aegisops.server.routes.permission.Session.get_by_id",
+            AsyncMock(return_value=SessionInfo(
+                id="ses_time_test",
+                project_id="test",
+                directory="/tmp",
+                title="Permission route test",
+                owner_user_id="api-token-service",
+                owner_username="api-token-service",
+            )),
+        )
+
+        list_resp = await client.get("/permission")
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert list_resp.json()[0]["time"]["created"] == 1234567890
+
+        detail_resp = await client.get("/permission/perm_time_test")
+        assert detail_resp.status_code == status.HTTP_200_OK
+        assert detail_resp.json()["time"]["created"] == 1234567890
+
+    @pytest.mark.asyncio
+    async def test_api_prefix_permission_endpoint(self, client: AsyncClient):
+        """Both /api/question/{id}/reply and /question/{id}/reply return 404 for unknown."""
+        for prefix in ("/api/question", "/question"):
+            resp = await client.post(
+                f"{prefix}/question_nonexistent/reply",
+                json={"answers": [["a"]]},
+            )
+            assert resp.status_code == status.HTTP_404_NOT_FOUND

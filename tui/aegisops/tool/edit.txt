@@ -1,0 +1,10 @@
+Performs one or more targeted string replacements in an existing file.
+
+Usage:
+- Pass every replacement inside the required `edits` array: `{"filePath":"path/to/file","edits":[{"oldString":"current text","newString":"replacement text"}]}`.
+- You must use your `Read` tool at least once before editing a file. After each successful edit, re-read the file before making another edit call because the file contents have changed.
+- Each `edits[].oldString` is matched against the original file snapshot. It must be non-empty, unique, and must not overlap another replacement in the same call.
+- When editing text from Read tool output, preserve the exact indentation after the `NNNNN| ` line-number prefix. Never include the prefix itself in `oldString` or `newString`.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
+- If a target is missing or appears more than once, provide a larger unique snippet from the current file contents.

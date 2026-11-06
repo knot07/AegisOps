@@ -1,0 +1,712 @@
+"""
+MCP Server Manager
+
+Manages MCP server lifecycle: connection, disconnection, status tracking, tool registration, etc.
+"""
+
+import asyncio
+import time
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
+from typing import AsyncIterator, Dict, Optional, Any, List
+from aegisops.mcp.client import McpClient
+from aegisops.mcp.errors import McpServerBusyError, McpServerNotConnectedError, is_method_not_found_error
+from aegisops.mcp.types import (
+    McpStatus,
+    McpStatusInfo,
+    McpServerInfo,
+    McpToolDef,
+    McpResource,
+    ServerConfig
+)
+from aegisops.mcp.adapter import McpToolAdapter
+from aegisops.mcp.registry import McpToolRegistry
+from aegisops.config.config import Config
+from aegisops.utils.log import Log
+
+log = Log.create(service="mcp.server")
+
+# Retry configuration for failed connections at startup
+_RETRY_DELAYS = [5, 15, 30, 60, 120]  # seconds between retries
+
+# Servers whose state per connection one conversation must not share with
+# another get a connection per conversation (a root session with its
+# sub-agents). A server opts in with ``isolation: "session"`` in its config;
+# REA keeps its evidence ledger per connection (rea-agents MCP contract), so it
+# is isolated under a registration written before the field existed as well.
+_SESSION_ISOLATED_BY_DEFAULT = frozenset({"rea"})
+# Per isolated server and process. A new conversation over the limit takes the
+# place of the connection idle longest; one idle this long goes on the next use.
+MAX_SCOPED_CLIENTS = 4
+SCOPED_IDLE_SECONDS = 20 * 60
+
+
+@dataclass(eq=False)
+class _ScopedClient:
+    client: McpClient
+    config: Dict[str, Any]
+    in_flight: int = 0
+    last_used: float = field(default_factory=time.monotonic)
+    retired: bool = False
+
+
+class McpServerManager:
+    """
+    MCP Server Manager
+
+    Responsibilities:
+    - Manage connections to multiple MCP servers
+    - Discover and register tools
+    - Track server status
+    - Handle reconnection and error recovery
+
+    Credentials are resolved at config load time via {secret:xxx} references
+    in ~/.aegisops/config/aegisops.json. The resolved config is passed directly here.
+    """
+
+    def __init__(self):
+        """Initialize server manager"""
+        self._clients: Dict[str, McpClient] = {}
+        self._status: Dict[str, McpStatusInfo] = {}
+        self._tools_cache: Dict[str, List[McpToolDef]] = {}
+        self._resources_cache: Dict[str, List[McpResource]] = {}
+        self._configs: Dict[str, Dict[str, Any]] = {}  # saved for retry
+        # Isolated servers: server -> conversation scope -> its own connection.
+        self._scoped: Dict[str, Dict[str, _ScopedClient]] = {}
+        self._scoped_locks: Dict[str, asyncio.Lock] = {}
+        # Moves whenever a server's conversation connections are retired.
+        self._scoped_generation: Dict[str, int] = {}
+        self._lock = asyncio.Lock()
+        self._init_lock = asyncio.Lock()
+        self._initialized = False
+        self._retry_task: Optional[asyncio.Task] = None
+
+    async def init(self) -> None:
+        """
+        Initialize all configured MCP servers
+
+        Load server configurations from config file and start all enabled servers in parallel.
+        Servers that fail to connect will be retried in the background with exponential backoff.
+        """
+        async with self._init_lock:
+            if self._initialized:
+                # ``MCP.init`` is invoked from both the global server lifespan and
+                # the per-instance bootstrap on startup.  The guard above keeps the
+                # call idempotent, so this is informational only and should not
+                # surface as a warning in operational logs.
+                log.debug("mcp.already_initialized")
+                return
+
+            log.info("mcp.initializing")
+
+            # Load configuration
+            config = await Config.get()
+            mcp_config = getattr(config, 'mcp', None)
+
+            if not mcp_config or not isinstance(mcp_config, dict):
+                log.info("mcp.no_config", {"message": "No MCP servers configured"})
+                self._initialized = True
+                return
+
+            # Filter enabled servers — config values may be Pydantic models (McpLocalConfig /
+            # McpRemoteConfig) or plain dicts depending on how Pydantic validated the Union type.
+            # Normalize everything to plain dicts so _connect_and_register can use dict access.
+            enabled_servers: Dict[str, Dict[str, Any]] = {}
+            for name, server_config in mcp_config.items():
+                if hasattr(server_config, 'model_dump'):
+                    cfg: Dict[str, Any] = server_config.model_dump(exclude_none=True)
+                elif isinstance(server_config, dict):
+                    cfg = server_config
+                else:
+                    continue
+                if cfg.get('enabled', True):
+                    enabled_servers[name] = cfg
+
+            if not enabled_servers:
+                log.info("mcp.no_enabled_servers")
+                self._initialized = True
+                return
+
+            # Save configs for retry
+            self._configs.update(enabled_servers)
+
+            log.info("mcp.starting_servers", {
+                "total": len(enabled_servers),
+                "servers": list(enabled_servers.keys())
+            })
+
+            # Start all servers in parallel (allow partial failures)
+            tasks = [
+                self._connect_and_register(name, server_config)
+                for name, server_config in enabled_servers.items()
+            ]
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Count results
+            succeeded = sum(1 for r in results if not isinstance(r, Exception))
+            failed = len(results) - succeeded
+
+            self._initialized = True
+
+            log.info("mcp.initialized", {
+                "total": len(results),
+                "succeeded": succeeded,
+                "failed": failed
+            })
+
+            # Start background retry task for any failed connections
+            if failed > 0:
+                self._retry_task = asyncio.create_task(self._retry_failed_servers())
+
+    async def _retry_failed_servers(self) -> None:
+        """
+        Background task: retry servers that failed to connect at startup.
+
+        Uses a fixed retry schedule (_RETRY_DELAYS). Stops retrying a server
+        once it connects successfully or is manually removed/disabled.
+        """
+        for delay in _RETRY_DELAYS:
+            await asyncio.sleep(delay)
+
+            failed_servers = {
+                name: cfg
+                for name, cfg in self._configs.items()
+                if self._status.get(name, McpStatusInfo(status=McpStatus.FAILED)).status == McpStatus.FAILED
+                and name not in self._clients
+            }
+
+            if not failed_servers:
+                log.info("mcp.retry.all_connected")
+                return
+
+            log.info("mcp.retry.attempt", {
+                "servers": list(failed_servers.keys()),
+                "next_delay": delay
+            })
+
+            tasks = [
+                self._connect_and_register(name, cfg)
+                for name, cfg in failed_servers.items()
+            ]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Final check after last retry
+        still_failed = [
+            name for name in self._configs
+            if self._status.get(name, McpStatusInfo(status=McpStatus.FAILED)).status == McpStatus.FAILED
+            and name not in self._clients
+        ]
+        if still_failed:
+            log.warn("mcp.retry.exhausted", {"servers": still_failed})
+
+    async def _connect_and_register(
+        self,
+        name: str,
+        config: Dict[str, Any]
+    ) -> None:
+        """
+        Connect to server and register tools
+
+        Complete workflow:
+        1. Create client
+        2. Connect to server
+        3. Discover tools and resources
+        4. Register tools to ToolRegistry
+        5. Update status
+
+        Args:
+            name: Server name
+            config: Server configuration
+        """
+        try:
+            log.info("mcp.connecting", {"server": name})
+
+            # 1. Create client
+            client = self._new_client(name, config)
+
+            # 2. Connect
+            await client.connect()
+            self._clients[name] = client
+
+            # 3. Discover tools
+            tools = await client.list_tools()
+            self._tools_cache[name] = tools
+
+            # 4. Discover resources (optional)
+            try:
+                resources = await client.list_resources()
+                self._resources_cache[name] = resources
+            except Exception as e:
+                if is_method_not_found_error(e):
+                    log.info("mcp.resources_unsupported", {"server": name})
+                else:
+                    log.warn("mcp.resources_unavailable", {
+                        "server": name,
+                        "error": str(e)
+                    })
+                self._resources_cache[name] = []
+
+            # 5. Register tools
+            registered_count = await self._register_tools(name, tools, client)
+
+            # 6. Update status
+            self._status[name] = McpStatusInfo(
+                status=McpStatus.CONNECTED,
+                connected_at=time.time(),
+                tools_count=len(tools),
+                resources_count=len(self._resources_cache.get(name, []))
+            )
+
+            log.info("mcp.server_ready", {
+                "server": name,
+                "tools": len(tools),
+                "resources": len(self._resources_cache.get(name, [])),
+                "registered": registered_count
+            })
+
+        except Exception as e:
+            log.error("mcp.connect_failed", {
+                "server": name,
+                "error": str(e)
+            })
+            self._status[name] = McpStatusInfo(
+                status=McpStatus.FAILED,
+                error=str(e)
+            )
+            raise  # Propagate exception for gather to capture
+
+    @staticmethod
+    def _new_client(name: str, config: Dict[str, Any]) -> McpClient:
+        # Credentials are already resolved via {secret:xxx} in config loading.
+        server_env = config.get("environment")
+        if server_env is None:
+            server_env = config.get("env")
+        return McpClient(
+            name=name,
+            server_type=config['type'],
+            url=config.get('url'),
+            command=config.get('command'),
+            headers=config.get('headers'),
+            env=server_env,
+            auth_config=config.get('auth'),
+            transport=config.get('transport', 'auto'),
+            timeout=config.get('timeout', 30.0)
+        )
+
+    def server_config(self, name: str) -> Optional[Dict[str, Any]]:
+        """The configuration ``name`` was last connected (or tried) with in this process."""
+        return self._configs.get(name)
+
+    def isolation(self, name: str) -> Optional[str]:
+        """``"session"`` when each conversation gets its own connection to ``name``."""
+        configured = (self._configs.get(name) or {}).get("isolation")
+        if configured is not None:
+            return str(configured)
+        return "session" if name in _SESSION_ISOLATED_BY_DEFAULT else None
+
+    @asynccontextmanager
+    async def scoped_client(self, name: str, scope: str) -> AsyncIterator[McpClient]:
+        """The connection of conversation ``scope`` to the isolated server ``name``.
+
+        Opened on first use, from the configuration the server is connected
+        with; kept until it idles out, the server is reconnected or removed.
+        """
+        entry = await self._acquire_scoped(name, scope)
+        try:
+            yield entry.client
+        finally:
+            entry.in_flight -= 1
+            entry.last_used = time.monotonic()
+            if entry.retired and entry.in_flight == 0:
+                await self._close_scoped(name, entry)
+
+    async def _acquire_scoped(self, name: str, scope: str) -> _ScopedClient:
+        config = self._configs.get(name)
+        entry = self._scoped.get(name, {}).get(scope)
+        # No await between the lookup and the count: nothing can retire it in between.
+        if (entry is not None and not entry.retired and config is not None and entry.config is config
+                and name in self._clients):
+            entry.in_flight += 1
+            return entry
+        lock = self._scoped_locks.setdefault(name, asyncio.Lock())
+        async with lock:
+            # Everything a reconnect or removal could change is read before the first await.
+            generation = self._scoped_generation.get(name, 0)
+            config = self._configs.get(name)
+            if config is None or name not in self._clients:
+                raise McpServerNotConnectedError(f"Server not connected: {name}")
+            clients = self._scoped.setdefault(name, {})
+            now = time.monotonic()
+            closing = [
+                clients.pop(key) for key, item in list(clients.items())
+                if item.config is not config or (item.in_flight == 0 and now - item.last_used > SCOPED_IDLE_SECONDS)
+            ]
+            entry = clients.get(scope)
+            if entry is None and len(clients) >= MAX_SCOPED_CLIENTS:
+                idle = [key for key, item in clients.items() if item.in_flight == 0]
+                if not idle:
+                    for old in closing:
+                        old.retired = True
+                        if old.in_flight == 0:
+                            await self._close_scoped(name, old)
+                    raise McpServerBusyError(
+                        f"All {MAX_SCOPED_CLIENTS} conversation connections to {name} are in use; try again shortly"
+                    )
+                closing.append(clients.pop(min(idle, key=lambda key: clients[key].last_used)))
+            for old in closing:
+                old.retired = True
+                if old.in_flight == 0:
+                    await self._close_scoped(name, old)
+            created = entry is None
+            if created:
+                client = self._new_client(name, config)
+                await client.connect()
+                entry = _ScopedClient(client=client, config=config)
+            if (self._scoped_generation.get(name, 0) != generation or self._configs.get(name) is not config
+                    or name not in self._clients or self._scoped.get(name) is not clients or entry.retired):
+                # Removed or reconnected meanwhile: never hand out a connection the manager no longer tracks.
+                if created:
+                    await self._close_scoped(name, entry)
+                raise McpServerNotConnectedError(f"Server not connected: {name}")
+            if created:
+                clients[scope] = entry
+                log.info("mcp.scoped_connected", {"server": name, "connections": len(clients)})
+            entry.in_flight += 1
+            return entry
+
+    async def close_scope(self, name: str, scope: str) -> None:
+        """Close the connection of ``scope`` (once its calls finish)."""
+        entry = self._scoped.get(name, {}).pop(scope, None)
+        if entry is not None:
+            entry.retired = True
+            if entry.in_flight == 0:
+                await self._close_scoped(name, entry)
+
+    async def _retire_scoped(self, name: str) -> None:
+        """Close every conversation connection of ``name``; busy ones once their calls finish."""
+        self._scoped_generation[name] = self._scoped_generation.get(name, 0) + 1
+        for entry in list(self._scoped.pop(name, {}).values()):
+            entry.retired = True
+            if entry.in_flight == 0:
+                await self._close_scoped(name, entry)
+
+    @staticmethod
+    async def _close_scoped(name: str, entry: _ScopedClient) -> None:
+        try:
+            await entry.client.disconnect()
+        except Exception as e:
+            log.debug("mcp.scoped_disconnect_error", {"server": name, "error": str(e)})
+
+    async def _register_tools(
+        self,
+        server_name: str,
+        tools: List[McpToolDef],
+        client: McpClient
+    ) -> int:
+        """
+        Register tools to ToolRegistry
+
+        Args:
+            server_name: Server name
+            tools: List of tools
+            client: MCP client
+
+        Returns:
+            Number of successfully registered tools
+        """
+        registered = 0
+
+        # Built-in tools must be loaded before MCP tools are added, otherwise
+        # name-conflict detection in the adapter cannot see them and a later
+        # registry init would silently replace the MCP tools.
+        from aegisops.tool import ToolRegistry
+        await ToolRegistry.init_async()
+
+        for mcp_tool in tools:
+            try:
+                # Convert to AegisOps Tool
+                aegisops_tool = McpToolAdapter.convert_tool(
+                    server_name,
+                    mcp_tool,
+                    client
+                )
+
+                # Register to AegisOps ToolRegistry
+                from aegisops.tool import ToolRegistry
+                ToolRegistry.register(aegisops_tool)
+
+                # Track metadata
+                schema_hash = McpToolAdapter.get_schema_hash(mcp_tool)
+                McpToolRegistry.track(
+                    server_name=server_name,
+                    mcp_tool_name=mcp_tool.name,
+                    aegisops_tool_name=aegisops_tool.info.name,
+                    schema_hash=schema_hash
+                )
+
+                registered += 1
+
+                log.debug("mcp.tool_registered", {
+                    "server": server_name,
+                    "mcp_tool": mcp_tool.name,
+                    "aegisops_tool": aegisops_tool.info.name
+                })
+
+            except Exception as e:
+                log.error("mcp.tool_register_failed", {
+                    "server": server_name,
+                    "tool": mcp_tool.name,
+                    "error": str(e)
+                })
+
+        return registered
+
+    async def status(self) -> Dict[str, McpStatusInfo]:
+        """
+        Get status of all servers
+
+        Returns:
+            Dictionary mapping server name to status info
+        """
+        if not self._initialized:
+            await self.init()
+
+        return self._status.copy()
+
+    def status_snapshot(self) -> tuple[Dict[str, McpStatusInfo], bool]:
+        """Return current status without triggering MCP initialization."""
+        return self._status.copy(), self._initialized
+
+    def resources(self) -> Dict[str, McpResource]:
+        """Cached resources of every server, keyed ``<server>:<uri>``."""
+        return {
+            f"{server}:{resource.uri}": resource
+            for server, resources in self._resources_cache.items()
+            for resource in resources
+        }
+
+    async def get_server_info(self, name: str) -> Optional[McpServerInfo]:
+        """
+        Get detailed server information
+
+        Args:
+            name: Server name
+
+        Returns:
+            Server information, or None if not found
+        """
+        status = self._status.get(name)
+        if not status:
+            return None
+
+        return McpServerInfo(
+            name=name,
+            status=status,
+            tools=self._tools_cache.get(name, []),
+            resources=self._resources_cache.get(name, [])
+        )
+
+    async def connect(self, name: str, config: Dict[str, Any]) -> bool:
+        """
+        Connect to specified server
+
+        Args:
+            name: Server name
+            config: Server configuration
+
+        Returns:
+            True if connection successful
+        """
+        async with self._lock:
+            try:
+                if name in self._clients:
+                    # Re-connect: tear down the previous client first so its
+                    # subprocess / session and registered tools are not leaked.
+                    await self._disconnect_locked(name)
+                self._configs[name] = config  # save for potential retry
+                await self._connect_and_register(name, config)
+                return True
+            except Exception as e:
+                log.error("mcp.connect_error", {
+                    "server": name,
+                    "error": str(e)
+                })
+                return False
+
+    async def disconnect(self, name: str) -> bool:
+        """
+        Disconnect from server (keeps status entry as DISCONNECTED).
+
+        Args:
+            name: Server name
+
+        Returns:
+            True if disconnection successful
+        """
+        async with self._lock:
+            return await self._disconnect_locked(name)
+
+    async def _disconnect_locked(self, name: str) -> bool:
+        """Disconnect ``name``; caller must hold ``self._lock``."""
+        if name not in self._clients:
+            return False
+
+        try:
+            await self._retire_scoped(name)
+            # Unregister tools
+            tool_names = McpToolRegistry.untrack_server(name)
+            from aegisops.tool import ToolRegistry
+            for tool_name in tool_names:
+                ToolRegistry.unregister(tool_name)
+
+            # Disconnect client
+            client = self._clients.pop(name)
+            await client.disconnect()
+
+            # Clear cache
+            self._tools_cache.pop(name, None)
+            self._resources_cache.pop(name, None)
+
+            # Update status
+            self._status[name] = McpStatusInfo(status=McpStatus.DISCONNECTED)
+
+            log.info("mcp.disconnected", {"server": name})
+            return True
+
+        except Exception as e:
+            log.error("mcp.disconnect_error", {
+                "server": name,
+                "error": str(e)
+            })
+            return False
+
+    async def remove(self, name: str) -> bool:
+        """
+        Fully remove a server from memory: disconnect, unregister tools,
+        and purge all internal state so the server no longer appears in
+        status/tool listings without a restart.
+
+        Args:
+            name: Server name
+
+        Returns:
+            True always (best-effort cleanup)
+        """
+        async with self._lock:
+            try:
+                await self._retire_scoped(name)
+                # Disconnect client if connected
+                if name in self._clients:
+                    client = self._clients.pop(name)
+                    try:
+                        await client.disconnect()
+                    except Exception as e:
+                        log.debug("mcp.remove.disconnect_error", {"server": name, "error": str(e)})
+
+                # Unregister all tools for this server (works even when not connected)
+                tool_names = McpToolRegistry.untrack_server(name)
+                from aegisops.tool import ToolRegistry
+                for tool_name in tool_names:
+                    ToolRegistry.unregister(tool_name)
+
+                # Purge ALL in-memory state so it never appears again
+                self._status.pop(name, None)
+                self._tools_cache.pop(name, None)
+                self._resources_cache.pop(name, None)
+                self._configs.pop(name, None)  # remove from retry candidates
+
+                log.info("mcp.removed", {"server": name, "tools_removed": len(tool_names)})
+                return True
+
+            except Exception as e:
+                log.error("mcp.remove_error", {"server": name, "error": str(e)})
+                return False
+
+    async def refresh_tools(self, name: str) -> int:
+        """
+        Refresh server's tool list
+
+        Args:
+            name: Server name
+
+        Returns:
+            Number of updated tools
+        """
+        if name not in self._clients:
+            raise McpServerNotConnectedError(f"Server not connected: {name}")
+
+        async with self._lock:
+            try:
+                client = self._clients[name]
+
+                # Fetch tool list again
+                new_tools = await client.list_tools()
+                old_tools = self._tools_cache.get(name, [])
+
+                # Simple strategy: unregister all old tools, register all new tools
+                # TODO: Implement incremental update (P2 feature)
+
+                # Unregister old tools
+                tool_names = McpToolRegistry.untrack_server(name)
+                from aegisops.tool import ToolRegistry
+                for tool_name in tool_names:
+                    ToolRegistry.unregister(tool_name)
+
+                # Register new tools
+                registered = await self._register_tools(name, new_tools, client)
+
+                # Update cache
+                self._tools_cache[name] = new_tools
+
+                log.info("mcp.tools_refreshed", {
+                    "server": name,
+                    "old_count": len(old_tools),
+                    "new_count": len(new_tools),
+                    "registered": registered
+                })
+
+                return registered
+
+            except Exception as e:
+                log.error("mcp.refresh_error", {
+                    "server": name,
+                    "error": str(e)
+                })
+                raise
+
+    async def shutdown(self) -> None:
+        """Shutdown all connections"""
+        log.info("mcp.shutting_down")
+
+        # Cancel background retry task if running
+        if self._retry_task and not self._retry_task.done():
+            self._retry_task.cancel()
+            try:
+                await self._retry_task
+            except asyncio.CancelledError:
+                pass
+        self._retry_task = None
+
+        for name in list(self._scoped):
+            await self._retire_scoped(name)
+        for name, client in list(self._clients.items()):
+            try:
+                await client.disconnect()
+            except Exception as e:
+                log.error("mcp.shutdown_error", {
+                    "server": name,
+                    "error": str(e)
+                })
+
+        self._clients.clear()
+        self._status.clear()
+        self._tools_cache.clear()
+        self._resources_cache.clear()
+        self._configs.clear()
+        self._initialized = False
+
+        log.info("mcp.shutdown_complete")
+
+
+__all__ = ['McpServerManager']

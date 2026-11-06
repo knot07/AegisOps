@@ -1,0 +1,5277 @@
+"""
+Session runner module.
+
+Core session execution logic including:
+- Session loop (message processing)
+- Tool resolution and execution  
+- LLM interaction with tool support
+
+Implements session/prompt.ts SessionPrompt namespace pattern.
+"""
+
+import asyncio
+import copy
+import json
+import os
+import re
+import sys
+import time
+from collections.abc import Mapping
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
+from dataclasses import dataclass, field, replace
+
+import httpcore
+import httpx
+
+from aegisops.utils.log import Log
+from aegisops.utils.id import Identifier
+from aegisops.session.session import Session, SessionInfo
+from aegisops.session.message import (
+    Message,
+    MessageInfo,
+    MessageRole,
+    TextPart,
+    ToolPart,
+    ToolStateCompleted,
+    ToolStateRunning,
+)
+from aegisops.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
+from aegisops.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
+from aegisops.session.core.defaults import (
+    DOOM_LOOP_THRESHOLD,
+    MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS,
+    REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
+)
+from aegisops.provider.concurrency import (
+    PRIORITY_BACKGROUND,
+    PRIORITY_INTERACTIVE,
+    LlmSlot,
+    acquire_llm_slot,
+    report_provider_rate_limited,
+    resolve_max_parallel_subagents,
+)
+from aegisops.session.lifecycle.retry import (
+    CONNECTION_ERROR_DISPLAY_MESSAGE,
+    MAX_ERROR_RETRIES,
+    SessionRetry,
+)
+from aegisops.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
+from aegisops.session.llm_hook_utils import (
+    apply_hook_request_output,
+    serialize_chat_message,
+    stream_text_replacements_from_hook_output,
+)
+from aegisops.session.response_rewriter import SessionResponseRewriter
+from aegisops.session.streaming.model_activity import ModelActivity
+from aegisops.session.streaming.stream_processor import StreamProcessor
+from aegisops.session.streaming.stream_events import (
+    StartEvent,
+    TextStartEvent,
+    TextDeltaEvent,
+    TextEndEvent,
+    FinishEvent,
+    ReasoningStartEvent,
+    ReasoningDeltaEvent,
+    ReasoningEndEvent,
+)
+from aegisops.session.streaming.timeouts import (
+    DEFAULT_FIRST_CHUNK_TIMEOUT_S,
+    DEFAULT_ONGOING_CHUNK_TIMEOUT_S,
+    resolve_llm_stream_timeouts,
+)
+from aegisops.session.callable_schema import list_session_callable_tool_infos
+from aegisops.agent.registry import Agent
+from aegisops.agent.agent import AgentInfo
+from aegisops.agent.toolset import agent_declares_tool
+from aegisops.provider.llm_budget import llm_slot
+from aegisops.provider import output_limits
+from aegisops.provider.provider import Provider, ChatMessage
+from aegisops.provider.reasoning_replay import prepare_reasoning_for_replay
+from aegisops.provider.token_usage import (
+    needs_request_check,
+    resolve_usage,
+    settle_cache_in_prompt,
+)
+from aegisops.hooks.pipeline import HookPipeline, HookStage
+from aegisops.tool.catalog import (
+    get_always_load_tool_names,
+    get_tool_catalog_metadata,
+    list_tool_catalog_infos,
+)
+from aegisops.tool.registry import ToolRegistry, ToolResult
+from aegisops.utils.langfuse import (
+    generation_scope,
+    is_active as langfuse_is_active,
+    resolve_session_trace_context,
+    trace_scope,
+)
+from aegisops.storage.file_mirror import readable_url
+from aegisops.session.utils.file_extractor import (
+    read_file_part_bytes,
+    is_text_extractable_mime,
+    extract_file_text,
+)
+from aegisops.session.execution_mode import (
+    SessionExecutionMode,
+    execution_mode_prompt,
+    is_tool_allowed,
+    runtime_execution_mode,
+)
+from aegisops.session.plan_file import session_plan_file
+
+
+log = Log.create(service="session.runner")
+
+TOOL_RESULT_CHAR_BUDGET_RATIO = 0.70
+TOOL_RESULT_TURN_BUDGET_RATIO = 0.35
+TOOL_RESULT_MIN_CHAR_BUDGET = 8_000
+
+
+def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) -> str:
+    """Append a provider-version annotation so the LLM sees which service version backs the tool.
+
+    Returns the original description (or empty string) unchanged when the tool
+    has no ``provider_version``. Format::
+
+        <original description>
+
+        [Provider: <provider> | Version: <version>]
+
+    The original ``ToolInfo`` is never mutated — a new string is returned.
+    """
+    base = description or ""
+    provider_version = getattr(tool_info, "provider_version", None)
+    if not provider_version:
+        return base
+    provider_label = getattr(tool_info, "provider", None) or "service"
+    note = f"[Provider: {provider_label} | Version: {provider_version}]"
+    if not base.strip():
+        return note
+    return f"{base.rstrip()}\n\n{note}"
+TOOL_RESULT_MIN_TURN_BUDGET = 4_000
+TOOL_RESULT_PREVIEW_CHARS = 160
+
+# Maximum seconds to wait for the *first* chunk from the LLM stream.
+# If the model never starts responding, the stream times out and the session
+# surfaces a clear error rather than hanging forever.
+LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = DEFAULT_FIRST_CHUNK_TIMEOUT_S
+
+# Once the stream has started (at least one chunk received), allow a much
+# longer gap between chunks.  Some models pause for extended periods between
+# reasoning and content generation phases; a tight inter-chunk timeout causes
+# spurious failures in those cases.
+LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = DEFAULT_ONGOING_CHUNK_TIMEOUT_S
+
+_RETRYABLE_TRANSPORT_EXCEPTIONS = (
+    httpx.TransportError,
+    httpcore.NetworkError,
+    httpcore.ProtocolError,
+    httpcore.TimeoutException,
+)
+
+_WORKFLOW_NODE_REF_RE = re.compile(r"^@@node:([^|\n]+)\|([^\n]+)\n?([\s\S]*)$")
+
+
+def _expand_workflow_node_ref(text: str) -> str:
+    """Translate the web UI's node-ref marker into model-readable text.
+
+    WorkflowDetail chat prefixes a user turn with ``@@node:<id>|<type>`` when
+    the user picks a node from the canvas. Before this fix the marker was only
+    rendered/decorated in the UI; the backend passed it through verbatim, so
+    the model saw an opaque token instead of an explicit instruction to focus
+    on that node.
+    """
+    if not text:
+        return text
+    match = _WORKFLOW_NODE_REF_RE.match(text)
+    if not match:
+        return text
+
+    node_id = match.group(1).strip()
+    node_type = match.group(2).strip()
+    user_request = match.group(3).lstrip("\n")
+
+    parts = [
+        "Selected workflow node context:",
+        f"- node_id: {node_id}",
+        f"- node_type: {node_type}",
+        "- Focus the requested workflow modification on this node unless the user explicitly asks for broader workflow changes.",
+    ]
+    if user_request.strip():
+        parts.extend(["", "User request:", user_request])
+    return "\n".join(parts)
+
+
+async def _iter_with_chunk_timeout(
+    aiter,
+    first_chunk_timeout_s: float,
+    ongoing_chunk_timeout_s: float,
+):
+    """Yield chunks from an async generator with adaptive timeouts.
+
+    *first_chunk_timeout_s* applies while waiting for the very first chunk
+    (guards against a completely unresponsive model).  After the first chunk
+    arrives, *ongoing_chunk_timeout_s* is used for subsequent chunks so that
+    models with long pauses mid-stream are not prematurely killed.
+    """
+    received_first = False
+    try:
+        while True:
+            timeout = ongoing_chunk_timeout_s if received_first else first_chunk_timeout_s
+            try:
+                chunk = await asyncio.wait_for(aiter.__anext__(), timeout=timeout)
+                received_first = True
+                yield chunk
+            except StopAsyncIteration:
+                return
+            except asyncio.TimeoutError:
+                phase = "mid-stream" if received_first else "waiting for first response"
+                raise asyncio.TimeoutError(
+                    f"LLM stream timed out after {timeout:.0f}s ({phase}). "
+                    "The model may be overloaded or incompatible. Please try again or switch models."
+                )
+    finally:
+        try:
+            await aiter.aclose()
+        except Exception:
+            pass
+
+
+async def _wait_through_cancel(task: asyncio.Future, timeout_s: float) -> bool:
+    """Wait up to *timeout_s* for *task* even while the caller is being cancelled.
+
+    True when it finished. Only for code already unwinding a cancellation
+    that it re-raises afterwards: a further cancel cannot change how that
+    ends, so it is not allowed to cut the wait short.
+    """
+    deadline = time.monotonic() + timeout_s
+    while not task.done():
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        try:
+            await asyncio.wait({task}, timeout=remaining)
+        except asyncio.CancelledError:
+            continue
+    return True
+
+
+def _read_outcome(task: asyncio.Future) -> None:
+    """Done callback: read the outcome so an unawaited failure is not reported as lost."""
+    if not task.cancelled():
+        task.exception()
+
+
+def _find_retryable_transport_exception(exception: Exception) -> Optional[Exception]:
+    """Return a retryable HTTP transport error from an exception chain."""
+    current: Optional[BaseException] = exception
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _RETRYABLE_TRANSPORT_EXCEPTIONS):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
+
+
+@dataclass
+class ToolCall:
+    """Tool call from LLM response."""
+    id: str
+    name: str
+    arguments: Dict[str, Any]
+
+
+@dataclass
+class LlmAttemptState:
+    """Observable side effects accumulated across retries for one model."""
+
+    received_chunk: bool = False
+    observable_output_started: bool = False
+    tool_execution_started: bool = False
+
+    @property
+    def replay_safe(self) -> bool:
+        """Whether the same logical LLM call can safely run on another model."""
+        return not self.observable_output_started and not self.tool_execution_started
+
+
+@dataclass(frozen=True)
+class FailoverDecision:
+    """Hermes-aligned retry/failover classification for a provider error."""
+
+    eligible: bool
+    reason: str
+
+
+@dataclass
+class StepFailure:
+    """Failure details returned to SessionLoop when finalization is deferred."""
+
+    message: str
+    error_data: Dict[str, Any]
+    assistant_message_id: Optional[str]
+    reason: str
+    allow_fallback: bool
+    attempt_state: LlmAttemptState
+    attempts: int = 0
+
+
+@dataclass
+class StepResult:
+    """Result of a single processing step."""
+    action: str  # "stop", "continue", "compact"
+    content: str = ""
+    tool_calls: List[ToolCall] = field(default_factory=list)
+    error: Optional[str] = None
+    usage: Optional[Dict[str, int]] = None
+    failure: Optional[StepFailure] = None
+    error_code: Optional[str] = None
+    # A streamed tool call was cut off mid-arguments; its part is stored as a
+    # tool error so the next step can react instead of replaying this one.
+    tool_args_truncated: bool = False
+    # Internal execution outcome: a sleep call alone does not prove a successful wait.
+    _successful_sleep: bool = field(default=False, repr=False, compare=False)
+
+
+# Root-session categories whose model requests queue behind interactive work.
+BACKGROUND_SESSION_CATEGORIES = frozenset({"task"})
+
+# Applied the moment a 429 surfaces, before the slot is handed on; the retry
+# branch replaces it with the jittered delay once that is known.
+MIN_RATE_LIMIT_COOLDOWN_S = 1.0
+# How long a stopped step keeps waiting for the write of the text it had
+# already streamed, and then for that write to end once cancelled (see
+# SessionRunner._keep_interrupted_parts).
+_INTERRUPTED_PARTS_WRITE_TIMEOUT_S = 10.0
+_INTERRUPTED_PARTS_CANCEL_GRACE_S = 1.0
+
+
+@dataclass
+class RunnerCallbacks:
+    """Callbacks for runner events."""
+    on_step_start: Optional[Callable[[int], Awaitable[None]]] = None
+    on_step_end: Optional[Callable[[int], Awaitable[None]]] = None
+    on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None
+    on_reasoning_delta: Optional[Callable[[str], Awaitable[None]]] = None
+    on_tool_start: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None
+    on_tool_end: Optional[Callable[[str, ToolResult], Awaitable[None]]] = None
+    on_permission_request: Optional[Callable[[Any], Awaitable[bool]]] = None
+    on_error: Optional[Callable[[str], Awaitable[None]]] = None
+    # SSE event publishing callback (for TUI/WebUI real-time updates)
+    event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None
+
+
+class SessionRunner:
+    """
+    Core session runner.
+    
+    Manages the session execution loop:
+    1. Get messages from session
+    2. Check if LLM response is needed
+    3. Call LLM with tools
+    4. Execute tool calls
+    5. Loop until complete
+    
+    Implements SessionPrompt.loop()
+    """
+    
+    # Class-level state for active sessions
+    _active_sessions: Dict[str, 'SessionRunner'] = {}
+    
+    def __init__(
+        self,
+        session: SessionInfo,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        callbacks: Optional[RunnerCallbacks] = None,
+        abort_event: Optional[asyncio.Event] = None,
+        session_ctx: Optional[Any] = None,  # SessionContext interface
+        memory_bootstrap_data: Optional[Dict[str, Any]] = None,
+        static_cache: Optional[Dict[str, Any]] = None,
+        defer_step_errors: bool = False,
+        failover_available: bool = False,
+        turn_additional_context: Optional[str] = None,
+        session_start_pending: bool = False,
+    ):
+        self.session = session
+        from aegisops.session.core.defaults import fallback_provider_id, fallback_model_id
+        self.provider_id = provider_id or fallback_provider_id()
+        self.model_id = model_id or fallback_model_id()
+        self.agent_name = agent_name or "rex"
+        self.callbacks = callbacks or RunnerCallbacks()
+        self._abort = asyncio.Event()
+        self._external_abort = abort_event  # External abort event (e.g. from SessionLoop)
+        self._step = 0
+        self._recent_tool_calls: List[tuple[str, str]] = []  # Track recent (tool_name, args_json) for doom loop
+        self.session_ctx = session_ctx  # SessionContext interface for decoupled access
+        self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
+        self._static_cache = static_cache if static_cache is not None else {}
+        self._defer_step_errors = defer_step_errors
+        self._failover_available = failover_available
+        self._turn_additional_context = turn_additional_context
+        self._session_start_pending = session_start_pending
+        self._session_start_fired = False
+        self._attempt_state = LlmAttemptState()
+        # Content-free diagnostics; timestamps are Unix seconds, not proof of
+        # useful progress. Parallel calls of the same tool retain their count.
+        self.execution_activity = {
+            "state": "processing", "last_activity_at": time.time(),
+            "request_started_at": None, "active_tools": {},
+        }
+        # Provider request slot held while the model is generating; see
+        # aegisops.provider.concurrency. Released at first tool execution or
+        # when the stream ends, whichever comes first.
+        self._active_llm_slot: Optional[LlmSlot] = None
+        # Workflow LLM budget slot (aegisops.provider.llm_budget) for the same
+        # request; handed back together with the provider slot when an inline
+        # tool starts, since that tool may run a workflow that needs the budget.
+        self._active_budget_slot: Optional[Any] = None
+        self._llm_priority: Optional[int] = None
+
+    @staticmethod
+    def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
+        args_json = json.dumps(
+            arguments or {},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        )
+        return f"{tool_name}:{args_json}"
+
+    def _reset_tool_loop_guard(self, *, last_user_id: Optional[str] = None) -> Dict[str, Any]:
+        state = {
+            "last_user_id": last_user_id or "",
+            "last_signature": "",
+            "exact_count": 0,
+        }
+        self._static_cache["tool_loop_guard"] = state
+        return state
+
+    def _get_tool_loop_guard_state(self, *, last_user_id: Optional[str] = None) -> Dict[str, Any]:
+        state = self._static_cache.get("tool_loop_guard")
+        if not isinstance(state, dict):
+            state = self._reset_tool_loop_guard(last_user_id=last_user_id)
+        elif last_user_id is not None:
+            cached_user_id = str(state.get("last_user_id") or "")
+            if cached_user_id and cached_user_id != last_user_id:
+                state = self._reset_tool_loop_guard(last_user_id=last_user_id)
+            else:
+                state["last_user_id"] = last_user_id
+        return state
+
+    def _output_room_tokens(self) -> Optional[int]:
+        """Output a request can ask for without prompt plus output passing the
+        context window: the overflow check lets the prompt reach the threshold."""
+        try:
+            context_window, max_output, max_input = Provider.resolve_model_info(
+                self.provider_id,
+                self.model_id,
+            )
+        except Exception:
+            return None
+        if not context_window or context_window <= 0:
+            return None
+        policy = CompactionPolicy.from_model(
+            context_window=context_window,
+            max_output_tokens=max_output or 4096,
+            max_input_tokens=max_input,
+        )
+        return max(0, context_window - policy.overflow_threshold)
+
+    def _count_tool_args_truncation(self, *, truncated: bool, last_user_id: str) -> int:
+        """Track consecutive truncated-tool-call steps within one user turn."""
+        state = self._static_cache.get("tool_args_truncation_guard")
+        if not isinstance(state, dict) or state.get("last_user_id") != last_user_id:
+            state = {"last_user_id": last_user_id, "count": 0}
+        state["count"] = int(state.get("count", 0)) + 1 if truncated else 0
+        self._static_cache["tool_args_truncation_guard"] = state
+        return state["count"]
+
+    def _should_warn_about_tool_loop(self, *, last_user_id: str) -> bool:
+        state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
+        return int(state.get("exact_count", 0)) >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
+
+    async def _run_session_start_hook(self, agent: Any) -> None:
+        """Run SessionStart after the first system prompt has been built."""
+        if not self._session_start_pending or self._session_start_fired:
+            return
+        self._session_start_fired = True
+        try:
+            from aegisops.hooks.pipeline import HookPipeline
+
+            await HookPipeline.run_session_start({
+                "sessionID": self.session.id,
+                "workspace": self.session.directory,
+                "agent": agent.name,
+                "model": {
+                    "providerID": self.provider_id,
+                    "modelID": self.model_id,
+                },
+            })
+        except Exception as exc:
+            log.debug("runner.hook.session_start.error", {"error": str(exc)})
+
+    def _build_tool_loop_halt_message(
+        self,
+        *,
+        tool_name: str,
+        count: int,
+    ) -> str:
+        return (
+            f"Stopped the loop because `{tool_name}` was called {count} times in a row "
+            "with the same arguments and kept producing a tool-only turn. Change strategy, "
+            "summarize the blocker, or answer directly instead of repeating the exact same call."
+        )
+
+    @staticmethod
+    def _build_session_error_dict(
+        message: str,
+        *,
+        name: str = "SessionError",
+        display_message: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        error_data = {"message": message}
+        if data:
+            error_data.update(data)
+        if display_message:
+            error_data["displayMessage"] = display_message
+        return {
+            "name": name,
+            "message": message,
+            "data": error_data,
+        }
+
+    async def _publish_assistant_error_message(
+        self,
+        assistant_msg: MessageInfo,
+        *,
+        agent_name: str,
+        parent_id: str,
+        error_dict: Dict[str, Any],
+        text_part: Optional[TextPart] = None,
+    ) -> None:
+        if not self.callbacks.event_publish_callback:
+            return
+        now_ms = int(time.time() * 1000)
+        await self.callbacks.event_publish_callback("message.updated", {
+            "info": {
+                "id": assistant_msg.id,
+                "sessionID": self.session.id,
+                "role": "assistant",
+                "time": {"created": now_ms, "completed": now_ms},
+                "parentID": parent_id,
+                "modelID": self.model_id,
+                "providerID": self.provider_id,
+                "agent": agent_name,
+                "mode": agent_name,
+                "finish": "error",
+                "error": error_dict,
+                "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            }
+        })
+        if text_part is not None:
+            await self.callbacks.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": text_part.id,
+                    "messageID": text_part.messageID,
+                    "sessionID": text_part.sessionID,
+                    "type": "text",
+                    "text": text_part.text,
+                }
+            })
+
+    async def _create_error_assistant_message(
+        self,
+        *,
+        last_user: MessageInfo,
+        agent: AgentInfo,
+        error_message: str,
+        error_dict: Dict[str, Any],
+        visible_text: Optional[str] = None,
+    ) -> MessageInfo:
+        text = visible_text or error_message
+        part_id = Identifier.ascending("part")
+        now_ms = int(time.time() * 1000)
+        assistant_msg = await Message.create(
+            session_id=self.session.id,
+            role=MessageRole.ASSISTANT,
+            content=text,
+            agent=agent.name,
+            model_id=self.model_id,
+            provider_id=self.provider_id,
+            parent_id=last_user.id,
+            finish="error",
+            error=error_dict,
+            time={"created": now_ms, "completed": now_ms},
+            part_id=part_id,
+        )
+        parts = await Message.parts(assistant_msg.id, self.session.id)
+        text_part = next(
+            (
+                part for part in parts
+                if isinstance(part, TextPart) and part.id == part_id
+            ),
+            TextPart(
+                id=part_id,
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                type="text",
+                text=text,
+            ),
+        )
+        await self._publish_assistant_error_message(
+            assistant_msg,
+            agent_name=agent.name,
+            parent_id=last_user.id,
+            error_dict=error_dict,
+            text_part=text_part,
+        )
+        return assistant_msg
+
+    async def _ensure_visible_error_text(
+        self,
+        assistant_msg: MessageInfo,
+        error_message: str,
+    ) -> Optional[TextPart]:
+        if not error_message:
+            return None
+
+        parts = await Message.parts(assistant_msg.id, self.session.id)
+        for part in parts:
+            if getattr(part, "type", None) == "text" and str(getattr(part, "text", "") or "").strip():
+                return None
+
+        text_part = next((part for part in parts if getattr(part, "type", None) == "text"), None)
+        if isinstance(text_part, TextPart):
+            # A copy: the cached part stays as it was if writing this fails.
+            text_part = text_part.model_copy(update={"text": error_message})
+        else:
+            text_part = TextPart(
+                id=Identifier.ascending("part"),
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                type="text",
+                text=error_message,
+            )
+        stored = await Message.store_part(self.session.id, assistant_msg.id, text_part)
+        return stored if isinstance(stored, TextPart) else text_part
+
+    def _update_tool_loop_guard(
+        self,
+        result: StepResult,
+        *,
+        last_user_id: str,
+    ) -> Dict[str, Any]:
+        visible_text = bool((result.content or "").strip())
+        successful_sleep = (
+            len(result.tool_calls) == 1
+            and result.tool_calls[0].name == "sleep"
+            and result._successful_sleep
+        )
+        if visible_text or len(result.tool_calls) != 1 or successful_sleep:
+            self._reset_tool_loop_guard(last_user_id=last_user_id)
+            return {"action": "allow"}
+
+        tool_call = result.tool_calls[0]
+        state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
+        signature = self._canonical_tool_signature(tool_call.name, tool_call.arguments)
+
+        exact_count = 1
+        if state.get("last_signature") == signature:
+            exact_count = int(state.get("exact_count", 0)) + 1
+
+        state.update({
+            "last_user_id": last_user_id,
+            "last_signature": signature,
+            "exact_count": exact_count,
+        })
+
+        if exact_count >= REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD:
+            return {
+                "action": "halt",
+                "reason": "repeated_exact_tool_call",
+                "tool_name": tool_call.name,
+                "count": exact_count,
+            }
+        if exact_count >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1):
+            return {
+                "action": "warn",
+                "tool_name": tool_call.name,
+                "exact_count": exact_count,
+            }
+        return {"action": "allow"}
+
+    async def _list_callable_tool_infos_for_turn(
+        self,
+        agent: AgentInfo,
+        messages: List[MessageInfo],
+    ) -> Tuple[List[Any], Dict[str, Any]]:
+        execution_mode = self._execution_mode_from_messages(messages)
+        strict_declared_tools = (
+            agent.name != "rex"
+            or getattr(agent, "prompt_profile", "standard") == "isolated"
+        )
+        from aegisops.agent.tool_permissions import QUESTION_TOOL_NAME
+        from aegisops.permission.next import PermissionNext
+
+        declared_tool_names = getattr(agent, "tools", None)
+        permission_ruleset = getattr(self, "_turn_permission_ruleset", None)
+        if permission_ruleset is None:
+            permission_ruleset = self._permission_ruleset_for_agent(agent)
+        result = await list_session_callable_tool_infos(
+            session_id=self.session.id,
+            declared_tool_names=declared_tool_names,
+            strict_declared_tools=strict_declared_tools,
+            agent=agent.name,
+            step=self._step,
+            event_publish_callback=self.callbacks.event_publish_callback,
+        )
+        permission_denied_tool_names: List[str] = []
+        tool_infos = []
+        from aegisops.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
+        for tool_info in result.tool_infos:
+            from aegisops.agent.scheduling import enabled, ROUTER_TOOLS
+            if agent.name == 'rex' and enabled() and tool_info.name not in ROUTER_TOOLS:
+                continue
+            if controls is not None and controls.denial(tool_info.name):
+                continue
+            if not is_tool_allowed(execution_mode, tool_info.name):
+                continue
+            if tool_info.name == QUESTION_TOOL_NAME:
+                denied_by_permission = PermissionNext.evaluate_request(
+                    tool_info.name,
+                    ["*"],
+                    permission_ruleset,
+                ) == "deny"
+                if denied_by_permission:
+                    permission_denied_tool_names.append(tool_info.name)
+                    continue
+            tool_infos.append(tool_info)
+        if (
+            execution_mode == SessionExecutionMode.PLAN
+            and not strict_declared_tools
+            and all(tool_info.name != "plan_exit" for tool_info in tool_infos)
+        ):
+            plan_exit = ToolRegistry.get("plan_exit")
+            if plan_exit is not None and getattr(plan_exit.info, "enabled", True):
+                tool_infos.append(plan_exit.info)
+        metadata = dict(result.metadata)
+        metadata["executionMode"] = execution_mode.value
+        metadata["permissionDeniedToolNames"] = sorted(permission_denied_tool_names)
+        metadata["modeAllowedToolNames"] = sorted(
+            tool_info.name for tool_info in tool_infos
+        )
+        return tool_infos, metadata
+
+    @staticmethod
+    def _execution_mode_from_messages(
+        messages: Optional[List[MessageInfo]],
+    ) -> SessionExecutionMode:
+        for message in reversed(messages or []):
+            if getattr(message, "role", None) != MessageRole.USER:
+                continue
+            return runtime_execution_mode(
+                getattr(message, "executionMode", None)
+            )
+        return runtime_execution_mode(None)
+
+    @staticmethod
+    def _get_prompt_tool_names_from_schema(tools: List[Dict[str, Any]]) -> Tuple[str, ...]:
+        """Resolve prompt guidance tool names from the loaded tool schema."""
+        names = {
+            str(function.get("name", "")).strip()
+            for tool in tools
+            if isinstance(tool, dict)
+            for function in [tool.get("function", {})]
+            if isinstance(function, dict)
+        }
+        names.discard("")
+        return tuple(sorted(names))
+
+    async def _get_prompt_tool_names(
+        self,
+        agent: AgentInfo,
+        *,
+        tools: Optional[List[Dict[str, Any]]] = None,
+        messages: Optional[List[MessageInfo]] = None,
+    ) -> Tuple[str, ...]:
+        """Compatibility shim for tests and older call sites."""
+        tool_schema = tools
+        if tool_schema is None:
+            tool_schema = await self._build_callable_tool_schema(agent, messages)
+        return self._get_prompt_tool_names_from_schema(tool_schema)
+
+    async def _publish_turn_tools_event(self, selection_metadata: Dict[str, Any]) -> None:
+        if not self.callbacks.event_publish_callback:
+            return
+        try:
+            await self.callbacks.event_publish_callback("turn.tools_selected", {
+                "sessionID": self.session.id,
+                "step": self._step,
+                **selection_metadata,
+            })
+        except Exception as exc:
+            log.debug("runner.turn_tools_selected.publish_failed", {"error": str(exc)})
+
+    def _log_perf(self, event: str, started_at: float, **extra: Any) -> None:
+        payload = {
+            "session_id": self.session.id,
+            "step": self._step,
+            "duration_ms": int((time.perf_counter() - started_at) * 1000),
+        }
+        payload.update(extra)
+        log.debug(event, payload)
+
+    def _provider_capability_key(self) -> str:
+        interleaved = None
+        try:
+            active_model = Provider.resolve_model(self.provider_id, self.model_id)
+            if active_model and getattr(active_model, "capabilities", None):
+                interleaved = getattr(active_model.capabilities, "interleaved", None)
+        except Exception:
+            interleaved = None
+        return (
+            f"{self.provider_id}:{self.model_id}:"
+            f"vision={int(self._model_supports_vision())}:"
+            f"interleaved={json.dumps(interleaved, ensure_ascii=False, sort_keys=True, default=str)}"
+        )
+
+    def _tool_schema_cache_key(
+        self,
+        agent: AgentInfo,
+        selected_tool_infos: List[Any],
+        *,
+        text_tool_call_mode: bool,
+    ) -> Tuple[Any, ...]:
+        return (
+            ToolRegistry.revision(),
+            getattr(agent, "name", ""),
+            tuple(sorted(getattr(agent, "tools", None) or ())),
+            tuple(tool_info.name for tool_info in selected_tool_infos),
+            text_tool_call_mode,
+            self.provider_id,
+            self.model_id,
+        )
+
+    def _tool_compact_placeholder(self, tool_name: str, text: str) -> Tuple[str, str]:
+        normalized = " ".join(text.split())
+        preview = normalized[:TOOL_RESULT_PREVIEW_CHARS]
+        suffix = "..." if len(normalized) > TOOL_RESULT_PREVIEW_CHARS else ""
+        if preview:
+            placeholder = (
+                f"[Context compacted: `{tool_name}` output omitted to save space. "
+                f"Preview: {preview}{suffix}]"
+            )
+        else:
+            placeholder = f"[Context compacted: `{tool_name}` output omitted to save space.]"
+        return placeholder, preview
+
+    def _get_persisted_tool_placeholder(self, part: Any, fallback_tool_name: str) -> Optional[str]:
+        state = getattr(part, "state", None)
+        metadata = getattr(state, "metadata", None) or {}
+        placeholder = metadata.get("context_compact_placeholder")
+        if placeholder:
+            return str(placeholder)
+        time_info = getattr(state, "time", None) or {}
+        if isinstance(time_info, dict) and time_info.get("compacted"):
+            return f"[Context compacted: `{fallback_tool_name}` output omitted to save space.]"
+        return None
+
+    async def _persist_tool_compaction(self, refs: List[Dict[str, Any]]) -> int:
+        dirty_refs = [ref for ref in refs if ref.get("dirty")]
+        if not dirty_refs:
+            return 0
+
+        updated_count = 0
+        # Marking a part compacted changes its message's token estimate.
+        SessionPrompt.invalidate_message_cache({ref["message_id"] for ref in dirty_refs})
+        for ref in dirty_refs:
+            part = ref["part"]
+            state = getattr(part, "state", None)
+            if state is None:
+                continue
+            await Message.update_part(
+                self.session.id,
+                ref["message_id"],
+                part.id,
+                state=state.model_dump() if hasattr(state, "model_dump") else state,
+            )
+            ref["dirty"] = False
+            updated_count += 1
+        return updated_count
+
+    async def _compact_tool_ref(self, ref: Dict[str, Any], reason: str) -> bool:
+        current_content = ref["chat_message"].content or ""
+        if ref.get("compacted") or len(current_content) <= TOOL_RESULT_PREVIEW_CHARS:
+            return False
+
+        placeholder, preview = self._tool_compact_placeholder(ref["tool_name"], current_content)
+        ref["chat_message"].content = placeholder
+        ref["char_count"] = len(placeholder)
+        ref["compacted"] = True
+
+        part = ref["part"]
+        state = getattr(part, "state", None)
+        if state is not None:
+            metadata = dict(getattr(state, "metadata", None) or {})
+            metadata.update({
+                "context_compacted": True,
+                "context_compact_reason": reason,
+                "context_compact_preview": preview,
+                "context_compact_placeholder": placeholder,
+                "context_compacted_step": self._step,
+            })
+            state.metadata = metadata
+            time_info = dict(getattr(state, "time", None) or {})
+            time_info["compacted"] = int(datetime.now().timestamp() * 1000)
+            state.time = time_info
+            ref["dirty"] = True
+
+        return True
+
+    async def _apply_tool_result_budget(
+        self,
+        tool_result_refs: List[Dict[str, Any]],
+        ctx_window_tokens: int,
+    ) -> Dict[str, int]:
+        if not tool_result_refs:
+            return {"compacted": 0, "persisted": 0}
+
+        total_budget = max(
+            TOOL_RESULT_MIN_CHAR_BUDGET,
+            int(ctx_window_tokens * 4 * TOOL_RESULT_CHAR_BUDGET_RATIO),
+        )
+        per_turn_budget = max(
+            TOOL_RESULT_MIN_TURN_BUDGET,
+            int(total_budget * TOOL_RESULT_TURN_BUDGET_RATIO),
+        )
+        compacted = 0
+
+        latest_turn = max(ref["turn_index"] for ref in tool_result_refs)
+        latest_turn_refs = [ref for ref in tool_result_refs if ref["turn_index"] == latest_turn]
+        latest_turn_chars = sum(ref["char_count"] for ref in latest_turn_refs)
+        for ref in latest_turn_refs[:-1]:
+            if latest_turn_chars <= per_turn_budget:
+                break
+            if await self._compact_tool_ref(ref, "tool_result_budget"):
+                latest_turn_chars = sum(item["char_count"] for item in latest_turn_refs)
+                compacted += 1
+
+        total_chars = sum(ref["char_count"] for ref in tool_result_refs)
+        for ref in tool_result_refs:
+            if total_chars <= total_budget:
+                break
+            if await self._compact_tool_ref(ref, "context_budget"):
+                total_chars = sum(item["char_count"] for item in tool_result_refs)
+                compacted += 1
+
+        persisted = await self._persist_tool_compaction(tool_result_refs)
+        if compacted and self.callbacks.event_publish_callback:
+            try:
+                await self.callbacks.event_publish_callback("context.compacted", {
+                    "sessionID": self.session.id,
+                    "step": self._step,
+                    "reason": "tool_result_budget",
+                    "compactedToolResults": compacted,
+                    "persistedToolResults": persisted,
+                })
+            except Exception as exc:
+                log.debug("runner.context_compacted.publish_failed", {"error": str(exc)})
+
+        return {"compacted": compacted, "persisted": persisted}
+
+    # Provider IDs whose adapters are known to translate AegisOps' internal
+    # ``{"type": "image", "mimeType": ..., "data": <base64>}`` block into
+    # the provider-native multimodal format (e.g. OpenAI ``image_url`` or
+    # Anthropic vision blocks).
+    #
+    # Matched with exact equality (no substring matching) to prevent false
+    # positives such as a user-configured "not-openai" or an internal
+    # "xxx-llm-gateway" id being mistakenly classified as multimodal-capable.
+    #
+    # ``custom-`` providers (created via ``POST /api/custom/providers``) are
+    # checked separately via ``startswith`` because their ids follow the
+    # pattern ``custom-<user-chosen-name>`` and they always use the
+    # ``@ai-sdk/openai-compatible`` adapter that handles vision blocks.
+    _MULTIMODAL_PROVIDER_NAMES = frozenset({
+        "anthropic", "openai", "azure",
+        "vertex", "bedrock", "openrouter",
+    })
+
+    def _model_supports_vision(self) -> bool:
+        """Best-effort vision capability lookup from the model definition.
+
+        Returns ``True`` only when explicitly declared on the model entry via
+        ``capabilities.supports_vision``. Defaults to a safe ``False`` for
+        unknown configurations.
+        """
+        try:
+            from aegisops.provider.provider import Provider as _Provider
+
+            provider = _Provider.get(self.provider_id)
+            if provider is not None:
+                for model in getattr(provider, "_config_models", []) or []:
+                    if model.id == self.model_id:
+                        caps = getattr(model, "capabilities", None)
+                        if caps and getattr(caps, "supports_vision", False):
+                            return True
+                        break
+        except Exception as exc:
+            log.debug("runner.vision_lookup.failed", {"error": str(exc)})
+        return False
+
+    def _supports_multimodal_user_content(self) -> bool:
+        """Whether the active provider/model can accept image content blocks.
+
+        Decision order:
+          1. The model definition explicitly advertises vision support
+             (``capabilities.supports_vision`` on the model entry).
+          2. The provider id is an exact match against the known multimodal
+             provider name set, or starts with ``"custom-"`` (user-registered
+             OpenAI-compatible providers that inherit vision capability from
+             their underlying model).
+        """
+        if self._model_supports_vision():
+            return True
+        provider_id = (self.provider_id or "").lower()
+        return (
+            provider_id in self._MULTIMODAL_PROVIDER_NAMES
+            or provider_id.startswith("custom-")
+        )
+
+    def _append_file_content_block(
+        self,
+        blocks: list[dict[str, Any]],
+        text_fallbacks: list[str],
+        *,
+        mime: str,
+        filename: str,
+        url: str,
+    ) -> None:
+        """Append an appropriate content block for *url* into *blocks*.
+
+        Images are embedded as base64 for multimodal-capable providers; other
+        file types are extracted as text. We *never* spill a raw ``data:`` URL
+        into the text fallback — doing so previously caused OpenAI to tokenize
+        the entire base64 payload (~250k tokens for a single screenshot,
+        blowing past the model's context window).
+        """
+        is_image = mime.startswith("image/")
+        multimodal_ok = self._supports_multimodal_user_content()
+
+        log.info("runner.file_part.dispatch", {
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "mime": mime,
+            "filename": filename,
+            "is_image": is_image,
+            "multimodal_supported": multimodal_ok,
+            "url_scheme": url.split(":", 1)[0] if url else None,
+            "url_size": len(url),
+        })
+
+        # For images we ALWAYS try the multimodal path first, regardless of
+        # provider whitelist. The whitelist guards against silently degrading
+        # to a text fallback that would tokenize the entire base64 payload —
+        # but since fallback now never embeds the URL, "force-try multimodal"
+        # is strictly safer: providers that genuinely cannot handle ``image``
+        # blocks will surface a precise error, which is far better UX than a
+        # 250k-token context_length_exceeded error.
+        if is_image:
+            import base64 as _b64
+            data = read_file_part_bytes(url)
+            if data:
+                blocks.append({
+                    "type": "image",
+                    "mimeType": mime,
+                    "data": _b64.b64encode(data).decode("utf-8"),
+                })
+                return
+            log.warn("runner.file_part.image_decode_failed", {
+                "provider_id": self.provider_id,
+                "filename": filename,
+            })
+            # Image bytes could not be read — fall through to placeholder
+            # (which is intentionally tiny, never the raw URL).
+
+        extracted_text = extract_file_text(mime=mime, filename=filename, url=url) if not is_image else None
+        if extracted_text:
+            text_fallbacks.append(extracted_text)
+            blocks.append({"type": "text", "text": extracted_text})
+            return
+
+        # Final fallback — for images we either lack vision support or could
+        # not decode the bytes. Either way, refuse to embed the raw URL when
+        # it is a data URI; the base64 payload would otherwise be sent to the
+        # LLM as plain text and explode the prompt token count. Also clamp the
+        # placeholder to a hard byte cap as a belt-and-braces measure.
+        MAX_PLACEHOLDER_CHARS = 200
+        # A local file URL is the model's only way to reach a binary
+        # attachment (a sample to reverse engineer, an archive), so it is
+        # kept whole; only an overlong display name is shortened.
+        MAX_LOCAL_URL_CHARS = 4096
+        MAX_FILENAME_CHARS = 120
+        if is_image:
+            placeholder = (
+                f"[Image: {filename} — model does not support image input; "
+                f"the image was omitted from the prompt]"
+            )
+            log.info("runner.file_part.image_skipped", {
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "reason": "multimodal_unsupported" if not multimodal_ok else "decode_failed",
+                "filename": filename,
+            })
+        else:
+            safe_url = url if url and not url.startswith("data:") else ""
+            if safe_url.startswith("file:") and len(safe_url) <= MAX_LOCAL_URL_CHARS:
+                # The filename is optional on file parts.
+                name = filename or "file"
+                if len(name) > MAX_FILENAME_CHARS:
+                    name = name[:MAX_FILENAME_CHARS] + "…"
+                text_fallbacks.append(f"[File: {name}]({safe_url})")
+                return
+            placeholder = (
+                f"[File: {filename}]({safe_url})" if safe_url else f"[File: {filename}]"
+            )
+        if len(placeholder) > MAX_PLACEHOLDER_CHARS:
+            placeholder = placeholder[:MAX_PLACEHOLDER_CHARS] + "…"
+        text_fallbacks.append(placeholder)
+
+    @classmethod
+    async def loop(cls, session_id: str) -> Optional['MessageInfo']:
+        """
+        Start or continue session processing loop.
+        
+        This is the main entry point for session execution,
+        matching AegisOps' SessionPrompt.loop() behavior.
+        
+        Now delegates to SessionLoop for better separation of concerns.
+        
+        Args:
+            session_id: Session ID to process
+            
+        Returns:
+            Last assistant message with parts
+        """
+        # Delegate to SessionLoop (new architecture)
+        from aegisops.session.session_loop import SessionLoop
+        
+        result = await SessionLoop.run(session_id)
+        return result.last_message
+    
+    @classmethod
+    def cancel(cls, session_id: str) -> bool:
+        """
+        Cancel a running session.
+        
+        Args:
+            session_id: Session ID to cancel
+            
+        Returns:
+            True if session was cancelled
+        """
+        from aegisops.session.core.status import SessionStatus
+        
+        runner = cls._active_sessions.get(session_id)
+        if runner:
+            runner.abort()
+            del cls._active_sessions[session_id]
+            log.info("runner.cancelled", {"session_id": session_id})
+        
+        # Set status to idle (AegisOps compatibility)
+        from aegisops.session.core.status import SessionStatusIdle
+        SessionStatus.set(session_id, SessionStatusIdle())
+        return True
+    
+    @classmethod
+    def cancel_children(cls, parent_session_id: str) -> int:
+        """Cancel all runners whose session.parent_id matches, recursively."""
+        from aegisops.session.core.status import SessionStatus, SessionStatusIdle
+        
+        cancelled = 0
+        child_ids = [
+            sid for sid, runner in list(cls._active_sessions.items())
+            if getattr(runner.session, 'parent_id', None) == parent_session_id
+        ]
+        for sid in child_ids:
+            runner = cls._active_sessions.pop(sid, None)
+            if runner:
+                runner.abort()
+                SessionStatus.set(sid, SessionStatusIdle())
+                cancelled += 1
+                log.info("runner.child_cancelled", {
+                    "session_id": sid,
+                    "parent_session_id": parent_session_id,
+                })
+            cancelled += cls.cancel_children(sid)
+        return cancelled
+    
+    @classmethod
+    async def command(
+        cls,
+        session_id: str,
+        command: str,
+        arguments: str = "",
+        message_id: Optional[str] = None,
+        agent: Optional[str] = None,
+        model: Optional[str] = None,
+        variant: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute a slash command in a session.
+        
+        Args:
+            session_id: Session ID
+            command: Command name (e.g., "init", "help")
+            arguments: Command arguments
+            message_id: Optional message ID
+            agent: Optional agent name
+            model: Optional model string (provider/model)
+            variant: Optional model variant
+            
+        Returns:
+            Command execution result
+        """
+        from aegisops.command.command import Command
+        
+        # Get command definition
+        cmd = Command.get(command)
+        if not cmd:
+            raise ValueError(f"Command '{command}' not found")
+        
+        # Parse model if provided
+        provider_id, model_id = None, None
+        if model:
+            parts = model.split("/", 1)
+            if len(parts) == 2:
+                provider_id, model_id = parts
+        
+        # Execute command template
+        template = cmd.template
+        
+        # Replace placeholders
+        template = template.replace("$ARGUMENTS", arguments)
+        
+        # Create prompt request
+        parts = [{"type": "text", "text": template}]
+        
+        log.info("runner.command", {
+            "session_id": session_id,
+            "command": command,
+            "arguments": arguments[:50] if arguments else "",
+        })
+        
+        return {
+            "command": command,
+            "arguments": arguments,
+            "template": template,
+        }
+    
+    @classmethod
+    async def shell(
+        cls,
+        session_id: str,
+        agent: str,
+        command: str,
+        model: Optional[Dict[str, str]] = None,
+        event_publish_callback: Optional[
+            Callable[[str, Dict[str, Any]], Awaitable[None]]
+        ] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute a shell command in session context.
+        
+        Args:
+            session_id: Session ID
+            agent: Agent name
+            command: Shell command to execute
+            model: Optional model info
+            
+        Returns:
+            Shell execution result
+        """
+        session = await Session.get_by_id(session_id)
+        if not session:
+            raise ValueError(f"Session {session_id} not found")
+        
+        cwd = session.directory or os.getcwd()
+
+        async def _publish(event_type: str, payload: Dict[str, Any]) -> None:
+            if event_publish_callback is None:
+                return
+            try:
+                await event_publish_callback(event_type, payload)
+            except Exception as exc:
+                log.debug("runner.shell.publish_failed", {
+                    "session_id": session_id,
+                    "event_type": event_type,
+                    "error": str(exc),
+                })
+
+        async def _effect(
+            execution_command: str = command,
+            execution_cwd: str = cwd,
+        ) -> Dict[str, Any]:
+            started_at_ms = int(time.time() * 1000)
+            user_part_id = Identifier.create("part")
+            user_msg = await Message.create(
+                session_id=session_id,
+                role=MessageRole.USER,
+                content="The following tool was executed by the user",
+                agent=agent,
+                time={"created": started_at_ms},
+                part_id=user_part_id,
+            )
+
+            assistant_part_id = Identifier.create("part")
+            assistant_msg = await Message.create(
+                session_id=session_id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=agent,
+                parent_id=user_msg.id,
+                providerID="builtin",
+                modelID="shell",
+                mode=agent,
+                path={"cwd": execution_cwd, "root": execution_cwd},
+                time={"created": started_at_ms},
+                part_id=assistant_part_id,
+            )
+
+            call_id = Identifier.create("call")
+            tool_part_id = Identifier.create("part")
+            tool_input = {
+                "command": execution_command,
+                "workdir": execution_cwd,
+            }
+            running_part = ToolPart(
+                id=tool_part_id,
+                messageID=assistant_msg.id,
+                sessionID=session_id,
+                callID=call_id,
+                tool="bash",
+                metadata=None,
+                state=ToolStateRunning(
+                    input=tool_input,
+                    title="Shell",
+                    metadata={},
+                    time={"start": started_at_ms},
+                ),
+            )
+            await Message.store_part(session_id, assistant_msg.id, running_part)
+
+            await _publish("message.updated", {
+                "info": user_msg.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.part.updated", {
+                "part": {
+                    "id": user_part_id,
+                    "messageID": user_msg.id,
+                    "sessionID": session_id,
+                    "type": "text",
+                    "text": "The following tool was executed by the user",
+                    "time": {"start": started_at_ms},
+                },
+            })
+            await _publish("message.updated", {
+                "info": assistant_msg.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.part.updated", {
+                "part": running_part.model_dump(mode="json", by_alias=True),
+            })
+
+            start_time = asyncio.get_event_loop().time()
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    execution_command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=execution_cwd,
+                )
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=300,
+                )
+                output = (stdout_bytes or b"").decode("utf-8", errors="replace") + \
+                         (stderr_bytes or b"").decode("utf-8", errors="replace")
+                exit_code = proc.returncode or 0
+            except asyncio.TimeoutError:
+                output = "Command timed out after 300 seconds"
+                exit_code = -1
+                try:
+                    proc.kill()
+                except Exception as _kill_err:
+                    log.debug("runner.shell.kill_failed", {"error": str(_kill_err)})
+            except Exception as e:
+                output = f"Error executing command: {str(e)}"
+                exit_code = -1
+
+            end_time = asyncio.get_event_loop().time()
+            finished_at_ms = int(time.time() * 1000)
+
+            log.info("runner.shell", {
+                "session_id": session_id,
+                "command": execution_command[:50],
+                "exit_code": exit_code,
+                "duration_ms": int((end_time - start_time) * 1000),
+            })
+
+            completed_part = ToolPart(
+                id=tool_part_id,
+                messageID=assistant_msg.id,
+                sessionID=session_id,
+                callID=call_id,
+                tool="bash",
+                metadata=None,
+                state=ToolStateCompleted(
+                    input=tool_input,
+                    output=output,
+                    title="Shell",
+                    metadata={"exitCode": exit_code},
+                    time={"start": started_at_ms, "end": finished_at_ms},
+                    attachments=None,
+                ),
+            )
+            stored_part = await Message.store_part(
+                session_id,
+                assistant_msg.id,
+                completed_part,
+            )
+            updated_assistant = await Message.update(
+                session_id,
+                assistant_msg.id,
+                finish="stop",
+                time={"completed": finished_at_ms},
+            )
+            if updated_assistant is None:
+                raise RuntimeError(
+                    f"Failed to finalize shell message {assistant_msg.id}"
+                )
+
+            await _publish("message.part.updated", {
+                "part": stored_part.model_dump(mode="json", by_alias=True),
+            })
+            await _publish("message.updated", {
+                "info": updated_assistant.model_dump(mode="json", by_alias=True),
+            })
+
+            return {
+                "info": updated_assistant.model_dump(mode="json", by_alias=True),
+                "parts": [stored_part.model_dump(mode="json", by_alias=True)],
+            }
+
+        from aegisops.session.execution_profile import get_session_execution_profile
+        from aegisops.session.tool_execution import (
+            build_session_tool_execution_payload,
+            run_tool_execution_lifecycle,
+        )
+
+        # The command is the session owner's, so the payload carries the
+        # session's subject -- the same caller its model calls name -- while
+        # entry and workspace stay those of a user-run shell command.
+        try:
+            session_profile = await get_session_execution_profile(session_id) or {}
+        except Exception as exc:
+            # Without a readable profile the command still runs, under the
+            # system caller, exactly as it did before callers existed.
+            log.warn("runner.shell.profile_unavailable", {"session_id": session_id, "error": str(exc)})
+            session_profile = {}
+        shell_subject = {
+            key: session_profile[key]
+            for key in ("subject_id", "subject_type", "owner_user_id", "owner_username")
+            if session_profile.get(key)
+        }
+
+        payload = await build_session_tool_execution_payload(
+            session_id=session_id,
+            message_id=Identifier.create("message"),
+            agent=agent,
+            tool_name="shell",
+            tool_input={"command": command, "workdir": cwd},
+            validated_input={"command": command, "workdir": cwd},
+            tool_schema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "workdir": {"type": "string"},
+                },
+                "required": ["command"],
+            },
+            tool_context_extra={
+                # Audit sinks record the attempt under the call id; a user-run
+                # shell command has no streamed call, so mint one here.
+                "tool_call_id": Identifier.create("call"),
+                "tool_source": "session_runner",
+                "tool_category": "command",
+                "workspace_dir": cwd,
+                "session_execution_profile": {
+                    **shell_subject,
+                    "entry": "session.shell",
+                    "workspace_dir": cwd,
+                },
+            },
+        )
+
+        async def _patched_effect(patch: Mapping[str, Any]) -> Dict[str, Any]:
+            patched_command = patch.get("command", command)
+            patched_cwd = patch.get("workdir", cwd)
+            if not isinstance(patched_command, str) or not isinstance(patched_cwd, str):
+                raise ValueError("Shell hook patch must contain string command and workdir")
+            return await _effect(patched_command, patched_cwd)
+
+        return await run_tool_execution_lifecycle(
+            payload,
+            _effect,
+            patched_effect=_patched_effect,
+        )
+    
+    def abort(self) -> None:
+        """Signal abort to stop the loop."""
+        self._abort.set()
+    
+    @property
+    def is_aborted(self) -> bool:
+        """Check if abort was signaled (internal or external)."""
+        if self._abort.is_set():
+            return True
+        if self._external_abort is not None and self._external_abort.is_set():
+            return True
+        return False
+
+    @staticmethod
+    def classify_failover_error(error: Dict[str, Any]) -> FailoverDecision:
+        """Classify a provider failure using Hermes-compatible switch timing.
+
+        The classifier deliberately requires an API-shaped error (status code,
+        APIError marker, or a known provider response pattern). Local Python,
+        storage, hook, and tool failures must never move a user turn to another
+        model.
+        """
+        data = error.get("data") or {}
+        status_code = data.get("statusCode")
+        try:
+            status_code = int(status_code) if status_code is not None else None
+        except (TypeError, ValueError):
+            status_code = None
+
+        message = str(data.get("message") or error.get("message") or "")
+        lowered = message.lower()
+        error_name = str(error.get("name") or "")
+
+        if status_code == 413 or any(pattern in lowered for pattern in (
+            "context length", "context_length", "context window", "prompt is too long",
+            "request entity too large", "payload too large",
+        )):
+            return FailoverDecision(False, "context_overflow")
+        if error_name in {"CancelledError", "MessageAbortedError", "AbortedError"}:
+            return FailoverDecision(False, "cancelled")
+
+        if SessionRetry.is_alibaba_rate_limit(error):
+            return FailoverDecision(True, "rate_limit")
+
+        if SessionRetry.is_quota_exhausted(error):
+            return FailoverDecision(True, "billing")
+
+        quota_or_rate_limited = any(pattern in lowered for pattern in (
+            "rate limit", "too many requests", "quota exceeded", "resource exhausted",
+            "insufficient quota", "billing limit",
+        ))
+        # Some providers report exhausted quota as HTTP 401/403 rather than
+        # 429. Classify the semantic error before the generic auth branch so
+        # the primary receives the same cooldown as other quota failures.
+        if status_code == 429 or quota_or_rate_limited:
+            reason = "billing" if any(
+                pattern in lowered for pattern in ("billing", "insufficient quota")
+            ) else "rate_limit"
+            return FailoverDecision(True, reason)
+        if status_code in {401, 403}:
+            return FailoverDecision(True, "auth")
+        if status_code == 402:
+            return FailoverDecision(True, "billing")
+
+        if "model" in lowered and any(pattern in lowered for pattern in (
+            "not found", "model_not_found", "unknown model", "no such model",
+        )):
+            return FailoverDecision(True, "model_not_found")
+
+        if status_code == 404:
+            if any(pattern in lowered for pattern in (
+                "model not found", "model_not_found", "unknown model", "no such model",
+            )):
+                return FailoverDecision(True, "model_not_found")
+            return FailoverDecision(True, "unknown_api")
+
+        if status_code in {408, 504} or data.get("isConnectionError") is True or any(
+            pattern in lowered
+            for pattern in ("timeout", "timed out", "connection error", "connection reset")
+        ):
+            return FailoverDecision(True, "timeout")
+        if status_code in {503, 529} or any(
+            pattern in lowered for pattern in ("overloaded", "temporarily unavailable")
+        ):
+            return FailoverDecision(True, "overloaded")
+        if status_code in {500, 502}:
+            return FailoverDecision(True, "server_error")
+
+        if any(pattern in lowered for pattern in (
+            "content policy", "content filter", "content_filter", "safety policy",
+            "policy violation",
+        )):
+            return FailoverDecision(True, "content_policy")
+        if error_name == "StreamToolArgumentsTruncatedError":
+            return FailoverDecision(True, "stream_truncated")
+        if error_name == "JSONDecodeError" or any(
+            pattern in lowered for pattern in (
+                "malformed response", "invalid response", "empty choices",
+                "returned choice with null", "null message",
+            )
+        ):
+            return FailoverDecision(True, "invalid_response")
+
+        if status_code is not None and 400 <= status_code < 500:
+            return FailoverDecision(True, "provider_request")
+        if error_name == "APIError" or data.get("isRetryable") is True:
+            return FailoverDecision(True, "unknown_api")
+        return FailoverDecision(False, "local_error")
+
+    def _deferred_failure_result(
+        self,
+        *,
+        message: str,
+        error_data: Dict[str, Any],
+        assistant_message_id: Optional[str],
+        decision: FailoverDecision,
+        attempts: int,
+        allow_fallback_override: Optional[bool] = None,
+    ) -> StepResult:
+        state = LlmAttemptState(
+            received_chunk=self._attempt_state.received_chunk,
+            observable_output_started=self._attempt_state.observable_output_started,
+            tool_execution_started=self._attempt_state.tool_execution_started,
+        )
+        allow_fallback = (
+            allow_fallback_override
+            if allow_fallback_override is not None
+            else decision.eligible and state.replay_safe
+        )
+        return StepResult(
+            action="stop",
+            error=message,
+            error_code=error_data.get("data", {}).get("error_code"),
+            failure=StepFailure(
+                message=message,
+                error_data=error_data,
+                assistant_message_id=assistant_message_id,
+                reason=decision.reason,
+                allow_fallback=allow_fallback,
+                attempt_state=state,
+                attempts=attempts,
+            ),
+        )
+
+    async def _process_step(
+        self,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+    ) -> StepResult:
+        """Process a single step in the loop with retry logic."""
+        self._attempt_state = LlmAttemptState()
+        turn_execution_mode = runtime_execution_mode(
+            getattr(last_user, "executionMode", None)
+        )
+        self._turn_execution_mode = turn_execution_mode
+        from aegisops.project.instance import Instance
+
+        self._turn_plan_file = session_plan_file(
+            self.session,
+            worktree=Instance.get_worktree(),
+        )
+        # Check for CLI callbacks (if running in CLI mode)
+        # Only use CLI fallback if no callbacks were explicitly provided via constructor
+        has_explicit_callbacks = any([
+            self.callbacks.on_text_delta,
+            self.callbacks.on_tool_start,
+            self.callbacks.on_tool_end,
+            self.callbacks.on_error,
+            self.callbacks.event_publish_callback,
+        ])
+        if not has_explicit_callbacks:
+            try:
+                from aegisops.cli.session_runner import _get_cli_callbacks
+                cli_callbacks = _get_cli_callbacks()
+                if cli_callbacks:
+                    self.callbacks = cli_callbacks
+            except ImportError:
+                pass
+        
+        # Resolve agent
+        agent_name = last_user.agent or self.agent_name
+        agent = await Agent.get(agent_name) or await Agent.get("rex")
+        from aegisops.agent.scheduling import runtime_agent
+        agent = runtime_agent(agent, self.session.id)
+        self._turn_permission_ruleset = self._permission_ruleset_for_agent(agent)
+        self._turn_delegating_sessions = None
+
+        # Track session agent (AegisOps compatibility)
+        try:
+            from aegisops.session.core.session_state import set_session_agent
+            set_session_agent(self.session.id, agent.name)
+        except Exception as e:
+            log.debug("runner.session_agent.error", {"error": str(e)})
+        
+        # Only explicitly configured step limits constrain tool calls.
+        max_steps = getattr(agent, "steps", None)
+        self.execution_activity["max_steps"] = max_steps
+        is_last_step = max_steps is not None and self._step >= max_steps
+        self.max_steps_reached = is_last_step
+        
+        # Get provider
+        provider = Provider.get(self.provider_id)
+        if not provider:
+            error = f"Provider {self.provider_id} not found"
+            if self._defer_step_errors:
+                return self._deferred_failure_result(
+                    message=error,
+                    error_data={
+                        "name": "ProviderUnavailableError",
+                        "message": error,
+                        "data": {"message": error},
+                    },
+                    assistant_message_id=None,
+                    decision=FailoverDecision(True, "provider_unavailable"),
+                    attempts=0,
+                )
+            error_dict = self._build_session_error_dict(
+                error,
+                name="ProviderUnavailableError",
+                display_message="Model is unavailable. Please check the provider connection and model configuration.",
+                data={"providerID": self.provider_id, "modelID": self.model_id},
+            )
+            await self._create_error_assistant_message(
+                last_user=last_user,
+                agent=agent,
+                error_message=error,
+                error_dict=error_dict,
+                visible_text=error_dict["data"]["displayMessage"],
+            )
+            if self.callbacks.on_error:
+                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
+            return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
+
+        # Apply config-based provider options (api_key/base_url)
+        try:
+            await Provider.apply_config(provider_id=self.provider_id)
+        except Exception as e:
+            log.debug("runner.provider.apply_config.error", {
+                "provider": self.provider_id,
+                "error": str(e),
+            })
+        
+        if not provider.is_configured():
+            error = f"Provider {self.provider_id} not configured"
+            if self._defer_step_errors:
+                return self._deferred_failure_result(
+                    message=error,
+                    error_data={
+                        "name": "ProviderUnavailableError",
+                        "message": error,
+                        "data": {"message": error},
+                    },
+                    assistant_message_id=None,
+                    decision=FailoverDecision(True, "provider_unavailable"),
+                    attempts=0,
+                )
+            error_dict = self._build_session_error_dict(
+                error,
+                name="ProviderConfigurationError",
+                display_message="Model is unavailable. Please check the provider connection and model configuration.",
+                data={"providerID": self.provider_id, "modelID": self.model_id},
+            )
+            await self._create_error_assistant_message(
+                last_user=last_user,
+                agent=agent,
+                error_message=error,
+                error_dict=error_dict,
+                visible_text=error_dict["data"]["displayMessage"],
+            )
+            if self.callbacks.on_error:
+                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
+            return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
+        
+        # Build prompts and tools
+        tools_started_at = time.perf_counter()
+        tools = await self._build_callable_tool_schema(agent, messages)
+        self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
+        prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
+
+        prompts_started_at = time.perf_counter()
+        minimal_prompt = await SessionPrompt._is_builtin_system_subagent_session(
+            session_id=self.session.id,
+            agent_name=agent.name,
+        )
+        turn_prompt_context = await self._build_turn_prompt_context(
+            agent=agent,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+            minimal_prompt=minimal_prompt,
+        )
+        # ``PromptRequest.system`` is a per-turn override of the agent prompt;
+        # the rest of the system prompt (environment, tools, memory) stays.
+        system_override = getattr(last_user, "system", None)
+        system_prompts = await SessionPrompt.build_system_prompt_blocks(
+            session_id=self.session.id,
+            session_directory=self.session.directory,
+            agent_name=agent.name,
+            agent_prompt=system_override or getattr(agent, "prompt", None),
+            agent_skill_names=getattr(agent, "skills", ()) or (),
+            prompt_profile=getattr(agent, "prompt_profile", "standard"),
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+            execution_mode_prompt=execution_mode_prompt(
+                turn_execution_mode,
+                session=self.session,
+                plan_file=self._turn_plan_file,
+            ),
+            prompt_tool_names=prompt_tool_names,
+            memory_bootstrap_data=self._memory_bootstrap_data,
+            static_cache=self._static_cache,
+            turn_context=turn_prompt_context,
+            use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
+        )
+        self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
+
+        await self._run_session_start_hook(agent)
+
+        # Convert messages to chat format with error handling
+        try:
+            queued_user_message_ids = self._get_queued_user_message_ids(messages)
+            if queued_user_message_ids:
+                self._invalidate_chat_context_cache()
+            previous_queued_user_ids = getattr(self, "_queued_user_message_ids", None)
+            self._queued_user_message_ids = queued_user_message_ids
+            chat_messages_started_at = time.perf_counter()
+            try:
+                chat_messages = await self._to_chat_messages(messages, system_prompts)
+            finally:
+                if previous_queued_user_ids is None:
+                    if hasattr(self, "_queued_user_message_ids"):
+                        delattr(self, "_queued_user_message_ids")
+                else:
+                    self._queued_user_message_ids = previous_queued_user_ids
+            self._log_perf(
+                "runner.process_step.chat_messages_ready",
+                chat_messages_started_at,
+                source_message_count=len(messages),
+                chat_message_count=len(chat_messages),
+            )
+        except Exception as e:
+            log.error("runner.to_chat_messages.error", {
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "message_count": len(messages),
+            })
+            raise
+        
+        # CRITICAL FIX: Ensure messages don't end with assistant role when tools are present
+        # This prevents "assistant role in the final position when tools are used" API error
+        # This commonly happens when:
+        # 1. Tool calls fail (e.g., missing required parameters)
+        # 2. Assistant message contains tool calls but no user response follows
+        if chat_messages and tools and not self._should_use_text_tool_call_mode():
+            last_message = chat_messages[-1]
+            if last_message.role == "assistant":
+                # Check if we need to add a synthetic user message
+                # This is required by Anthropic API when using tools
+                from aegisops.session.prompt_strings import PROMPT_SYNTHETIC_CONTINUE
+                synthetic_msg = ChatMessage(
+                    role="user",
+                    content=PROMPT_SYNTHETIC_CONTINUE,
+                )
+                chat_messages.append(synthetic_msg)
+                log.info("runner.synthetic_user_added", {
+                    "reason": "assistant_at_end_with_tools",
+                    "step": self._step,
+                    "session_id": self.session.id,
+                })
+        
+        # Add max steps warning if this is the last step (matching AegisOps)
+        if is_last_step:
+            from aegisops.session.prompt_strings import PROMPT_MAX_STEPS
+            chat_messages.append(ChatMessage(
+                role="assistant",
+                content=PROMPT_MAX_STEPS,
+            ))
+            
+            log.warn("runner.max_steps_reached", {
+                "step": self._step,
+                "max_steps": max_steps,
+                "session_id": self.session.id,
+            })
+            
+            # Disable tools when max steps reached
+            tools = []
+        
+        async def _publish_assistant_created(msg: MessageInfo) -> None:
+            if not self.callbacks.event_publish_callback:
+                return
+            await self.callbacks.event_publish_callback("message.updated", {
+                "info": {
+                    "id": msg.id,
+                    "sessionID": self.session.id,
+                    "role": "assistant",
+                    "time": {"created": int(time.time() * 1000)},
+                    "parentID": last_user.id,
+                    "modelID": self.model_id,
+                    "providerID": self.provider_id,
+                    "agent": agent.name,
+                    "mode": agent.name,
+                    "tokens": {
+                        "input": 0,
+                        "output": 0,
+                        "reasoning": 0,
+                        "cache": {"read": 0, "write": 0},
+                    },
+                }
+            })
+
+        async def _create_attempt_assistant_message() -> MessageInfo:
+            msg = await Message.create(
+                session_id=self.session.id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=agent.name,
+                model_id=self.model_id,
+                provider_id=self.provider_id,
+                parent_id=last_user.id,
+            )
+            await _publish_assistant_created(msg)
+            return msg
+
+        # Create assistant message for the first attempt.
+        assistant_msg = await _create_attempt_assistant_message()
+        
+        # Retry loop matching AegisOps' SessionProcessor.process()
+        # MAX_ERROR_RETRIES caps exception-based retries so a permanently-failing
+        # model endpoint (e.g. repeated 500) cannot hold the session loop open
+        # forever, which would block every subsequent user message via
+        # loop.already_running.
+        # The two counters are independent: empty-response retries (transient
+        # model quirk) and exception retries (API errors) track separately so
+        # that one kind of failure doesn't eat the other's budget.
+        MAX_EMPTY_RETRIES = 3
+        error_attempt = 0
+        empty_attempt = 0
+
+        while not self.is_aborted:
+            try:
+                # Set status to busy
+                SessionStatus.set(self.session.id, SessionStatusBusy())
+
+                # Call LLM with tools
+                try:
+                    result = await self._call_llm(
+                        provider=provider,
+                        messages=chat_messages,
+                        tools=tools,
+                        agent=agent,
+                        assistant_msg=assistant_msg,
+                    )
+                except asyncio.CancelledError:
+                    # An external abort cancels the step task mid-stream. Persist
+                    # the same marker the cooperative abort path writes below so
+                    # the partial reply is not left looking in-flight forever.
+                    await asyncio.shield(Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=self._build_message_aborted_error(),
+                        finish="error",
+                    ))
+                    raise
+
+                if getattr(self, "_llm_call_aborted", False):
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=self._build_message_aborted_error(),
+                        finish="error",
+                    )
+                    await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                    return StepResult(
+                        action="stop",
+                        content=result.content,
+                        usage=result.usage,
+                    )
+
+                # Detect empty response: some models (e.g. MiniMax) occasionally
+                # return 0 chunks with finish_reason=stop after tool execution,
+                # producing no text and no tool calls. Treat this as a transient
+                # failure and retry with exponential backoff instead of silently
+                # terminating the agent.
+                if (result.action == "stop" and not result.error
+                        and not result.content and not result.tool_calls):
+                    empty_attempt += 1
+                    unsafe_auto_replay = (
+                        self._attempt_state.tool_execution_started
+                        or (
+                            self._defer_step_errors
+                            and not self._attempt_state.replay_safe
+                        )
+                    )
+                    if empty_attempt <= MAX_EMPTY_RETRIES and not unsafe_auto_replay:
+                        # Record usage for this empty attempt even though we are
+                        # about to retry – the provider may have already charged
+                        # for the tokens returned in this response.
+                        await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                        delay_ms = SessionRetry.jittered_delay(empty_attempt)
+                        next_retry_time = int(time.time() * 1000) + delay_ms
+                        log.warn("runner.step.empty_response_retry", {
+                            "attempt": empty_attempt,
+                            "delay_ms": delay_ms,
+                            "session_id": self.session.id,
+                            "model": self.model_id,
+                        })
+                        empty_retry_status = SessionStatusRetry(
+                            attempt=empty_attempt,
+                            message="Model returned empty response, retrying...",
+                            next=next_retry_time,
+                            maxAttempts=MAX_EMPTY_RETRIES,
+                            rateLimited=False,
+                            providerID=self.provider_id,
+                            modelID=self.model_id,
+                        )
+                        SessionStatus.set(self.session.id, empty_retry_status)
+                        await self._publish_retry_status(empty_retry_status)
+                        await SessionRetry.sleep(delay_ms, self._abort)
+                        await self._publish_busy_status()
+                        continue
+                    else:
+                        # All retries exhausted — surface a clear error so the
+                        # user knows the model is incompatible, rather than
+                        # silently hanging or showing a blank response.
+                        if unsafe_auto_replay:
+                            empty_error_msg = (
+                                f"Model '{self.model_id}' returned no final content after "
+                                "starting observable output; the call was not replayed."
+                            )
+                        else:
+                            empty_error_msg = (
+                                f"Model '{self.model_id}' returned an empty response "
+                                f"after {MAX_EMPTY_RETRIES} retries."
+                            )
+                        log.error("runner.step.empty_response_exhausted", {
+                            "session_id": self.session.id,
+                            "model": self.model_id,
+                            "attempts": empty_attempt,
+                        })
+                        empty_error_dict = {
+                            "name": "EmptyResponseError",
+                            "message": empty_error_msg,
+                            "data": {
+                                "message": empty_error_msg,
+                                "model": self.model_id,
+                                "attempts": empty_attempt,
+                            },
+                        }
+                        if self._defer_step_errors:
+                            return self._deferred_failure_result(
+                                message=empty_error_msg,
+                                error_data=empty_error_dict,
+                                assistant_message_id=assistant_msg.id,
+                                decision=FailoverDecision(True, "empty_response"),
+                                attempts=empty_attempt,
+                            )
+                        if self.callbacks.on_error:
+                            await self.callbacks.on_error(empty_error_msg)
+                        await Message.update(
+                            self.session.id,
+                            assistant_msg.id,
+                            error=empty_error_dict,
+                            finish="error",
+                        )
+                        text_part = await self._ensure_visible_error_text(assistant_msg, empty_error_msg)
+                        await self._publish_assistant_error_message(
+                            assistant_msg,
+                            agent_name=agent.name,
+                            parent_id=last_user.id,
+                            error_dict=empty_error_dict,
+                            text_part=text_part,
+                        )
+                        return StepResult(action="stop", error=empty_error_msg)
+
+                truncation_count = self._count_tool_args_truncation(
+                    truncated=result.tool_args_truncated,
+                    last_user_id=last_user.id,
+                )
+                if truncation_count >= MAX_CONSECUTIVE_TOOL_ARG_TRUNCATIONS:
+                    truncation_error_msg = (
+                        "Model output was truncated while generating tool arguments "
+                        f"in {truncation_count} consecutive steps, so the turn was "
+                        "stopped instead of repeating the oversized tool call. Ask the "
+                        "model to split large content into smaller pieces, or raise the "
+                        "model's output token limit."
+                    )
+                    log.error("runner.step.tool_args_truncation_exhausted", {
+                        "session_id": self.session.id,
+                        "model": self.model_id,
+                        "consecutive": truncation_count,
+                    })
+                    truncation_error_dict = {
+                        "name": "StreamToolArgumentsTruncatedError",
+                        "message": truncation_error_msg,
+                        "data": {
+                            "message": truncation_error_msg,
+                            "model": self.model_id,
+                            "consecutive": truncation_count,
+                        },
+                    }
+                    await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                    if self._defer_step_errors:
+                        # Another candidate may have a larger output budget.
+                        # If this step ran no tool, the loop can drop it and
+                        # let that model redo the step without running
+                        # anything twice.
+                        return self._deferred_failure_result(
+                            message=truncation_error_msg,
+                            error_data=truncation_error_dict,
+                            assistant_message_id=assistant_msg.id,
+                            decision=FailoverDecision(True, "stream_truncated"),
+                            attempts=truncation_count,
+                            allow_fallback_override=(
+                                not self._attempt_state.tool_execution_started
+                            ),
+                        )
+                    if self.callbacks.on_error:
+                        await self.callbacks.on_error(truncation_error_msg)
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=truncation_error_dict,
+                        finish="error",
+                    )
+                    text_part = await self._ensure_visible_error_text(assistant_msg, truncation_error_msg)
+                    await self._publish_assistant_error_message(
+                        assistant_msg,
+                        agent_name=agent.name,
+                        parent_id=last_user.id,
+                        error_dict=truncation_error_dict,
+                        text_part=text_part,
+                    )
+                    return StepResult(action="stop", error=truncation_error_msg)
+
+                tool_loop_guard = self._update_tool_loop_guard(
+                    result,
+                    last_user_id=last_user.id,
+                )
+                if tool_loop_guard.get("action") == "halt":
+                    halt_message = self._build_tool_loop_halt_message(
+                        tool_name=str(tool_loop_guard.get("tool_name") or "tool"),
+                        count=int(tool_loop_guard.get("count", 0) or 0),
+                    )
+                    log.warn("runner.tool_loop_guard_halt", {
+                        "tool_name": tool_loop_guard.get("tool_name"),
+                        "reason": tool_loop_guard.get("reason"),
+                        "count": tool_loop_guard.get("count"),
+                        "step": self._step,
+                    })
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        content=halt_message,
+                    )
+                    result = StepResult(
+                        action="stop",
+                        content=halt_message,
+                        error=(
+                            "runner_tool_loop_guard_halt:repeated_exact_tool_call:"
+                            f"{tool_loop_guard.get('tool_name') or 'tool'}"
+                        ),
+                        usage=result.usage,
+                    )
+
+                # Success! Update finish reason
+                finish = "tool-calls" if result.tool_calls else "stop"
+                await Message.update(self.session.id, assistant_msg.id, finish=finish)
+                await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+
+                # Note: Compaction check is now done in the main loop (run()) before processing step
+                # This matches AegisOps's logic: check lastFinished.tokens at loop start
+
+                return result
+
+            except Exception as e:
+                error_attempt += 1
+                error_log_context = {
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                    "error_module": type(e).__module__,
+                    "error_repr": repr(e)[:1000],
+                }
+                # Convert exception to error dict for retry check
+                error_dict = self._exception_to_error_dict(e)
+
+                # Check if retryable
+                retry_message = SessionRetry.retryable(error_dict)
+                failover_decision = self.classify_failover_error(error_dict)
+                retry_limit = MAX_ERROR_RETRIES
+                will_retry = retry_message is not None and error_attempt <= retry_limit
+                retry_blocked_by_tool_execution = (
+                    self._attempt_state.tool_execution_started
+                )
+                if retry_blocked_by_tool_execution:
+                    # A tool may already have changed external state. Replaying
+                    # the provider request can emit the same call again with a
+                    # new call id, so no retry mode is safe past this boundary.
+                    if will_retry:
+                        # Kept on the stored error so the stop can say why a
+                        # retryable error still ended the turn.
+                        error_dict["data"]["retrySuppressed"] = "tool_execution_started"
+                    will_retry = False
+                elif self._defer_step_errors and not self._attempt_state.replay_safe:
+                    # Retrying after text/reasoning/tool activity can duplicate
+                    # visible output or execute a tool twice.
+                    will_retry = False
+
+                # The delay is capped at RETRY_MAX_DELAY_NO_HEADERS so a
+                # headers-present but retry-after-absent 500 response cannot
+                # cause multi-minute sleeps, and jittered so N sessions
+                # rejected by the same 429 do not retry in lockstep.
+                from aegisops.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
+                delay_ms = SessionRetry.jittered_delay(
+                    error_attempt,
+                    error_dict,
+                    max_delay_ms=RETRY_MAX_DELAY_NO_HEADERS,
+                )
+                rate_limited = SessionRetry.is_rate_limited(error_dict)
+                if rate_limited:
+                    # Every other caller of this provider backs off too,
+                    # instead of piling onto an upstream that just said no.
+                    # This is independent of our own retry budget: the last
+                    # 429 of an exhausted caller is exactly when the rest
+                    # should hold off.
+                    report_provider_rate_limited(
+                        self.provider_id,
+                        delay_ms / 1000.0,
+                        reason="http_429",
+                    )
+
+                if will_retry:
+                    next_retry_time = int(time.time() * 1000) + delay_ms
+
+                    log.warn("runner.step.retry", {
+                        **error_log_context,
+                        "attempt": error_attempt,
+                        "delay_ms": delay_ms,
+                        "reason": retry_message,
+                        "rate_limited": rate_limited,
+                        "max_retries": retry_limit,
+                    })
+                    
+                    # Set retry status
+                    retry_status = SessionStatusRetry(
+                        attempt=error_attempt,
+                        message=retry_message,
+                        next=next_retry_time,
+                        maxAttempts=retry_limit,
+                        rateLimited=rate_limited,
+                        providerID=self.provider_id,
+                        modelID=self.model_id,
+                    )
+                    SessionStatus.set(self.session.id, retry_status)
+                    await self._publish_retry_status(retry_status)
+                    
+                    # Wait before retry
+                    await SessionRetry.sleep(delay_ms, self._abort)
+
+                    self._attempt_state = LlmAttemptState()
+                    await self._publish_busy_status()
+                    
+                    # Continue to next retry attempt
+                    continue
+                else:
+                    # Error is not retryable, or retry budget exhausted
+                    if retry_blocked_by_tool_execution:
+                        log.error("runner.step.retry_suppressed", {
+                            **error_log_context,
+                            "attempt": error_attempt,
+                            "reason": "tool_execution_started",
+                        })
+                    elif retry_message is not None:
+                        log.error("runner.step.max_retries_exceeded", {
+                            **error_log_context,
+                            "attempt": error_attempt,
+                            "max_retries": retry_limit,
+                        })
+                    else:
+                        log.error("runner.step.not_retryable", {
+                            **error_log_context,
+                            "attempt": error_attempt,
+                        })
+
+                    final_error_message = str(e)
+                    if SessionRetry.is_connection_error(error_dict):
+                        final_error_message = CONNECTION_ERROR_DISPLAY_MESSAGE
+                        error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
+
+                    if self._defer_step_errors:
+                        return self._deferred_failure_result(
+                            message=final_error_message,
+                            error_data=error_dict,
+                            assistant_message_id=assistant_msg.id,
+                            decision=failover_decision,
+                            attempts=error_attempt,
+                        )
+
+                    if self.callbacks.on_error:
+                        await self.callbacks.on_error(final_error_message)
+                    
+                    # Update assistant message with error (must be dict, not string)
+                    await Message.update(
+                        self.session.id,
+                        assistant_msg.id,
+                        error=error_dict,
+                        finish="error",
+                    )
+                    text_part = await self._ensure_visible_error_text(assistant_msg, final_error_message)
+                    await self._publish_assistant_error_message(
+                        assistant_msg,
+                        agent_name=agent.name,
+                        parent_id=last_user.id,
+                        error_dict=error_dict,
+                        text_part=text_part,
+                    )
+                    
+                    return StepResult(
+                        action="stop", error=final_error_message,
+                        error_code=error_dict["data"].get("error_code"),
+                    )
+        
+        # Aborted
+        return StepResult(action="stop", error="Aborted")
+
+    @staticmethod
+    def _build_tokens_update(
+        stream_usage: Optional[Dict[str, Any]],
+        *,
+        request_tokens: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Normalize runner token updates from provider usage.
+
+        ``input`` is the uncached part of the prompt, next to cache reads and
+        writes (see ``aegisops.provider.token_usage``).  ``request_tokens`` is an
+        estimate of the request that produced the usage; it is only needed
+        when the usage guesses that prompt_tokens counts the cache.
+        """
+        if not stream_usage:
+            return None
+        usage = resolve_usage(settle_cache_in_prompt(stream_usage, request_tokens))
+        return {
+            "input": usage.input,
+            "output": usage.output,
+            "reasoning": usage.reasoning,
+            "cache": {
+                "read": usage.cache_read,
+                "write": usage.cache_write,
+                # Without a report the counts above are unknown, not zero.
+                "reported": usage.cache_reported,
+            },
+        }
+
+    @staticmethod
+    def _estimate_request_tokens(
+        messages: List[Any],
+        tools: Optional[List[Dict[str, Any]]],
+    ) -> int:
+        """Rough size of a request as sent: message text, replayed reasoning,
+        tool calls and tool schemas.  Images and other non-text blocks are left
+        out rather than counted by their encoded size."""
+        def field(item: Any, name: str) -> Any:
+            return item.get(name) if isinstance(item, dict) else getattr(item, name, None)
+
+        total = 0
+        for message in messages:
+            content = field(message, "content")
+            if isinstance(content, str):
+                total += SessionPrompt.count_tokens(content)
+            elif isinstance(content, list):
+                for block in content:
+                    text = block.get("text") if isinstance(block, dict) else None
+                    if isinstance(text, str):
+                        total += SessionPrompt.count_tokens(text)
+            reasoning = field(message, "reasoning_content")
+            if isinstance(reasoning, str):
+                total += SessionPrompt.count_tokens(reasoning)
+            tool_calls = field(message, "tool_calls")
+            if tool_calls:
+                total += SessionPrompt.count_tokens(
+                    json.dumps(tool_calls, ensure_ascii=False, default=str)
+                )
+        if tools:
+            total += SessionPrompt.count_tokens(json.dumps(tools, ensure_ascii=False, default=str))
+        return total
+
+    @staticmethod
+    def _serialize_chat_message_for_langfuse(message: ChatMessage) -> Dict[str, Any]:
+        """Serialize the exact provider-bound message payload for Langfuse."""
+        if hasattr(message, "model_dump"):
+            return message.model_dump(exclude_none=True)
+        return {
+            "role": message.role,
+            "content": message.content,
+            "reasoning": getattr(message, "reasoning", None),
+            "tool_calls": getattr(message, "tool_calls", None),
+            "tool_call_id": getattr(message, "tool_call_id", None),
+            "name": getattr(message, "name", None),
+            "custom_settings": getattr(message, "custom_settings", {}),
+        }
+
+    @classmethod
+    def _build_langfuse_request_payload(
+        cls,
+        *,
+        step: int,
+        messages: List[ChatMessage],
+        request_tools: Optional[List[Dict[str, Any]]],
+        available_tools: List[Dict[str, Any]],
+        provider_options: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "step": step,
+            "messages": [cls._serialize_chat_message_for_langfuse(message) for message in messages],
+            "provider_options": provider_options,
+        }
+        if request_tools is not None:
+            payload["request_tools"] = request_tools
+        if available_tools:
+            payload["available_tools"] = available_tools
+        return payload
+
+    @staticmethod
+    def _build_langfuse_response_payload(
+        *,
+        action: str,
+        content: str,
+        reasoning: str,
+        finish_reason: Optional[str],
+        tool_calls: List[ToolCall],
+    ) -> Dict[str, Any]:
+        return {
+            "action": action,
+            "content": content,
+            "reasoning": reasoning,
+            "finish_reason": finish_reason,
+            "tool_calls": [
+                {
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                }
+                for tool_call in tool_calls
+            ],
+        }
+
+    def _resolve_usage_pricing(self) -> Optional[Any]:
+        """Resolve pricing config for the current provider/model pair."""
+        from aegisops.provider.usage_service import resolve_usage_pricing
+
+        return resolve_usage_pricing(self.provider_id, self.model_id)
+
+    async def _record_usage_if_available(
+        self,
+        usage: Optional[Dict[str, int]],
+        *,
+        message_id: Optional[str] = None,
+    ) -> None:
+        """Persist usage records without blocking successful session steps.
+
+        All exceptions – including ImportError when server routes are absent
+        in CLI-only environments – are caught here so that a usage-recording
+        failure can never corrupt an already-successful step result.
+
+        Uses the shared provider-layer usage service so that CLI and HTTP
+        callers rely on the same persistence and aggregation path.
+        """
+        from aegisops.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
+        if not usage:
+            if controls is not None and controls.max_budget is not None:
+                controls.failure = "Provider did not report usage; cannot enforce --max-budget"
+            return
+
+        try:
+            from aegisops.provider.usage_service import RecordUsageRequest, record_usage
+
+            # The same breakdown as the message tokens: the record keeps the
+            # whole prompt, the cache inside it once.
+            tokens = resolve_usage(usage)
+            response_id = usage.get("response_id")
+            await record_usage(
+                RecordUsageRequest(
+                    provider_id=self.provider_id,
+                    model_id=self.model_id,
+                    session_id=self.session.id,
+                    message_id=message_id,
+                    input_tokens=tokens.prompt,
+                    output_tokens=tokens.output,
+                    cached_tokens=tokens.cache_read,
+                    cache_write_tokens=tokens.cache_write,
+                    cache_reported=tokens.cache_reported,
+                    reasoning_tokens=tokens.reasoning,
+                    response_id=response_id if isinstance(response_id, str) else None,
+                    pricing=self._resolve_usage_pricing(),
+                )
+            )
+        except Exception as exc:
+            log.warn("runner.usage_record_failed", {
+                "session_id": self.session.id,
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "error": str(exc),
+            })
+    
+    async def _build_turn_prompt_context(
+        self,
+        *,
+        agent: AgentInfo,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+        minimal_prompt: bool = False,
+    ) -> TurnPromptContext:
+        """Collect cached runtime values before deterministic prompt assembly."""
+        if minimal_prompt or getattr(agent, "prompt_profile", "standard") == "isolated":
+            return await self._add_turn_prompt_tail(
+                TurnPromptContext(minimal_prompt=True),
+                messages=messages,
+                last_user=last_user,
+                tools=tools,
+            )
+
+        from aegisops.config import Config
+        from aegisops.project.instance import Instance
+
+        try:
+            from aegisops.tool.device.store import device_revision
+
+            current_device_revision = device_revision()
+        except Exception:
+            current_device_revision = None
+
+        current_tool_revision = ToolRegistry.revision()
+        try:
+            config = await Config.get()
+            config_data = config.model_dump(by_alias=True, exclude_none=True)
+            config_instructions = tuple(config.instructions or ())
+        except Exception as exc:
+            log.debug("runner.prompt_context.config_error", {"error": str(exc)})
+            config_data = None
+            config_instructions = ()
+
+        worktree = Instance.get_worktree()
+        sandbox_context, channel_context, device_asset_hint = await asyncio.gather(
+            self._build_sandbox_prompt(agent, config_data=config_data),
+            self._build_channel_context_prompt(),
+            self._build_device_asset_hint(),
+        )
+        source_context = TurnPromptContext(
+            tool_catalog=self._build_tool_catalog_prompt(agent),
+            device_asset_hint=device_asset_hint,
+            sandbox_context=sandbox_context,
+            channel_context=channel_context,
+            worktree=worktree,
+            config_instructions=config_instructions,
+            tool_revision=current_tool_revision,
+            device_revision=current_device_revision,
+            minimal_prompt=False,
+        )
+
+        return await self._add_turn_prompt_tail(
+            source_context,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+        )
+
+    async def _add_turn_prompt_tail(
+        self,
+        source_context: TurnPromptContext,
+        *,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+    ) -> TurnPromptContext:
+        """Add uncached per-step context and reminders to a source snapshot."""
+        text_tool_catalog = None
+        if self._should_use_text_tool_call_mode() and tools:
+            text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
+
+        tool_results_reminder = None
+        repeated_tool_calls_reminder = None
+        last_assistant_msg = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.role == MessageRole.ASSISTANT
+            ),
+            None,
+        )
+        if last_assistant_msg is not None:
+            parts = await Message.parts(last_assistant_msg.id, self.session.id)
+            has_text = any(
+                getattr(part, "type", None) == "text"
+                and getattr(part, "text", "").strip()
+                for part in parts
+            )
+            has_tool_result = any(
+                getattr(part, "type", None) == "tool"
+                and getattr(getattr(part, "state", None), "status", None)
+                in ("completed", "error", "running")
+                for part in parts
+            )
+            if has_tool_result and not has_text:
+                from aegisops.session.prompt_strings import (
+                    PROMPT_TOOL_RESULTS_AVAILABLE,
+                )
+
+                tool_results_reminder = PROMPT_TOOL_RESULTS_AVAILABLE
+
+            if has_tool_result and self._should_warn_about_tool_loop(
+                last_user_id=last_user.id,
+            ):
+                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
+                log.warn("runner.repeated_tool_calls_detected", {
+                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
+                    "exact_count": state.get("exact_count", 0),
+                    "step": self._step,
+                })
+                from aegisops.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
+
+                repeated_tool_calls_reminder = PROMPT_REPEATED_TOOL_CALLS
+
+        return replace(
+            source_context,
+            additional_context=self._turn_additional_context,
+            text_tool_catalog=text_tool_catalog,
+            tool_results_reminder=tool_results_reminder,
+            repeated_tool_calls_reminder=repeated_tool_calls_reminder,
+        )
+
+    async def _build_device_asset_hint(self) -> Optional[str]:
+        """Return concise device-aware tool guidance plus enabled device summary."""
+        try:
+            from aegisops.tool.device.store import list_devices
+
+            devices = await list_devices()
+        except Exception as exc:
+            log.warn("runner.device_hint_failed", {"error": str(exc)})
+            devices = []
+
+        vendor_by_storage_key: Dict[str, str] = {}
+        try:
+            for tool_info in ToolRegistry.list_tools():
+                if getattr(tool_info, "source", None) != "device":
+                    continue
+                storage_key = str(getattr(tool_info, "provider", "") or "").strip()
+                vendor = str(getattr(tool_info, "vendor", "") or "").strip()
+                if storage_key and vendor and storage_key not in vendor_by_storage_key:
+                    vendor_by_storage_key[storage_key] = vendor
+        except Exception as exc:
+            log.warn("runner.device_hint_vendor_map_failed", {"error": str(exc)})
+
+        enabled_devices = [device for device in devices if getattr(device, "enabled", False)]
+        device_lines = []
+        for device in enabled_devices:
+            vendor = vendor_by_storage_key.get(device.storage_key) or "unknown"
+            device_lines.append(f"- `{device.name}` -> `{vendor}`")
+
+        summary = (
+            "当前已启用设备（名称 -> 厂商）:\n"
+            + ("\n".join(device_lines) if device_lines else "- 当前无已启用设备")
+        )
+
+        return (
+            "## 安全设备使用\n\n"
+            f"{summary}\n\n"
+            "当用户要操作特定机房、设备或产品时，先调用 `device_manage(action='list')` 获取 `device_id` 等相关信息。"
+            "如果当前无已接入设备，请提示用户前往「设备接入」页面添加设备。"
+            "使用 `tool_search` 搜索工具名称查看用法；执行设备工具时必须传入目标 `device_id`。"
+            "如果同类设备有多个候选，不要猜测，先询问用户选择。"
+        )
+
+    async def _build_sandbox_prompt(
+        self,
+        agent: AgentInfo,
+        *,
+        config_data: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
+        """Build sandbox context prompt when sandboxing is active."""
+        try:
+            from aegisops.session.core.session_state import get_main_session_id
+            from aegisops.sandbox.system_prompt import build_sandbox_system_prompt
+
+            if config_data is None:
+                from aegisops.config import Config
+
+                config = await Config.get()
+                config_data = config.model_dump(by_alias=True, exclude_none=True)
+            session_key = self.session.id
+            main_session_key = get_main_session_id() or self.session.id
+            return await build_sandbox_system_prompt(
+                config_data=config_data,
+                session_key=session_key,
+                agent_id=agent.name,
+                main_session_key=main_session_key,
+                workspace_dir=self.session.directory,
+            )
+        except Exception as e:
+            log.debug("runner.sandbox_prompt.error", {"error": str(e)})
+            return None
+
+    async def _build_channel_context_prompt(self) -> Optional[str]:
+        """Build a brief system prompt snippet describing the IM channel context.
+
+        When the current session was initiated from an IM channel (Feishu, WeCom,
+        or DingTalk), this injects a one-liner so the agent knows:
+          - which platform the user is on
+          - the current AegisOps session ID
+
+        The lookup is best-effort: if the binding table is unavailable or the
+        session has no binding the method returns None silently.
+        """
+        try:
+            from aegisops.channel.inbound.session_binding import SessionBindingService
+
+            svc = SessionBindingService()
+            bindings = await svc.get_bindings_by_session(self.session.id)
+            if not bindings:
+                return (
+                    f"## Current Session Context\n\n"
+                    f"This conversation originates from the **AegisOps Web UI** (not an IM channel).\n"
+                    f"Session ID: {self.session.id}\n\n"
+                    f"When the user asks to send a message to an IM platform, you do NOT have a "
+                    f"target IM session ID yet — you must discover and ask the user to pick one."
+                )
+
+            # Map channel_id prefix → human-readable platform name
+            _CHANNEL_NAMES = {
+                "feishu": "Feishu (飞书)",
+                "wecom": "WeCom (企业微信)",
+                "dingtalk": "DingTalk (钉钉)",
+            }
+
+            parts = []
+            for b in bindings:
+                cid = b.channel_id or ""
+                platform = next(
+                    (name for key, name in _CHANNEL_NAMES.items() if cid.startswith(key)),
+                    cid,
+                )
+                chat_type = b.chat_type.value if b.chat_type else "unknown"
+                parts.append(f"- Platform: {platform}, chat_type: {chat_type}, channel_id: {cid}")
+
+            lines = "\n".join(parts)
+            return (
+                f"## Current IM Channel Context\n\n"
+                f"This conversation originates from an IM channel. Details:\n"
+                f"{lines}\n"
+                f"Session ID: {self.session.id}\n\n"
+                f"You can use this information when the user asks which platform they are "
+                f"on, when sending messages back to the channel, or when the context of "
+                f"the conversation depends on the IM source."
+            )
+        except Exception as e:
+            log.debug("runner.channel_context_prompt.error", {"error": str(e)})
+            return None
+
+    def _list_catalog_tool_infos(self, agent: AgentInfo) -> List[Any]:
+        tool_infos: List[Any] = []
+        is_rex = getattr(agent, "name", "") == "rex"
+
+        for tool_info in list_tool_catalog_infos():
+            if is_rex:
+                tool_infos.append(tool_info)
+                continue
+
+            metadata = get_tool_catalog_metadata(tool_info.name, tool_info)
+            if not agent_declares_tool(agent, tool_info.name) and not metadata.always_load:
+                continue
+            tool_infos.append(tool_info)
+
+        return tool_infos
+
+    def _build_tool_catalog_prompt(self, agent: AgentInfo) -> Optional[str]:
+        from aegisops.command.direct import format_tools_catalog_summary
+        from aegisops.agent.toolset import get_all_enabled_builtin_tool_names
+
+        is_rex = getattr(agent, "name", "") == "rex"
+        if not is_rex:
+            return None
+
+        catalog_tools = self._list_catalog_tool_infos(agent)
+        excluded_tool_names = (
+            set(get_all_enabled_builtin_tool_names())
+            | get_always_load_tool_names()
+        )
+        catalog_tools = [
+            tool_info
+            for tool_info in catalog_tools
+            if tool_info.name not in excluded_tool_names
+            and getattr(tool_info, "source", None) != "device"
+        ]
+        if not catalog_tools:
+            return None
+
+        catalog_summary = format_tools_catalog_summary(
+            tools=catalog_tools,
+            max_description_chars=100,
+            include_tip=False,
+        )
+        if not catalog_summary:
+            return None
+
+        rules = (
+            "The following deferred tools are available via `tool_search`. "
+            "Their schemas are NOT loaded - calling them directly will fail "
+            "with `InputValidationError`. Use `tool_search` with query "
+            "`select:<name>[,<name>...]` to load tool schemas before calling them:"
+        )
+
+        return (
+            "## Tool Catalog Awareness\n\n"
+            f"{rules}\n\n"
+            f"{catalog_summary}"
+        )
+
+    @staticmethod
+    def _with_isolated_tool_catalog(
+        messages: List[ChatMessage],
+        agent: AgentInfo,
+        tools: List[Dict[str, Any]],
+    ) -> List[ChatMessage]:
+        """Add awareness only from final, declared callable schemas.
+
+        Run after before-LLM hooks so narrowed tools cannot remain in an old
+        catalog. Do not change the cached conversation or persisted history.
+        """
+        if getattr(agent, "prompt_profile", "standard") != "isolated":
+            return messages
+        declared = set(getattr(agent, "tools", None) or [])
+        lines = ["## Current Callable Tools", ""]
+        names = set()
+        for tool in tools:
+            function = tool.get("function") or {}
+            name = function.get("name")
+            if not isinstance(name, str) or name not in declared or name in names:
+                continue
+            names.add(name)
+            description = " ".join(str(function.get("description") or "").split())[:160]
+            lines.append(f"- `{name}`: {description}")
+        if "tool_search" in names:
+            lines.extend([
+                "",
+                "Use `tool_search` to find a matching capability or inspect exact tool names. "
+                "Discovery is limited to this agent's declared and currently allowed tools; "
+                "it cannot grant new permissions or enable an unavailable tool.",
+            ])
+        if not names:
+            lines.append("No declared tools are currently callable. State the missing capability when needed.")
+        catalog = "\n".join(lines)
+        updated = list(messages)
+        for index, message in enumerate(updated):
+            if message.role != "system":
+                continue
+            system_message = copy.deepcopy(message)
+            if isinstance(system_message.content, list):
+                system_message.content.append({"type": "text", "text": catalog})
+            else:
+                system_message.content = f"{system_message.content or ''}\n\n{catalog}"
+            updated[index] = system_message
+            return updated
+        return [ChatMessage(role="system", content=catalog), *updated]
+
+    def _should_use_text_tool_call_mode(self) -> bool:
+        # MiniMax models exposed through ThreatBook-managed gateways do not
+        # forward the OpenAI ``tool_calls`` field on their streaming chunks
+        # (observed on ``threatbook-cn-llm`` 2026-04: first ``ChoiceDelta``
+        # only contains ``content`` / ``role``). Without this opt-in the
+        # model can never request a tool and ends every turn with
+        # ``finish_reason=stop`` and zero tool calls. Force the MiniMax XML
+        # text-call protocol for these provider/model pairs so tools work.
+
+        # model_lower = (self.model_id or "").lower()
+        # provider_lower = (self.provider_id or "").lower()
+        # minimax_text_tool_call_providers = {
+        #     "custom-threatbook-internal",
+        #     "custom-tb-inner",
+        #     "threatbook-cn-llm",
+        # }
+        # return (
+        #     "minimax" in model_lower
+        #     and provider_lower in minimax_text_tool_call_providers
+        # )
+        return False
+
+    def _build_text_tool_call_catalog_prompt(self, tools: List[Dict[str, Any]]) -> Optional[str]:
+        if not tools:
+            return None
+
+        lines = [
+            "## Available Tools",
+            "Use only the following tools when emitting MiniMax XML tool calls.",
+            "This section is the authoritative callable schema for this turn.",
+            "Parameter names must match exactly. Never infer or rename arguments from the awareness catalog.",
+        ]
+        for tool in tools:
+            fn = tool.get("function", {})
+            name = fn.get("name", "")
+            if not name:
+                continue
+            description = fn.get("description", "").strip()
+            params = fn.get("parameters", {}) or {}
+            properties = params.get("properties", {}) if isinstance(params, dict) else {}
+            required = params.get("required", []) if isinstance(params, dict) else []
+
+            lines.append(f"- `{name}`: {description or 'No description provided.'}")
+            if properties:
+                lines.append("  Parameters:")
+                for param_name, spec in properties.items():
+                    param_type = spec.get("type", "any") if isinstance(spec, dict) else "any"
+                    param_desc = spec.get("description", "") if isinstance(spec, dict) else ""
+                    required_suffix = "required" if param_name in required else "optional"
+                    if param_desc:
+                        lines.append(f"  - `{param_name}` ({param_type}, {required_suffix}): {param_desc}")
+                    else:
+                        lines.append(f"  - `{param_name}` ({param_type}, {required_suffix})")
+
+        return "\n".join(lines)
+    
+    async def _build_callable_tool_schema(
+        self,
+        agent: AgentInfo,
+        messages: Optional[List[MessageInfo]] = None,
+    ) -> List[Dict[str, Any]]:
+        """Build tool definitions for LLM."""
+        started_at = time.perf_counter()
+        selected_tool_infos, selection_metadata = await self._list_callable_tool_infos_for_turn(agent, messages or [])
+        await self._publish_turn_tools_event(selection_metadata)
+
+        text_tool_call_mode = self._should_use_text_tool_call_mode()
+        cache_key = self._tool_schema_cache_key(
+            agent,
+            selected_tool_infos,
+            text_tool_call_mode=text_tool_call_mode,
+        )
+        schema_cache = self._static_cache.setdefault("tool_schema_cache", {})
+        cached_tools = schema_cache.get(cache_key)
+        if cached_tools is not None:
+            self._log_perf(
+                "runner.tools_schema_cached",
+                started_at,
+                selected=len(cached_tools),
+                enabled=selection_metadata.get("enabledToolCount"),
+            )
+            return copy.deepcopy(cached_tools)
+
+        tools = []
+        for tool_info in selected_tool_infos:
+            description = tool_info.description
+
+            # Surface provider/service version to the model so it can pick
+            # version-appropriate parameters (e.g. SIP v9.2 vs older spec).
+            description = _annotate_with_provider_version(tool_info, description)
+
+            schema = tool_info.get_schema()
+            tool_def = {
+                "type": "function",
+                "function": {
+                    "name": tool_info.name,
+                    "description": description,
+                    "parameters": schema.to_json_schema(),
+                }
+            }
+            tools.append(tool_def)
+
+        schema_cache[cache_key] = copy.deepcopy(tools)
+
+        log.info("runner.tools_selected", {
+            "session_id": self.session.id,
+            "step": self._step,
+            "selected": len(tools),
+            "enabled": selection_metadata.get("enabledToolCount"),
+        })
+        self._log_perf(
+            "runner.tools_schema_built",
+            started_at,
+            selected=len(tools),
+            enabled=selection_metadata.get("enabledToolCount"),
+        )
+        return tools
+    
+    def _agent_declares_tool(self, agent: AgentInfo, tool_name: str) -> bool:
+        """Check if agent statically declares a tool."""
+        tool = ToolRegistry.get(tool_name)
+        if tool is None:
+            return False
+        metadata = get_tool_catalog_metadata(tool_name, tool.info)
+        return agent_declares_tool(agent, tool_name) or metadata.always_load
+    
+    async def _publish_retry_status(self, status: SessionStatusRetry) -> None:
+        """Push the retry state to clients; SessionStatus alone is poll-only.
+
+        Serialized straight from the stored status so a client that refreshes
+        mid-backoff and falls back to ``/api/session/status`` sees exactly the
+        same fields the SSE event carried.
+        """
+        publish = self.callbacks.event_publish_callback
+        if not publish:
+            return
+        try:
+            await publish("session.status", {
+                "sessionID": self.session.id,
+                "status": status.model_dump(mode="json"),
+            })
+        except Exception as exc:
+            log.debug("runner.retry_status.publish_failed", {"error": str(exc)})
+
+    async def _publish_busy_status(self) -> None:
+        """Tell clients a retry sleep ended and the next attempt is in flight."""
+        publish = self.callbacks.event_publish_callback
+        if not publish:
+            return
+        try:
+            await publish("session.status", {
+                "sessionID": self.session.id,
+                "status": {"type": "busy"},
+            })
+        except Exception as exc:
+            log.debug("runner.busy_status.publish_failed", {"error": str(exc)})
+
+    async def _resolve_llm_priority(self) -> int:
+        """Interactive lineages go first; scheduled/workflow work waits behind them.
+
+        A session (or subagent) whose root ancestor is a scheduled task,
+        workflow temp parent or memory-evolution session (``category ==
+        "task"``) is background. Everything else (``user``, agent-studio
+        ``test`` sessions, ...) has a person waiting on it and is interactive.
+        """
+        cached = getattr(self, "_llm_priority", None)
+        if cached is None:
+            # One runner per step: keep the answer for the whole loop run.
+            cached = self._static_cache.get("llm_priority")
+        if isinstance(cached, int):
+            self._llm_priority = cached
+            return cached
+        priority = PRIORITY_INTERACTIVE
+        try:
+            current = self.session
+            seen: set = set()
+            while current is not None and current.id not in seen and len(seen) < 16:
+                seen.add(current.id)
+                parent_id = getattr(current, "parent_id", None)
+                if not parent_id:
+                    break
+                parent = await Session.get_by_id_unfiltered(parent_id)
+                if parent is None:
+                    break
+                current = parent
+            root_category = str(getattr(current, "category", "user") or "user")
+            if root_category in BACKGROUND_SESSION_CATEGORIES:
+                priority = PRIORITY_BACKGROUND
+        except Exception as exc:
+            log.debug("runner.llm_priority.resolve_failed", {"error": str(exc)})
+        self._llm_priority = priority
+        self._static_cache["llm_priority"] = priority
+        return priority
+
+    async def _resolve_max_parallel_subagents(self) -> int:
+        """Per-response cap on concurrently running foreground subagents."""
+        cached = self._static_cache.get("max_parallel_subagents")
+        if isinstance(cached, int):
+            return cached
+        try:
+            from aegisops.config.config import Config
+
+            config = await Config.get()
+        except Exception as exc:
+            log.debug("runner.max_parallel_subagents.config_failed", {"error": str(exc)})
+            config = None
+        value = resolve_max_parallel_subagents(config)
+        self._static_cache["max_parallel_subagents"] = value
+        return value
+
+    def _report_rate_limit_cooldown_for_exception(self, exc: BaseException) -> None:
+        """Apply a provider cooldown as soon as a 429 is seen."""
+        try:
+            error_dict = self._exception_to_error_dict(exc)
+            if not SessionRetry.is_rate_limited(error_dict):
+                return
+            hinted_ms = SessionRetry.retry_after_ms(error_dict)
+            cooldown_s = (
+                hinted_ms / 1000.0 if hinted_ms is not None else MIN_RATE_LIMIT_COOLDOWN_S
+            )
+            report_provider_rate_limited(self.provider_id, cooldown_s, reason="http_429")
+        except Exception as report_exc:
+            log.debug("runner.rate_limit_cooldown.failed", {"error": str(report_exc)})
+
+    def _release_llm_slot(self, reason: str) -> None:
+        slot: Optional[LlmSlot] = getattr(self, "_active_llm_slot", None)
+        if slot is None:
+            return
+        self._active_llm_slot = None
+        if slot.released:
+            return
+        slot.release()
+        log.debug("runner.llm_slot.released", {
+            "provider_id": self.provider_id,
+            "reason": reason,
+            "held_s": round(time.monotonic() - slot.granted_at, 3),
+        })
+
+    def _release_budget_slot(self, reason: str) -> None:
+        slot = getattr(self, "_active_budget_slot", None)
+        if slot is None:
+            return
+        self._active_budget_slot = None
+        slot.release()
+        log.debug("runner.llm_budget_slot.released", {
+            "session_id": self.session.id,
+            "reason": reason,
+        })
+
+    def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
+        """
+        Convert exception to error dict for retry checking.
+        
+        Ported from original MessageV2.fromError() structure.
+        """
+        error_dict = {
+            "name": type(exception).__name__,
+            "message": str(exception),
+            "data": {
+                "message": str(exception),
+                "providerID": self.provider_id,
+                "exceptionType": type(exception).__name__,
+                "exceptionModule": type(exception).__module__,
+            }
+        }
+
+        if isinstance(exception, output_limits.OutputLimitRejectedError):
+            # Retry on the same model: the next attempt is rebuilt with the
+            # configured output limit, which the provider accepted before.
+            error_dict["data"]["isRetryable"] = True
+            return error_dict
+
+        if type(exception).__name__ == "StreamToolArgumentsTruncatedError":
+            error_dict["data"].update({
+                "isRetryable": False,
+                "streamToolArgumentsTruncated": True,
+                "toolCallID": getattr(exception, "tool_call_id", None),
+                "toolName": getattr(exception, "tool_name", None),
+                "finishReason": getattr(exception, "finish_reason", None),
+                "argumentsLength": getattr(exception, "arguments_len", None),
+                "argumentsPreview": getattr(exception, "arguments_preview", None),
+            })
+
+        transport_exception = _find_retryable_transport_exception(exception)
+        if transport_exception is not None:
+            transport_type = type(transport_exception).__name__
+            error_dict["name"] = "APIError"
+            error_dict["data"].update({
+                "message": str(exception) or f"Transport connection error ({transport_type})",
+                "isRetryable": True,
+                "isConnectionError": True,
+                "displayMessage": CONNECTION_ERROR_DISPLAY_MESSAGE,
+                "transportExceptionType": transport_type,
+                "transportExceptionModule": type(transport_exception).__module__,
+            })
+        
+        # Provider SDKs expose HTTP status through several shapes. Walk the
+        # normal exception chain so lightweight wrapper errors do not hide it.
+        status_code = None
+        status_exception = None
+        seen: set[int] = set()
+        current: Optional[BaseException] = exception
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            response = getattr(current, "response", None)
+            status_values = (
+                getattr(current, "status_code", None),
+                getattr(response, "status_code", None),
+                getattr(current, "code", None),
+            )
+            for value in status_values:
+                if callable(value):
+                    try:
+                        value = value()
+                    except TypeError:
+                        continue
+                value = getattr(value, "value", value)
+                if isinstance(value, tuple) and value:
+                    value = value[0]
+                try:
+                    normalized = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 100 <= normalized <= 599:
+                    status_code = normalized
+                    status_exception = current
+                    break
+            if status_code is not None:
+                break
+            current = current.__cause__ or current.__context__
+
+        if status_code is not None:
+            error_dict["name"] = "APIError"
+            error_dict["data"]["statusCode"] = status_code
+            
+            # Determine if retryable based on status code
+            is_retryable = status_code in {429, 500, 502, 503, 504}
+            error_dict["data"]["isRetryable"] = is_retryable
+            
+            # Extract response headers if available
+            response = getattr(status_exception, "response", None)
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                try:
+                    error_dict["data"]["responseHeaders"] = dict(headers)
+                except (TypeError, ValueError):
+                    pass
+        
+        # Check for common retryable error patterns
+        error_msg = str(exception).lower()
+        if any(pattern in error_msg for pattern in [
+            "rate limit", "too many requests", "429",
+            "overloaded", "unavailable", "503", "502",
+            "timeout", "timed out", "server error",
+        ]):
+            error_dict["name"] = "APIError"
+            error_dict["data"]["isRetryable"] = True
+
+        if SessionRetry.is_connection_error(error_dict):
+            error_dict["name"] = "APIError"
+            error_dict["data"]["isRetryable"] = True
+            error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
+
+        # SDK errors may keep the provider code in a structured body rather
+        # than their human-readable message. Preserve only the code.
+        current = exception
+        seen = set()
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            body = getattr(current, "body", None)
+            details = body.get("error", body) if isinstance(body, dict) else {}
+            code = (
+                (details.get("code") or details.get("type")) if isinstance(details, dict) else None
+            ) or getattr(current, "code", None)
+            candidate = {"data": {
+                "providerID": self.provider_id, "statusCode": status_code,
+                "providerCode": code if isinstance(code, str) else None,
+                "message": str(current),
+            }}
+            if SessionRetry.is_alibaba_rate_limit(candidate):
+                error_dict["data"].update(
+                    providerCode=candidate["data"]["providerCode"] or "insufficient_quota",
+                    isRetryable=True,
+                )
+                break
+            if SessionRetry.is_quota_exhausted(candidate):
+                from aegisops.session.lifecycle.retry import MODEL_QUOTA_EXHAUSTED
+
+                error_dict["data"].update(
+                    providerCode=code,
+                    error_code=MODEL_QUOTA_EXHAUSTED,
+                    isRetryable=False,
+                )
+                break
+            current = current.__cause__ or current.__context__
+
+        return error_dict
+    
+    def _get_context_window_tokens(self) -> int:
+        """Resolve the context window size for the current model."""
+        try:
+            ctx, _, _ = Provider.resolve_model_info(self.provider_id, self.model_id)
+            if ctx and ctx > 0:
+                return ctx
+        except Exception:
+            pass
+        return 128_000
+
+    def _message_conversion_cache_key(
+        self,
+        msg: MessageInfo,
+        parts: List[Any],
+        *,
+        is_latest_user_turn: bool,
+    ) -> Tuple[Any, ...]:
+        role = msg.role if isinstance(msg.role, str) else getattr(msg.role, "value", None)
+        has_file_part = any(getattr(part, "type", None) == "file" for part in parts)
+        latest_user_marker = msg.id if (role == "user" and has_file_part and is_latest_user_turn) else (
+            "stale-file-user" if role == "user" and has_file_part else None
+        )
+        return (
+            msg.id,
+            role,
+            bool(getattr(msg, "compacted", None)),
+            getattr(msg, "finish", None),
+            json.dumps(getattr(msg, "error", None), ensure_ascii=False, sort_keys=True, default=str),
+            Message.get_parts_cache_version(self.session.id, msg.id),
+            latest_user_marker,
+            self._provider_capability_key(),
+        )
+
+    @staticmethod
+    def _build_message_aborted_error() -> Dict[str, Any]:
+        message = "Message generation was interrupted before completion."
+        return {
+            "name": "MessageAbortedError",
+            "message": message,
+            "data": {
+                "message": message,
+            },
+        }
+
+    @staticmethod
+    def _message_role_value(msg: MessageInfo) -> Optional[str]:
+        return msg.role if isinstance(msg.role, str) else getattr(msg.role, "value", None)
+
+    def _get_queued_user_message_ids(
+        self,
+        messages: List[MessageInfo],
+    ) -> set[str]:
+        if self._step <= 1:
+            return set()
+
+        last_finished_index: Optional[int] = None
+        for idx, msg in enumerate(messages):
+            role = self._message_role_value(msg)
+            finish = getattr(msg, "finish", None)
+            if role == "assistant" and finish and finish not in ("tool-calls", "unknown"):
+                last_finished_index = idx
+
+        if last_finished_index is None:
+            return set()
+
+        queued_user_ids: set[str] = set()
+        seen_turn_root_user = False
+        for msg in messages[last_finished_index + 1:]:
+            if self._message_role_value(msg) != "user":
+                continue
+            if not seen_turn_root_user:
+                seen_turn_root_user = True
+                continue
+            queued_user_ids.add(msg.id)
+        return queued_user_ids
+
+    def _invalidate_chat_context_cache(self) -> None:
+        self._static_cache.pop("chat_context_cache", None)
+
+    @staticmethod
+    def _wrap_queued_user_text(content: str) -> str:
+        from aegisops.session.prompt_strings import SYNTHETIC_MESSAGE_MARKERS
+
+        if not content or any(marker in content for marker in SYNTHETIC_MESSAGE_MARKERS):
+            return content
+        return (
+            "<system-reminder>\n"
+            "The user sent the following message:\n"
+            f"{content}\n\n"
+            "Please address this message and continue with your tasks.\n"
+            "</system-reminder>"
+        )
+
+    def _wrap_queued_user_blocks(
+        self,
+        blocks: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        first_text_idx: Optional[int] = None
+        for idx, block in enumerate(blocks):
+            if isinstance(block, dict) and block.get("type") == "text":
+                first_text_idx = idx
+                break
+        if first_text_idx is None:
+            return blocks
+
+        text_val = blocks[first_text_idx].get("text") or ""
+        wrapped_text = self._wrap_queued_user_text(text_val)
+        if wrapped_text == text_val:
+            return blocks
+
+        wrapped_blocks = copy.deepcopy(blocks)
+        wrapped_blocks[first_text_idx] = {
+            "type": "text",
+            "text": wrapped_text,
+        }
+        return wrapped_blocks
+
+    @staticmethod
+    def _clone_cached_chat_messages(payloads: List[Dict[str, Any]]) -> List[ChatMessage]:
+        return [ChatMessage.model_validate(copy.deepcopy(payload)) for payload in payloads]
+
+    def _build_tool_output_text(self, part: Any, tool_name: str, ctx_window_tokens: int) -> Tuple[str, bool, bool]:
+        state = getattr(part, "state", None)
+        metadata = dict(getattr(state, "metadata", None) or {}) if state is not None else {}
+        persisted_placeholder = self._get_persisted_tool_placeholder(part, tool_name)
+        if persisted_placeholder:
+            return persisted_placeholder, False, True
+
+        cached_output_text = metadata.get("llm_output_text")
+        if isinstance(cached_output_text, str):
+            tool_output_str = cached_output_text
+        else:
+            tool_output = getattr(state, "output", "") if state is not None else ""
+            if hasattr(state, "get_output_str"):
+                tool_output_str = state.get_output_str()
+            elif isinstance(tool_output, str):
+                tool_output_str = tool_output
+            else:
+                try:
+                    tool_output_str = json.dumps(tool_output, ensure_ascii=False, indent=2)
+                except (TypeError, ValueError):
+                    tool_output_str = str(tool_output)
+
+        from aegisops.tool.truncation import truncate_tool_result_dynamic, HARD_MAX_TOOL_RESULT_CHARS
+        already_truncated = (
+            metadata.get("truncated")
+            and len(tool_output_str) <= HARD_MAX_TOOL_RESULT_CHARS * 2
+        )
+        if already_truncated:
+            return tool_output_str, False, False
+
+        tool_output_str, was_dyn_truncated = truncate_tool_result_dynamic(
+            tool_output_str,
+            ctx_window_tokens,
+        )
+        return tool_output_str, was_dyn_truncated, False
+
+    def _build_system_message_content(
+        self,
+        system_prompts: List[SystemPromptBlock] | List[str],
+    ) -> str | list[dict[str, Any]]:
+        """Format system prompts for the active provider.
+
+        Anthropic supports structured system blocks, which lets us place a
+        conservative cache breakpoint before the dynamic runtime tail.
+        """
+        typed_blocks = [
+            block
+            for block in system_prompts
+            if isinstance(block, SystemPromptBlock) and block.content.strip()
+        ]
+        if typed_blocks:
+            prompt_parts = [block.content for block in typed_blocks]
+        else:
+            prompt_parts = [
+                prompt
+                for prompt in system_prompts
+                if isinstance(prompt, str) and prompt.strip()
+            ]
+        if not prompt_parts:
+            return ""
+
+        provider_lower = (self.provider_id or "").lower()
+        if "anthropic" not in provider_lower:
+            return "\n\n".join(prompt_parts)
+
+        if typed_blocks:
+            first_runtime_tail = next(
+                (
+                    index
+                    for index, block in enumerate(typed_blocks)
+                    if block.cache_scope == "runtime_tail"
+                ),
+                len(typed_blocks),
+            )
+            cache_break_index = max(0, first_runtime_tail - 1)
+        else:
+            # Compatibility for callers still passing plain strings.
+            cache_break_index = max(0, len(prompt_parts) - 3)
+        blocks: list[dict[str, Any]] = []
+        for index, prompt in enumerate(prompt_parts):
+            block: dict[str, Any] = {
+                "type": "text",
+                "text": prompt,
+            }
+            if index == cache_break_index:
+                block["cache_control"] = {"type": "ephemeral"}
+            blocks.append(block)
+        return blocks
+
+    async def _restore_session_uploads(self) -> None:
+        """Bring back this session's stored uploads missing from the local disk before reading them.
+
+        Costs one listing query and a size check per upload; only missing
+        files are fetched.
+        """
+        from aegisops.session.files import restore_session_uploads
+
+        try:
+            await restore_session_uploads(self.session.id)
+        except Exception as exc:
+            log.warn("runner.uploads.restore_failed", {
+                "session_id": self.session.id,
+                "error_type": type(exc).__name__,
+            })
+
+    async def _restore_channel_media(self, parts_by_message: Dict[str, List[Any]]) -> None:
+        """Bring back the channel media these messages carry when it is missing from the local disk."""
+        from aegisops.session.files import restore_channel_media
+        from aegisops.session.utils.file_extractor import file_url_to_path
+
+        try:
+            paths = [
+                Path(file_url_to_path(readable_url(part.url, session_id=self.session.id))).resolve(strict=False)
+                for parts in parts_by_message.values() for part in parts
+                if getattr(part, "type", None) == "file" and str(getattr(part, "url", "") or "").startswith("file:")
+            ]
+            if paths:
+                await restore_channel_media(paths)
+        except Exception as exc:
+            log.warn("runner.channel_media.restore_failed", {
+                "session_id": self.session.id,
+                "error_type": type(exc).__name__,
+            })
+
+    async def _to_chat_messages(
+        self,
+        messages: List[MessageInfo],
+        system_prompts: List[SystemPromptBlock] | List[str],
+    ) -> List[ChatMessage]:
+        """
+        Convert messages to chat format with tool calls.
+        
+        Ported from original MessageV2.toModelMessage() logic:
+        - Include text parts
+        - Include tool calls and results
+        - Format tool results as user messages
+        """
+        started_at = time.perf_counter()
+        await self._restore_session_uploads()
+        chat_messages: List[ChatMessage] = []
+        ctx_window_tokens = self._get_context_window_tokens()
+        tool_result_refs: List[Dict[str, Any]] = []
+        turn_index = 0
+        queued_user_message_ids: set[str] = set(getattr(self, "_queued_user_message_ids", set()) or set())
+        active_model = Provider.resolve_model(self.provider_id, self.model_id)
+        active_interleaved = (
+            getattr(active_model.capabilities, "interleaved", None)
+            if active_model and getattr(active_model, "capabilities", None)
+            else None
+        )
+
+        # Identify the last USER message — only that one keeps real image
+        # bytes in its content blocks. Earlier turns get a short text
+        # placeholder so we don't ship hundreds of KB of base64 back to the
+        # model on every follow-up. Even providers that count vision tokens
+        # natively (OpenAI proper) charge per resent image, and gateways that
+        # tokenize the data URL as plain text (e.g. some Azure proxies) will
+        # blow past the context window after the second turn otherwise.
+        last_user_msg_id: Optional[str] = None
+        for _msg in messages:
+            _role = _msg.role if isinstance(_msg.role, str) else getattr(_msg.role, "value", None)
+            if _role == "user":
+                last_user_msg_id = _msg.id
+
+        preloaded_parts: List[List[Any]] = []
+        message_signatures: List[Tuple[Any, ...]] = []
+        parts_by_message = await Message.parts_many(self.session.id, [msg.id for msg in messages])
+        await self._restore_channel_media(parts_by_message)
+        for msg in messages:
+            parts = parts_by_message.get(msg.id, [])
+            preloaded_parts.append(parts)
+            message_signatures.append(
+                self._message_conversion_cache_key(
+                    msg,
+                    parts,
+                    is_latest_user_turn=(msg.id == last_user_msg_id),
+                )
+            )
+
+        system_content = self._build_system_message_content(system_prompts) if system_prompts else None
+        system_cache_key = json.dumps(system_content, ensure_ascii=False, sort_keys=True, default=str)
+        context_cache = self._static_cache.setdefault("chat_context_cache", {})
+        cached_context = context_cache.get("latest")
+        resume_message_index = 0
+        if cached_context and cached_context.get("system_cache_key") == system_cache_key:
+            cached_signatures = list(cached_context.get("message_signatures") or [])
+            if len(cached_signatures) <= len(message_signatures):
+                prefix_matches = True
+                for idx, cached_signature in enumerate(cached_signatures):
+                    if cached_signature != message_signatures[idx]:
+                        prefix_matches = False
+                        break
+                if prefix_matches:
+                    chat_messages = self._clone_cached_chat_messages(cached_context.get("chat_messages") or [])
+                    resume_message_index = len(cached_signatures)
+                    turn_index = sum(
+                        1
+                        for msg in messages[:resume_message_index]
+                        if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user")
+                    )
+                    self._log_perf(
+                        "runner.to_chat_messages.cache_hit",
+                        started_at,
+                        reused_messages=resume_message_index,
+                        total_messages=len(messages),
+                    )
+
+        # Add system prompts
+        if system_prompts and not chat_messages:
+            chat_messages.append(ChatMessage(
+                role="system",
+                content=system_content,
+            ))
+        
+        # Convert each message with parts
+        for idx, msg in enumerate(messages):
+            if idx < resume_message_index:
+                continue
+            role = msg.role if isinstance(msg.role, str) else msg.role.value
+            if role == "user":
+                turn_index += 1
+            is_latest_user_turn = msg.id == last_user_msg_id
+            # Get message parts
+            parts = preloaded_parts[idx]
+            
+            if not parts:
+                # Fallback: use text content only
+                content = await Message.get_text_content(msg, parts=parts)
+                if content.strip():
+                    normalized_content = _expand_workflow_node_ref(content)
+                    if role == "user" and msg.id in queued_user_message_ids:
+                        normalized_content = self._wrap_queued_user_text(normalized_content)
+                    chat_messages.append(ChatMessage(
+                        role=role,
+                        content=normalized_content,
+                    ))
+                continue
+            
+            # Build message content from parts
+            if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
+                is_queued_user_turn = msg.id in queued_user_message_ids
+                user_content_parts = []
+                user_content_blocks: list[dict[str, Any]] = []
+                for part in parts:
+                    if hasattr(part, 'type'):
+                        if part.type == "text" and hasattr(part, 'text'):
+                            if not getattr(part, 'ignored', False) and part.text.strip():
+                                normalized_text = _expand_workflow_node_ref(part.text)
+                                user_content_parts.append(normalized_text)
+                                user_content_blocks.append({
+                                    "type": "text",
+                                    "text": normalized_text,
+                                })
+                        elif part.type == "file" and hasattr(part, 'mime'):
+                            mime = getattr(part, 'mime', '')
+                            if mime != 'application/x-directory':
+                                filename = getattr(part, 'filename', 'file')
+                                url = readable_url(getattr(part, 'url', ''), session_id=self.session.id)
+                                # Image bytes only ride on the latest user
+                                # turn — older turns are reduced to a short,
+                                # opaque placeholder. Crucially the placeholder
+                                # does NOT include the filename: leaking
+                                # earlier filenames was making the model
+                                # confidently misidentify the *current* image
+                                # as one of the older ones (it would echo back
+                                # the older filename instead of describing the
+                                # newly-attached picture).
+                                if mime.startswith("image/") and not is_latest_user_turn:
+                                    stub = "[earlier image omitted]"
+                                    user_content_parts.append(stub)
+                                    user_content_blocks.append({
+                                        "type": "text",
+                                        "text": stub,
+                                    })
+                                else:
+                                    self._append_file_content_block(
+                                        user_content_blocks,
+                                        user_content_parts,
+                                        mime=mime,
+                                        filename=filename,
+                                        url=url,
+                                    )
+                        elif part.type == "compaction":
+                            user_content_parts.append("What did we do so far?")
+                            user_content_blocks.append({
+                                "type": "text",
+                                "text": "What did we do so far?",
+                            })
+                        elif part.type == "subtask":
+                            user_content_parts.append("The following tool was executed by the user")
+                            user_content_blocks.append({
+                                "type": "text",
+                                "text": "The following tool was executed by the user",
+                            })
+
+                if user_content_blocks and any(
+                    block.get("type") == "image"
+                    for block in user_content_blocks
+                ):
+                    if is_queued_user_turn:
+                        user_content_blocks = self._wrap_queued_user_blocks(user_content_blocks)
+                    chat_messages.append(ChatMessage(
+                        role="user",
+                        content=user_content_blocks,
+                    ))
+                elif user_content_parts:
+                    user_text = "\n\n".join(user_content_parts)
+                    if is_queued_user_turn:
+                        user_text = self._wrap_queued_user_text(user_text)
+                    chat_messages.append(ChatMessage(
+                        role="user",
+                        content=user_text,
+                    ))
+            
+            elif msg.role == MessageRole.ASSISTANT or (isinstance(msg.role, str) and msg.role == "assistant"):
+                # Skip messages with errors (matching AegisOps logic)
+                # AegisOps: skip if error exists, UNLESS it's AbortedError with useful content
+                if hasattr(msg, 'error') and msg.error:
+                    # Check if it's an AbortedError
+                    is_aborted_error = False
+                    if isinstance(msg.error, dict):
+                        error_name = msg.error.get('name', '')
+                        is_aborted_error = error_name in ('MessageAbortedError', 'AbortedError')
+                    
+                    # If AbortedError, check if message has useful content
+                    if is_aborted_error:
+                        has_content = any(
+                            hasattr(p, 'type') and p.type not in ("step-start", "reasoning")
+                            for p in parts
+                        )
+                        if not has_content:
+                            # AbortedError with no content - skip
+                            continue
+                        # AbortedError with content - include it
+                    else:
+                        # Non-AbortedError - skip
+                        continue
+                
+                assistant_content_parts = []
+                assistant_reasoning_parts = []
+                assistant_reasoning_content_parts = []
+                assistant_reasoning_details: List[Dict[str, Any]] = []
+                assistant_reasoning_sources: set[str] = set()
+                assistant_custom_settings: Dict[str, Any] = {}
+                # Structured tool calls for the assistant message (OpenAI format)
+                structured_tool_calls: List[Dict[str, Any]] = []
+                # Corresponding tool-result messages (role="tool")
+                pending_tool_results: List[ChatMessage] = []
+                
+                for part in parts:
+                    if not hasattr(part, 'type'):
+                        continue
+                    
+                    # Text parts
+                    if part.type == "text" and hasattr(part, 'text'):
+                        if getattr(part, "ignored", False):
+                            continue
+                        assistant_content_parts.append(part.text)
+                    elif part.type == "reasoning" and hasattr(part, 'text'):
+                        assistant_reasoning_parts.append(part.text)
+                        part_metadata = getattr(part, "metadata", None) or {}
+                        reasoning_meta = part_metadata.get("reasoning") if isinstance(part_metadata, dict) else None
+                        reasoning_content = None
+                        reasoning_source = None
+                        reasoning_details = None
+                        if isinstance(reasoning_meta, dict):
+                            reasoning_content = reasoning_meta.get("content")
+                            reasoning_source = reasoning_meta.get("source")
+                            reasoning_details = reasoning_meta.get("details")
+                        if reasoning_content is None and isinstance(part_metadata, dict):
+                            reasoning_content = part_metadata.get("reasoningContent")
+                        if not reasoning_source and isinstance(part_metadata, dict):
+                            reasoning_source = part_metadata.get("reasoningSource")
+                        if reasoning_details is None and isinstance(part_metadata, dict):
+                            reasoning_details = part_metadata.get("reasoningDetails")
+
+                        if reasoning_content is not None:
+                            assistant_reasoning_content_parts.append(reasoning_content)
+                        if reasoning_source:
+                            assistant_reasoning_sources.add(reasoning_source)
+                        if isinstance(reasoning_details, list):
+                            for item in reasoning_details:
+                                if isinstance(item, dict):
+                                    assistant_reasoning_details.append(item)
+                        reasoning_field = part_metadata.get("reasoningField") if isinstance(part_metadata, dict) else None
+                        thinking_signature = part_metadata.get("thinkingSignature") if isinstance(part_metadata, dict) else None
+                        redacted_thinking = part_metadata.get("redactedThinkingData") if isinstance(part_metadata, dict) else None
+                        if redacted_thinking:
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "redacted_thinking",
+                                "data": redacted_thinking,
+                            })
+                        elif thinking_signature:
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "thinking",
+                                "thinking": part.text,
+                                "signature": thinking_signature,
+                            })
+                        elif reasoning_field == "thinking" and getattr(part, "text", None):
+                            assistant_custom_settings.setdefault("anthropic_thinking_blocks", []).append({
+                                "type": "thinking",
+                                "thinking": part.text,
+                            })
+                    
+                    # Tool parts - use structured OpenAI function-calling format
+                    elif part.type == "tool" and hasattr(part, 'state'):
+                        tool_name = getattr(part, 'tool', 'unknown')
+                        call_id = getattr(part, 'callID', None) or f"call_{id(part)}"
+                        tool_input = getattr(part.state, 'input', {})
+                        
+                        if part.state.status == "completed":
+                            tool_output_str, was_dyn_truncated, persisted_placeholder = self._build_tool_output_text(
+                                part,
+                                tool_name,
+                                ctx_window_tokens,
+                            )
+                            if was_dyn_truncated:
+                                log.info("runner.tool_result_dynamic_truncated", {
+                                    "tool_name": tool_name,
+                                    "call_id": call_id,
+                                    "context_window": ctx_window_tokens,
+                                    "truncated_len": len(tool_output_str),
+                                })
+                            
+                            # Build structured tool call for assistant message
+                            args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
+                            structured_tool_calls.append({
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": args_str,
+                                },
+                            })
+                            # Build tool-result message
+                            pending_tool_results.append(ChatMessage(
+                                role="tool",
+                                content=tool_output_str,
+                                tool_call_id=call_id,
+                                name=tool_name,
+                            ))
+                            tool_result_refs.append({
+                                "chat_message": pending_tool_results[-1],
+                                "part": part,
+                                "message_id": msg.id,
+                                "tool_name": tool_name,
+                                "turn_index": turn_index,
+                                "char_count": len(tool_output_str),
+                                "compacted": bool(persisted_placeholder),
+                                "dirty": False,
+                            })
+                            
+                            log.debug("runner.to_chat_messages.tool_result_added", {
+                                "message_id": msg.id,
+                                "tool_name": tool_name,
+                                "call_id": call_id,
+                                "output_length": len(tool_output_str),
+                                "compacted": bool(persisted_placeholder),
+                            })
+                        
+                        elif part.state.status == "error":
+                            tool_error = getattr(part.state, 'error', 'Unknown error')
+                            args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
+                            structured_tool_calls.append({
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": args_str,
+                                },
+                            })
+                            pending_tool_results.append(ChatMessage(
+                                role="tool",
+                                content=f"Error: {tool_error}",
+                                tool_call_id=call_id,
+                                name=tool_name,
+                            ))
+                        
+                        elif part.state.status == "running":
+                            # Tool was interrupted (e.g., by user abort) before completing.
+                            # Include it in chat context so the LLM knows this tool call was
+                            # attempted and interrupted, allowing it to re-attempt if needed.
+                            args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
+                            structured_tool_calls.append({
+                                "id": call_id,
+                                "type": "function",
+                                "function": {
+                                    "name": tool_name,
+                                    "arguments": args_str,
+                                },
+                            })
+                            pending_tool_results.append(ChatMessage(
+                                role="tool",
+                                content="Error: Tool execution was interrupted",
+                                tool_call_id=call_id,
+                                name=tool_name,
+                            ))
+                            log.debug("runner.to_chat_messages.running_tool_as_interrupted", {
+                                "message_id": msg.id,
+                                "tool_name": tool_name,
+                                "call_id": call_id,
+                            })
+                
+                has_assistant_reasoning = bool(
+                    assistant_reasoning_parts
+                    or assistant_reasoning_content_parts
+                    or assistant_reasoning_details
+                    or assistant_custom_settings
+                )
+                # Add assistant message
+                if assistant_content_parts or structured_tool_calls or has_assistant_reasoning:
+                    assistant_message = ChatMessage(
+                        role="assistant",
+                        content="\n\n".join(assistant_content_parts) if assistant_content_parts else "",
+                        reasoning="".join(assistant_reasoning_parts) if assistant_reasoning_parts else None,
+                        reasoning_content="".join(assistant_reasoning_content_parts) if assistant_reasoning_content_parts else None,
+                        reasoning_details=assistant_reasoning_details if assistant_reasoning_details else None,
+                        reasoning_source=sorted(assistant_reasoning_sources)[0] if assistant_reasoning_sources else None,
+                        tool_calls=structured_tool_calls if structured_tool_calls else None,
+                        custom_settings=assistant_custom_settings,
+                    )
+                    assistant_message = prepare_reasoning_for_replay(
+                        provider_id=self.provider_id,
+                        model_id=self.model_id,
+                        message=assistant_message,
+                        interleaved=active_interleaved,
+                    )
+                    chat_messages.append(assistant_message)
+                    # Append tool-result messages immediately after the assistant message
+                    chat_messages.extend(pending_tool_results)
+                else:
+                    # Log if assistant message was skipped due to no content
+                    log.debug("runner.to_chat_messages.assistant_skipped", {
+                        "message_id": msg.id,
+                        "parts_count": len(parts),
+                        "has_error": hasattr(msg, 'error') and bool(msg.error),
+                    })
+        
+        budget_result = await self._apply_tool_result_budget(tool_result_refs, ctx_window_tokens)
+        if budget_result.get("compacted"):
+            log.info("runner.context_budget_enforced", {
+                "session_id": self.session.id,
+                "step": self._step,
+                "context_window": ctx_window_tokens,
+                "compacted_tool_results": budget_result.get("compacted", 0),
+                "persisted_tool_results": budget_result.get("persisted", 0),
+            })
+
+        log.debug("runner.to_chat_messages.result", {
+            "total_messages": len(chat_messages),
+            "roles": [m.role for m in chat_messages],
+        })
+        context_cache["latest"] = {
+            "system_cache_key": system_cache_key,
+            "message_signatures": list(message_signatures),
+            "chat_messages": [
+                message.model_dump(exclude_none=True)
+                for message in chat_messages
+            ],
+        }
+        self._log_perf(
+            "runner.to_chat_messages.complete",
+            started_at,
+            source_message_count=len(messages),
+            chat_message_count=len(chat_messages),
+        )
+        
+        return chat_messages
+    
+    async def _keep_interrupted_parts(self, processor: Any, assistant_msg: MessageInfo) -> None:
+        """Store the text and reasoning a cancelled step had already streamed.
+
+        They are only written at text-end / reasoning-end, which a cancelled
+        stream never reaches, so the user's stopped reply was left empty.
+        Called while unwinding the cancellation, before the step ends: the
+        write is awaited through another stop, up to a bound, and is not left
+        running past it, since once the session is released it is refused.
+        Calling it again once the parts are stored writes nothing.
+        """
+        try:
+            write = asyncio.ensure_future(processor.persist_interrupted_parts())
+        except Exception as exc:
+            log.warn("runner.stream.interrupted_parts_persist_failed", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+                "error": str(exc),
+            })
+            return
+        timed_out = not await _wait_through_cancel(write, _INTERRUPTED_PARTS_WRITE_TIMEOUT_S)
+        if timed_out:
+            log.warn("runner.stream.interrupted_parts_persist_timeout", {
+                "session_id": self.session.id,
+                "message_id": assistant_msg.id,
+            })
+            write.cancel()
+            if not await _wait_through_cancel(write, _INTERRUPTED_PARTS_CANCEL_GRACE_S):
+                write.add_done_callback(_read_outcome)
+                return
+        try:
+            write.result()
+        except (Exception, asyncio.CancelledError) as exc:
+            if not timed_out:
+                log.warn("runner.stream.interrupted_parts_persist_failed", {
+                    "session_id": self.session.id,
+                    "message_id": assistant_msg.id,
+                    "error": str(exc) or type(exc).__name__,
+                })
+
+    async def _call_llm(
+        self,
+        provider: Any,
+        messages: List[ChatMessage],
+        tools: List[Dict[str, Any]],
+        agent: AgentInfo,
+        assistant_msg: MessageInfo,
+    ) -> StepResult:
+        """
+        Call LLM and process response with event-driven streaming.
+        
+        Uses StreamProcessor to handle events and execute tools synchronously.
+        Ported from AegisOps' SessionProcessor.process() behavior.
+        """
+        from aegisops.session.runtime_controls import runtime_controls
+        controls = runtime_controls.get()
+        if controls is not None:
+            controls.check_budget(self._resolve_usage_pricing(), require_pricing=True)
+
+        def _build_llm_response_payload(
+            *,
+            content: str,
+            reasoning: str,
+            tool_calls: List["ToolCall"],
+        ) -> Dict[str, Any]:
+            return {
+                "role": "assistant",
+                "content": content,
+                "reasoning": reasoning,
+                "toolCalls": [
+                    {
+                        "id": tool_call.id,
+                        "name": tool_call.name,
+                        "arguments": tool_call.arguments,
+                    }
+                    for tool_call in tool_calls
+                ],
+            }
+
+        # Create stream processor
+        main_session_key = self.session.id
+        try:
+            from aegisops.session.core.session_state import get_main_session_id
+
+            main_session_key = get_main_session_id() or self.session.id
+        except Exception as e:
+            log.debug("runner.sandbox_context_init_failed", {"error": str(e)})
+
+        async def _on_tool_execution_start(
+            tool_name: str,
+            tool_input: Dict[str, Any],
+        ) -> None:
+            # Mark before hooks/callbacks/execution (including parallel tools)
+            # so a concurrent provider error can never replay side effects.
+            self._attempt_state.tool_execution_started = True
+            active = self.execution_activity["active_tools"]
+            active[tool_name] = active.get(tool_name, 0) + 1
+            self.execution_activity["last_activity_at"] = time.time()
+            # Inline tools block the streaming loop, and one of them may call
+            # the model itself (run_workflow, a non-parallel delegate_task).
+            # Holding the slot across that would make this turn wait on a
+            # nested call that is waiting for our slot, so hand it back and
+            # accept that this response's stream stays open -- and keeps
+            # generating -- without holding one.
+            #
+            # Sibling delegate_task calls are different: they run in their own
+            # tasks, the stream never awaits them, and the slot is released in
+            # the `finally` below before `drain_parallel_tool_calls`. Keeping
+            # the slot for them costs nothing and keeps fan-out, the case this
+            # cap exists for, inside the limit -- as long as no inline tool ran
+            # earlier in the same response, which already gave the slot away.
+            if processor.owns_current_parallel_tool_call():
+                log.debug("runner.llm_slot.kept_for_parallel_tool", {
+                    "session_id": self.session.id,
+                    "tool_name": tool_name,
+                })
+            else:
+                self._release_llm_slot("tool_execution_started")
+                # Same for the workflow budget: an inline run_workflow inside a
+                # budgeted session would otherwise wait for the slot this turn
+                # holds while the turn waits for the tool.
+                self._release_budget_slot("tool_execution_started")
+            if self.callbacks.on_tool_start:
+                await self.callbacks.on_tool_start(tool_name, tool_input)
+
+        async def _on_tool_execution_end(tool_name: str, result: ToolResult) -> None:
+            active = self.execution_activity["active_tools"]
+            if active.get(tool_name, 0) <= 1:
+                active.pop(tool_name, None)
+            else:
+                active[tool_name] -= 1
+            self.execution_activity["last_activity_at"] = time.time()
+            if self.callbacks.on_tool_end:
+                await self.callbacks.on_tool_end(tool_name, result)
+
+        turn_plan_file = getattr(self, "_turn_plan_file", None)
+        if turn_plan_file is None:
+            turn_plan_file = session_plan_file(self.session)
+        allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
+
+        model_activity = ModelActivity(self.session.id, assistant_msg.id, self.callbacks.event_publish_callback)
+        processor = StreamProcessor(
+            session_id=self.session.id,
+            assistant_message=assistant_msg,
+            model_activity=model_activity,
+            agent=agent,
+            abort_event=self._external_abort or self._abort,
+            permission_callback=self._handle_permission,
+            text_delta_callback=self.callbacks.on_text_delta,
+            reasoning_delta_callback=self.callbacks.on_reasoning_delta,
+            tool_start_callback=_on_tool_execution_start,
+            tool_end_callback=_on_tool_execution_end,
+            event_publish_callback=self.callbacks.event_publish_callback,
+            session_key=self.session.id,
+            main_session_key=main_session_key,
+            workspace_dir=self.session.directory,
+            langfuse_generation=None,
+            step_index=self._step,
+            execution_mode=runtime_execution_mode(
+                getattr(
+                    self,
+                    "_turn_execution_mode",
+                    SessionExecutionMode.BUILD,
+                )
+            ).value,
+            plan_file_path=str(turn_plan_file.path),
+            plan_relative_path=turn_plan_file.relative_path,
+            plan_permission_path=turn_plan_file.permission_path,
+            allowed_tool_names=allowed_tool_names,
+            max_parallel_subagents=await self._resolve_max_parallel_subagents(),
+        )
+        
+        # Build provider options (thinking / reasoning / max_tokens)
+        from aegisops.provider.options import build_provider_options
+        provider_options = build_provider_options(self.provider_id, self.model_id)
+        provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
+
+        # Clean up any leftover reasoning state from a previous (failed) call
+        if hasattr(self, '_current_reasoning_id'):
+            delattr(self, '_current_reasoning_id')
+        if hasattr(self, '_current_reasoning_metadata'):
+            delattr(self, '_current_reasoning_metadata')
+
+        from aegisops.session.streaming.tool_accumulator import (
+            StreamToolArgumentsTruncatedError,
+            ToolCallAccumulator,
+        )
+        tool_accumulator = ToolCallAccumulator(processor)
+
+        text_started = False
+        reasoning_id_counter = 0
+        stream_finish_reason: Optional[str] = None
+
+        trace_ctx = None
+        generation_ctx = None
+        
+        # Validate messages - ensure we have at least one non-system message
+        non_system_messages = [m for m in messages if m.role != "system"]
+        if not non_system_messages:
+            log.error("runner.call_llm.no_messages", {
+                "total_messages": len(messages),
+                "session_id": self.session.id,
+            })
+            self._end_observability(generation_ctx, trace_ctx, output="No valid messages", level="ERROR")
+            return StepResult(action="stop", content="", error="No valid messages to send to LLM")
+        
+        log.debug("runner.call_llm.messages", {
+            "total": len(messages),
+            "non_system": len(non_system_messages),
+            "roles": [m.role for m in messages],
+        })
+        
+        # Emit start event
+        await processor.process_event(StartEvent())
+        
+        # Lightweight counters instead of storing all chunks in memory
+        chunk_counts = {"total": 0, "reasoning": 0, "text": 0, "tool": 0}
+        stream_usage: Optional[Dict[str, int]] = None
+        
+        # Stream response and convert chunks to events
+        provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
+        if provider_tools is None and tools:
+            log.info("runner.text_tool_call_mode.enabled", {
+                "session_id": self.session.id,
+                "provider_id": self.provider_id,
+                "model_id": self.model_id,
+                "tool_count": len(tools),
+            })
+
+        llm_hook_metadata = {
+            "sessionID": self.session.id,
+            "messageID": assistant_msg.id,
+            "workspace": self.session.directory,
+            "agent": agent.name,
+            "step": self._step,
+            "model": {
+                "providerID": self.provider_id,
+                "modelID": self.model_id,
+            },
+        }
+        # The caller every hook stage of this call sees, derived like the actor
+        # of the tool payloads this response may produce.
+        from aegisops.session.caller import session_caller
+
+        llm_hook_metadata.update((await session_caller(self.session.id)).as_metadata())
+        llm_before_enabled = False
+        llm_after_enabled = False
+        legacy_replacements: list[tuple[str, str]] = []
+        response_rewriter: Optional[SessionResponseRewriter] = None
+        self._llm_call_aborted = False
+
+        async def _flush_reasoning_rewriter() -> None:
+            if response_rewriter is None or not hasattr(self, '_current_reasoning_id'):
+                return
+            trailing_reasoning = await response_rewriter.flush_reasoning()
+            if not trailing_reasoning:
+                return
+            reasoning_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+            await processor.process_event(ReasoningDeltaEvent(
+                id=self._current_reasoning_id,
+                text=trailing_reasoning,
+                metadata=reasoning_metadata,
+            ))
+
+        try:
+            llm_before_enabled = await HookPipeline.has_stage_handlers(
+                HookStage.LLM_BEFORE,
+                llm_hook_metadata,
+            )
+            llm_after_enabled = await HookPipeline.has_stage_handlers(
+                HookStage.LLM_AFTER,
+                llm_hook_metadata,
+            )
+        except Exception as exc:
+            log.error("runner.hook.stage_probe.error", {"error": str(exc)})
+            raise RuntimeError("LLM hook stage probe failed; request was not sent") from exc
+
+        if llm_before_enabled:
+            # The projected tool schema is a hard capability ceiling for this
+            # turn. Hooks may hide tools, but must not add a capability or
+            # replace the trusted schema for an existing tool name.
+            tool_schema_ceiling: dict[str, Dict[str, Any]] = {}
+            for tool_schema in tools:
+                names = self._get_prompt_tool_names_from_schema([tool_schema])
+                if len(names) == 1 and names[0] not in tool_schema_ceiling:
+                    tool_schema_ceiling[names[0]] = copy.deepcopy(tool_schema)
+            llm_before_hook_input = {
+                **llm_hook_metadata,
+                "request": {
+                    "messageCount": len(messages),
+                    "messages": [serialize_chat_message(message) for message in messages],
+                    "toolCount": len(tools),
+                    "tools": copy.deepcopy(tools),
+                    "providerOptions": dict(provider_options),
+                    "providerToolsEnabled": provider_tools is not None,
+                },
+            }
+            try:
+                hook_started_at = time.perf_counter()
+                llm_before_ctx = await HookPipeline.run_llm_before(llm_before_hook_input)
+                hook_output = getattr(llm_before_ctx, "output", None) or {}
+                legacy_replacements = stream_text_replacements_from_hook_output(hook_output)
+                updated_request = hook_output.get("request")
+                if isinstance(updated_request, dict):
+                    messages, provider_options = apply_hook_request_output(
+                        messages,
+                        provider_options,
+                        hook_output,
+                    )
+                    updated_tools = updated_request.get("tools")
+                    if isinstance(updated_tools, list):
+                        projected_tools: list[Dict[str, Any]] = []
+                        projected_names: set[str] = set()
+                        for requested_schema in updated_tools:
+                            requested_names = self._get_prompt_tool_names_from_schema(
+                                [requested_schema]
+                            )
+                            if len(requested_names) != 1:
+                                continue
+                            requested_name = requested_names[0]
+                            trusted_schema = tool_schema_ceiling.get(requested_name)
+                            if trusted_schema is None or requested_name in projected_names:
+                                continue
+                            projected_tools.append(copy.deepcopy(trusted_schema))
+                            projected_names.add(requested_name)
+                        tools = projected_tools
+                        provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
+                        updated_allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
+                        if updated_allowed_tool_names != allowed_tool_names:
+                            processor.set_allowed_tool_names(updated_allowed_tool_names)
+                            allowed_tool_names = updated_allowed_tool_names
+                self._log_perf(
+                    "runner.hook.llm_before.complete",
+                    hook_started_at,
+                    message_count=len(messages),
+                    tool_count=len(tools),
+                )
+            except Exception as exc:
+                log.error("runner.hook.llm_before.error", {"error": str(exc)})
+                raise RuntimeError("LLM before-hook failed; request was not sent") from exc
+
+        messages = self._with_isolated_tool_catalog(messages, agent, tools)
+
+        try:
+            response_rewriter = await SessionResponseRewriter.create(
+                llm_hook_metadata,
+                legacy_replacements=legacy_replacements,
+            )
+        except Exception as exc:
+            log.error("runner.response_transform.open_failed", {"error": str(exc)})
+            raise RuntimeError(
+                "Response transform could not be started; request was not sent"
+            ) from exc
+
+        # -- Observability: create trace & generation scopes after llm_before,
+        # so previews use the same redacted messages that will be sent to the provider.
+        # All observability calls are wrapped in try/except so they never break
+        # the core session flow.
+        if langfuse_is_active():
+            try:
+                persisted_trace_context = resolve_session_trace_context(
+                    getattr(self.session, "metadata", None)
+                )
+                correlation_session_id = persisted_trace_context.get(
+                    "session_id", self.session.id
+                )
+                trace_tags = [
+                    f"session:{self.session.id}",
+                    f"step:{self._step}",
+                    f"session_step:{self.session.id}:{self._step}",
+                    f"agent:{agent.name}",
+                    f"provider:{self.provider_id}",
+                ]
+                trace_tags.extend(persisted_trace_context.get("tags", []))
+                trace_tags = list(dict.fromkeys(trace_tags))
+                correlation_metadata = persisted_trace_context.get("metadata", {})
+                request_payload = self._build_langfuse_request_payload(
+                    step=self._step,
+                    messages=messages,
+                    request_tools=provider_tools,
+                    available_tools=tools,
+                    provider_options=provider_options,
+                )
+                trace_ctx = trace_scope(
+                    name=persisted_trace_context.get(
+                        "trace_name", "SessionRunner.step"
+                    ),
+                    trace_name=persisted_trace_context.get("root_trace_name"),
+                    trace_context=persisted_trace_context.get("trace_context"),
+                    session_id=correlation_session_id,
+                    tags=trace_tags,
+                    input=request_payload,
+                    metadata={
+                        **correlation_metadata,
+                        "provider_id": self.provider_id,
+                        "model_id": self.model_id,
+                        "agent": agent.name,
+                        "workspace": self.session.directory,
+                        "execution_session_id": self.session.id,
+                        "message_count": len(messages),
+                        "available_tool_count": len(tools),
+                        "request_tool_count": len(provider_tools or []),
+                        "tool_transport": (
+                            "provider_param" if provider_tools is not None else "text_prompt"
+                        ),
+                    },
+                )
+                generation_ctx = generation_scope(
+                    parent=trace_ctx.observation,
+                    name="LLM.generate",
+                    model=self.model_id,
+                    input=request_payload,
+                    metadata={
+                        **correlation_metadata,
+                        "provider_id": self.provider_id,
+                        "session_id": self.session.id,
+                        "correlation_session_id": correlation_session_id,
+                        "step": self._step,
+                        "agent": agent.name,
+                        "workspace": self.session.directory,
+                        "available_tool_count": len(tools),
+                        "request_tool_count": len(provider_tools or []),
+                        "tool_transport": (
+                            "provider_param" if provider_tools is not None else "text_prompt"
+                        ),
+                    },
+                )
+                processor._langfuse_generation = generation_ctx.observation
+            except Exception as exc:
+                log.debug("runner.observability.init_failed", {"error": str(exc)})
+                trace_ctx = None
+                generation_ctx = None
+        first_chunk_logged = False
+        accounted_usage = {}
+        request_tokens_estimate: Optional[int] = None
+        aborted_during_stream = False
+        stream_timeouts = resolve_llm_stream_timeouts(provider, self.model_id)
+        log.debug("runner.llm.stream_timeouts", {
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "first_chunk_timeout_s": stream_timeouts.first_chunk_s,
+            "ongoing_chunk_timeout_s": stream_timeouts.ongoing_chunk_s,
+            "local_endpoint": stream_timeouts.is_local,
+        })
+        llm_priority = await self._resolve_llm_priority()
+        # One slot of this loop's LLM budget for the whole response (no-op on
+        # the server loop; capped on the workflow loop, see
+        # aegisops.provider.llm_budget). Taken before the first-chunk timeout
+        # clock starts so queueing behind other workflow calls is not mistaken
+        # for an unresponsive model; released in the finally below.
+        #
+        # Invariant while the slot is held: do not await anything that needs a
+        # slot of its own, or the workflow loop can deadlock itself at a small
+        # max_concurrency (parent holds, awaits child, child waits for a slot).
+        # Today that holds because no tool call made during the stream waits
+        # for a subagent: delegate_task / task (subagent_type is required) go
+        # through StreamProcessor._start_parallel_tool_call's create_task and,
+        # inside a session, return as soon as the child is submitted; sleep is
+        # deferred to the drain below, and the drains run after the release.
+        # Keep it that way when adding tools that call the model themselves.
+        llm_budget_slot = llm_slot()
+        await llm_budget_slot.acquire()
+        self._active_budget_slot = llm_budget_slot
+        # Then the provider's request slot (aegisops.provider.concurrency), in
+        # this order: waiting for the loop budget never holds a provider slot
+        # that sessions on other loops are queueing for.
+        slot_wait_started = time.perf_counter()
+        try:
+            self._active_llm_slot = await acquire_llm_slot(
+                self.provider_id,
+                priority=llm_priority,
+                session_id=self.session.id,
+            )
+        except BaseException:
+            # Cancelled or failed while queued: the try/finally below has not
+            # started, so hand the loop budget back here.
+            self._release_budget_slot("provider_slot_failed")
+            raise
+        slot_waited_s = time.perf_counter() - slot_wait_started
+        if slot_waited_s >= 0.5:
+            log.info("runner.llm_slot.waited", {
+                "session_id": self.session.id,
+                "provider_id": self.provider_id,
+                "priority": llm_priority,
+                "waited_s": round(slot_waited_s, 3),
+            })
+        # Time the model from the moment the request can actually go out, so
+        # first-chunk / durationMs metrics do not absorb in-process queueing.
+        llm_call_started_at = time.perf_counter()
+        self.execution_activity.update(
+            state="waiting_model", request_started_at=time.time(), last_activity_at=time.time(),
+        )
+        # Whatever a caller may be handling around this call: the finally
+        # below sees it in sys.exception() when nothing propagates from here.
+        caller_exception = sys.exception()
+        try:
+            await model_activity.start()
+            async for chunk in _iter_with_chunk_timeout(
+                provider.chat_stream(
+                    model_id=self.model_id,
+                    messages=messages,
+                    tools=provider_tools,
+                    # session_id is forwarded via kwargs so providers that need
+                    # to look up persisted session data (e.g. Gemini's DB-backed
+                    # reasoning replay) can do so.  Providers that don't care
+                    # simply ignore unknown kwargs.
+                    session_id=self.session.id,
+                    **provider_options,
+                ),
+                first_chunk_timeout_s=stream_timeouts.first_chunk_s,
+                ongoing_chunk_timeout_s=stream_timeouts.ongoing_chunk_s,
+            ):
+                chunk_counts["total"] += 1
+                self.execution_activity.update(state="streaming_model", last_activity_at=time.time())
+                self._attempt_state.received_chunk = True
+                if not first_chunk_logged:
+                    first_chunk_logged = True
+                    self._log_perf(
+                        "runner.llm.first_chunk",
+                        llm_call_started_at,
+                        provider_id=self.provider_id,
+                        model_id=self.model_id,
+                    )
+
+                chunk_finish = getattr(chunk, 'finish_reason', None)
+                if chunk_finish:
+                    stream_finish_reason = chunk_finish
+
+                # Capture usage from chunk (providers may include it in the final chunk)
+                if hasattr(chunk, 'usage') and chunk.usage:
+                    stream_usage = chunk.usage
+                    if needs_request_check(stream_usage):
+                        # Settle whether prompt_tokens counts the cache before
+                        # the usage is charged or a tool in this chunk runs, so
+                        # the budget, message tokens, usage record, hooks and
+                        # traces all read it the same way.
+                        if request_tokens_estimate is None:
+                            request_tokens_estimate = self._estimate_request_tokens(
+                                messages, provider_tools,
+                            )
+                        stream_usage = settle_cache_in_prompt(stream_usage, request_tokens_estimate)
+                    if controls is not None:
+                        # Usage snapshots are cumulative within one request. Charge
+                        # before any tool in this chunk, including on error streams.
+                        controls.record_usage(
+                            {**accounted_usage, **stream_usage},
+                            self._resolve_usage_pricing(),
+                            previous_usage=accounted_usage,
+                        )
+                        accounted_usage.update(stream_usage)
+
+                # Check for abort
+                if self.is_aborted:
+                    aborted_during_stream = True
+                    break
+
+                # Determine event type from chunk.  A single chunk may carry any
+                # combination of reasoning / text / tool_calls (e.g. Gemini bundles
+                # them).  We must not drop non-reasoning content when reasoning is
+                # present, and we must not double-emit `delta` as text when the
+                # provider used `event_type == 'reasoning'` to overload `delta` for
+                # reasoning text.
+                event_type = getattr(chunk, 'event_type', None)
+                chunk_metadata = getattr(chunk, 'metadata', None) or {}
+                display_chunk_metadata = (
+                    await response_rewriter.transform_metadata(chunk_metadata, llm_hook_metadata)
+                    if response_rewriter is not None
+                    else chunk_metadata
+                )
+                reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
+
+                if hasattr(self, '_current_reasoning_id') and display_chunk_metadata:
+                    current_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                    current_metadata.update(display_chunk_metadata)
+                    self._current_reasoning_metadata = current_metadata
+
+                if event_type == "reasoning-start" and not hasattr(self, '_current_reasoning_id'):
+                    self._attempt_state.observable_output_started = True
+                    reasoning_id_counter += 1
+                    self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                    self._current_reasoning_metadata = dict(display_chunk_metadata)
+                    await processor.process_event(ReasoningStartEvent(
+                        id=self._current_reasoning_id,
+                        metadata=display_chunk_metadata,
+                    ))
+
+                if event_type == "reasoning-end" and hasattr(self, '_current_reasoning_id'):
+                    await _flush_reasoning_rewriter()
+                    reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                    await processor.process_event(ReasoningEndEvent(
+                        id=self._current_reasoning_id,
+                        metadata=reasoning_end_metadata,
+                    ))
+                    delattr(self, '_current_reasoning_id')
+                    if hasattr(self, '_current_reasoning_metadata'):
+                        delattr(self, '_current_reasoning_metadata')
+
+                chunk_reasoning = getattr(chunk, 'reasoning', None) or None
+                if not chunk_reasoning and event_type == 'reasoning':
+                    # Older providers signal reasoning via event_type and put the
+                    # reasoning text in `delta` (no separate `reasoning` field).
+                    chunk_reasoning = getattr(chunk, 'delta', '') or None
+                has_reasoning_metadata = bool(
+                    chunk_metadata.get("reasoningDetails")
+                    or chunk_metadata.get("reasoningContent") is not None
+                    or chunk_metadata.get("reasoningField")
+                )
+
+                # Treat `delta` as text only when it isn't already consumed as
+                # reasoning above.  This preserves backward compatibility with
+                # providers that emit reasoning-only chunks via `event_type`.
+                chunk_text = ''
+                if event_type not in reasoning_event_types or getattr(chunk, 'reasoning', None):
+                    chunk_text = getattr(chunk, 'delta', '') or ''
+
+                chunk_tool_calls = getattr(chunk, 'tool_calls', None)
+
+                # 1) Process reasoning delta (start reasoning block on first sight).
+                if chunk_reasoning or (event_type == 'reasoning' and has_reasoning_metadata):
+                    self._attempt_state.observable_output_started = True
+                    reasoning_text = chunk_reasoning or ""
+                    chunk_counts["reasoning"] += 1
+                    log.debug("runner.reasoning.received", {
+                        "length": len(reasoning_text),
+                        "text_preview": reasoning_text[:50],
+                    })
+                    if not hasattr(self, '_current_reasoning_id'):
+                        reasoning_id_counter += 1
+                        self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
+                        self._current_reasoning_metadata = dict(display_chunk_metadata)
+                        await processor.process_event(ReasoningStartEvent(
+                            id=self._current_reasoning_id,
+                            metadata=display_chunk_metadata,
+                        ))
+
+                    if chunk_reasoning:
+                        if response_rewriter is not None:
+                            reasoning_text = await response_rewriter.feed_reasoning(reasoning_text)
+                        if reasoning_text:
+                            await processor.process_event(ReasoningDeltaEvent(
+                                id=self._current_reasoning_id,
+                                text=reasoning_text,
+                                metadata=display_chunk_metadata,
+                            ))
+
+                # 2) End reasoning block when this chunk also carries non-reasoning
+                #    content (or once the stream moves away from reasoning).
+                if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
+                    await _flush_reasoning_rewriter()
+                    reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                    await processor.process_event(ReasoningEndEvent(
+                        id=self._current_reasoning_id,
+                        metadata=reasoning_end_metadata,
+                    ))
+                    delattr(self, '_current_reasoning_id')
+                    if hasattr(self, '_current_reasoning_metadata'):
+                        delattr(self, '_current_reasoning_metadata')
+
+                # 3) Process text delta.
+                raw_chunk_text = chunk_text
+                if chunk_text and response_rewriter is not None:
+                    chunk_text = await response_rewriter.feed_text(chunk_text)
+
+                if raw_chunk_text:
+                    self._attempt_state.observable_output_started = True
+                    chunk_counts["text"] += 1
+                if chunk_text:
+                    if not text_started:
+                        await processor.process_event(TextStartEvent())
+                        text_started = True
+
+                    await processor.process_event(TextDeltaEvent(
+                        text=chunk_text,
+                    ))
+
+                # 4) Process tool calls.
+                if chunk_tool_calls:
+                    # Tool fragments are persisted/accumulated and may become an
+                    # executable call in this same await, so any replay is unsafe.
+                    self._attempt_state.observable_output_started = True
+                    chunk_counts["tool"] += 1
+                    for tc in chunk_tool_calls:
+                        await tool_accumulator.feed_chunk(tc)
+        except asyncio.CancelledError:
+            # The stream is over: give the LLM slot back before waiting on
+            # foreground children, which run on this same loop and need slots
+            # of their own (holding it here could deadlock the whole budget).
+            self._release_budget_slot("stream_over")
+            # Not a user abort (that has stopped them already): a workflow
+            # node timeout or a watchdog gave up on this execution. Stop the
+            # subagents it started now, not after the drain below, which can
+            # sit on a tool call waiting for a permission reply. SessionLoop
+            # does the same for cancels landing anywhere else in the step.
+            # Synchronous like the release, so a second cancel landing in the
+            # awaits below cannot skip either.
+            if not self.is_aborted:
+                from aegisops.session.session_loop import SessionLoop
+
+                SessionLoop.end_cancelled_execution(self.session.id)
+            self._release_llm_slot("cancelled")
+            # Before any other await, so a second stop cannot land in front
+            # of it (the finally below catches the rest).
+            await self._keep_interrupted_parts(processor, assistant_msg)
+            await model_activity.stop()
+            # Foreground delegate tasks own child sessions. Let their
+            # cancellation/finalization finish before unwinding this step.
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
+            if response_rewriter is not None:
+                await response_rewriter.close()
+            raise
+        except Exception as exc:
+            # First statement in the branch, and synchronous on purpose: an
+            # abort landing on any await here would otherwise skip the
+            # cooldown while `finally` still hands the slot on, letting the
+            # waiter reach a provider that just said 429. _process_step
+            # refines the duration with the jittered delay; the limiter keeps
+            # the longer of the two.
+            self._report_rate_limit_cooldown_for_exception(exc)
+            self._release_budget_slot("stream_error")
+            await model_activity.stop()
+            self._release_llm_slot("stream_error")
+            # A foreground delegate may already be running when the provider
+            # stream fails. Drain first so the retry layer observes the tool
+            # side-effect fence and cannot dispatch the same work twice.
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
+            partial_response = _build_llm_response_payload(
+                content=processor.get_text_content(),
+                reasoning=processor.get_reasoning_content(),
+                tool_calls=[],
+            )
+            if llm_after_enabled:
+                try:
+                    await HookPipeline.run_llm_after(
+                        llm_hook_metadata,
+                        {
+                            "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
+                            "error": {
+                                "type": type(exc).__name__,
+                                "message": str(exc),
+                            },
+                            "response": partial_response,
+                            "usage": stream_usage,
+                            "chunkCounts": dict(chunk_counts),
+                        },
+                    )
+                except Exception as hook_exc:
+                    log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
+            if response_rewriter is not None:
+                await response_rewriter.close()
+            sent_output_limit = provider_options.get("max_tokens")
+            if (
+                not self._attempt_state.received_chunk
+                and output_limits.is_raised(self.provider_id, self.model_id, sent_output_limit)
+                and output_limits.looks_like_limit_rejection(exc)
+            ):
+                # The provider refused the output limit raised after an
+                # earlier cut-off. Go back to the configured one for good; the
+                # step retry rebuilds the request with it.
+                output_limits.reject_raised(self.provider_id, self.model_id)
+                log.warn("runner.output_limit.raised_rejected", {
+                    "session_id": self.session.id,
+                    "provider_id": self.provider_id,
+                    "model_id": self.model_id,
+                    "max_tokens": sent_output_limit,
+                    "error": str(exc)[:300],
+                })
+                raise output_limits.OutputLimitRejectedError(
+                    f"The provider rejected max_tokens={sent_output_limit}: {exc}"
+                ) from exc
+            raise
+        finally:
+            # Free the provider slot first (synchronous, instant) so a queued
+            # caller can start while the activity marker is persisted.
+            self._release_llm_slot("stream_finished")
+            self._release_budget_slot("stream_finished")
+            try:
+                await model_activity.stop()
+            finally:
+                # Every way out of the stream passes here. A stop landing on
+                # an await of the error branch, or on this one after the
+                # stream ended, skips both the cancel branch's write and the
+                # text-end below.
+                unwinding = sys.exception()
+                if unwinding is not caller_exception and isinstance(unwinding, asyncio.CancelledError):
+                    await self._keep_interrupted_parts(processor, assistant_msg)
+
+        self.execution_activity.update(state="processing", last_activity_at=time.time())
+        log.debug("runner.stream.summary", {
+            "total_chunks": chunk_counts["total"],
+            "reasoning_chunks": chunk_counts["reasoning"],
+            "text_chunks": chunk_counts["text"],
+            "tool_chunks": chunk_counts["tool"],
+            "had_reasoning": chunk_counts["reasoning"] > 0,
+            "finish_reason": stream_finish_reason,
+            "agent": agent.name,
+        })
+
+        tool_args_truncated = False
+        response_rewriter_closed = False
+        sent_output_limit = provider_options.get("max_tokens")
+        next_output_limit = output_limits.next_max_tokens(
+            self.provider_id,
+            self.model_id,
+            sent_output_limit,
+            output_room=self._output_room_tokens(),
+        )
+        # Only the first cut-off of a turn is told to resend: a repeat means
+        # the limit was probably not the cause (a gateway size or time limit
+        # cuts the same call again), and resending burns the turn's budget of
+        # consecutive cut-offs.  The raise is still recorded.
+        truncation_guard = self._static_cache.get("tool_args_truncation_guard")
+        repeated_truncation = (
+            isinstance(truncation_guard, dict)
+            and truncation_guard.get("last_user_id") == getattr(assistant_msg, "parentID", None)
+            and int(truncation_guard.get("count", 0) or 0) > 0
+        )
+        try:
+            try:
+                await tool_accumulator.flush_remaining(
+                    stream_finish_reason,
+                    output_limit=sent_output_limit,
+                    raised_output_limit=None if repeated_truncation else next_output_limit,
+                )
+            except StreamToolArgumentsTruncatedError as exc:
+                # The cut-off call is already stored as a failed tool part whose
+                # error tells the model how to recover. Finish the step normally
+                # so its text, reasoning and any completed tools stay visible.
+                # Replaying the request instead deleted all of that, and whatever
+                # cut the stream usually cut the identical retry at the same spot.
+                tool_args_truncated = True
+                # The request's output limit is the usual cause (a guessed limit,
+                # shared with reasoning), so give the model's next calls more room.
+                if next_output_limit:
+                    output_limits.raise_max_tokens(
+                        self.provider_id,
+                        self.model_id,
+                        next_output_limit,
+                    )
+                log.warn("runner.stream.tool_arguments_truncated", {
+                    "session_id": self.session.id,
+                    "tool_call_id": exc.tool_call_id,
+                    "tool_name": exc.tool_name,
+                    "finish_reason": exc.finish_reason,
+                    "arguments_len": exc.arguments_len,
+                    "max_tokens": sent_output_limit,
+                    "raised_max_tokens": next_output_limit,
+                })
+
+            if response_rewriter is not None:
+                trailing_text = await response_rewriter.flush_text()
+                if trailing_text:
+                    if not text_started:
+                        await processor.process_event(TextStartEvent())
+                        text_started = True
+                    await processor.process_event(TextDeltaEvent(text=trailing_text))
+
+            # End text block if started
+            if text_started:
+                await processor.process_event(TextEndEvent())
+
+            # End any remaining reasoning block
+            if hasattr(self, '_current_reasoning_id'):
+                await _flush_reasoning_rewriter()
+                reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
+                await processor.process_event(ReasoningEndEvent(
+                    id=self._current_reasoning_id,
+                    metadata=reasoning_end_metadata,
+                ))
+                delattr(self, '_current_reasoning_id')
+                if hasattr(self, '_current_reasoning_metadata'):
+                    delattr(self, '_current_reasoning_metadata')
+
+            # Every channel has been flushed, so the transform has nothing left to
+            # hold and its stream can be released.
+            if response_rewriter is not None:
+                response_rewriter_closed = True
+                await response_rewriter.close()
+
+            # Emit finish event
+            await processor.process_event(FinishEvent(
+                finish_reason=processor.get_finish_reason()
+            ))
+        except (Exception, asyncio.CancelledError) as exc:
+            if isinstance(exc, asyncio.CancelledError):
+                # Stopped while the finished stream was being closed (tool
+                # arguments, text-end running tool calls written in the text):
+                # the text is not stored yet here either.
+                await self._keep_interrupted_parts(processor, assistant_msg)
+            await processor.drain_parallel_tool_calls(execute_deferred=False)
+            if response_rewriter is not None and not response_rewriter_closed:
+                await response_rewriter.close()
+            raise
+
+        # Foreground subagent tool-calls are launched concurrently during
+        # streaming so sibling subagents can start in the same assistant turn.
+        # Drain them here before exposing tool results to the next loop step.
+        # A response cut off mid tool call still finishes the step, but its
+        # batch did not end cleanly: the model must resend before any wait.
+        await processor.drain_parallel_tool_calls(
+            execute_deferred=not (aborted_during_stream or self.is_aborted or tool_args_truncated)
+        )
+        
+        # Get processed content
+        content = processor.get_text_content()
+        reasoning = processor.get_reasoning_content()
+        
+        # Update message tokens if provider reported usage
+        tokens_update = self._build_tokens_update(stream_usage)
+        if tokens_update:
+            try:
+                await Message.update(
+                    self.session.id,
+                    assistant_msg.id,
+                    tokens=tokens_update,
+                )
+                log.info("runner.stream.usage_captured", {
+                    "input": tokens_update["input"],
+                    "output": tokens_update["output"],
+                    "reasoning": tokens_update["reasoning"],
+                    "cache_read": tokens_update["cache"]["read"],
+                    "cache_write": tokens_update["cache"]["write"],
+                    "cache_reported": tokens_update["cache"]["reported"],
+                    "prompt_tokens": stream_usage.get("prompt_tokens", 0),
+                    "total": stream_usage.get("total_tokens", 0),
+                    "response_id": stream_usage.get("response_id"),
+                    "message_id": assistant_msg.id,
+                })
+            except Exception as e:
+                log.warn("runner.stream.usage_update_failed", {"error": str(e)})
+        
+        # Log summary
+        log.debug("runner.stream.complete", {
+            "text_length": len(content),
+            "reasoning_length": len(reasoning),
+            "tool_calls": len(processor.tool_calls),
+            "usage": stream_usage,
+        })
+        
+        # Update assistant message with content
+        if content:
+            await Message.update(
+                self.session.id,
+                assistant_msg.id,
+                content=content,
+            )
+        self._llm_call_aborted = aborted_during_stream
+        
+        # Note: Tools were already executed synchronously during streaming
+        # Build tool call list for result
+        tool_calls_for_result = [
+            ToolCall(
+                id=tc_state.id,
+                name=tc_state.name,
+                arguments=tc_state.input,
+            )
+            for tc_state in list(processor.tool_calls.values())
+        ]
+        finish_reason = processor.get_finish_reason()
+        result_action = "continue" if tool_calls_for_result else "stop"
+        response_payload = _build_llm_response_payload(
+            content=content,
+            reasoning=reasoning,
+            tool_calls=tool_calls_for_result,
+        )
+        if llm_after_enabled:
+            try:
+                hook_started_at = time.perf_counter()
+                await HookPipeline.run_llm_after(
+                    llm_hook_metadata,
+                    {
+                        "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
+                        "finishReason": processor.get_finish_reason(),
+                        "contentLength": len(content),
+                        "reasoningLength": len(reasoning),
+                        "toolCallCount": len(tool_calls_for_result),
+                        "toolCalls": [
+                            {"id": tool_call.id, "name": tool_call.name}
+                            for tool_call in tool_calls_for_result[:30]
+                        ],
+                        "response": response_payload,
+                        "usage": stream_usage,
+                        "chunkCounts": dict(chunk_counts),
+                        "action": result_action,
+                    },
+                )
+                self._log_perf(
+                    "runner.hook.llm_after.complete",
+                    hook_started_at,
+                    action=result_action,
+                    tool_call_count=len(tool_calls_for_result),
+                )
+            except Exception as exc:
+                log.debug("runner.hook.llm_after.error", {"error": str(exc)})
+        
+        if tool_calls_for_result:
+            response_payload = self._build_langfuse_response_payload(
+                action="continue",
+                content=content,
+                reasoning=reasoning,
+                finish_reason=finish_reason,
+                tool_calls=tool_calls_for_result,
+            )
+            self._end_observability(
+                generation_ctx, trace_ctx,
+                output=response_payload,
+                usage=stream_usage,
+                metadata={
+                    "finish_reason": finish_reason,
+                    "status": "continue_with_tools",
+                    "tool_call_count": len(tool_calls_for_result),
+                },
+                trace_output=response_payload,
+            )
+            return StepResult(
+                action=result_action,
+                content=content,
+                tool_calls=tool_calls_for_result,
+                usage=stream_usage,
+                tool_args_truncated=tool_args_truncated,
+                _successful_sleep=(
+                    len(tool_calls_for_result) == 1
+                    and tool_calls_for_result[0].name == "sleep"
+                    and processor.tool_calls[tool_calls_for_result[0].id].status == "completed"
+                ),
+            )
+
+        response_payload = self._build_langfuse_response_payload(
+            action="stop",
+            content=content,
+            reasoning=reasoning,
+            finish_reason=finish_reason,
+            tool_calls=tool_calls_for_result,
+        )
+        self._end_observability(
+            generation_ctx, trace_ctx,
+            output=response_payload,
+            usage=stream_usage,
+            metadata={
+                "finish_reason": finish_reason,
+                "status": "stop",
+                "tool_call_count": 0,
+            },
+            trace_output=response_payload,
+        )
+        return StepResult(
+            action=result_action,
+            content=content,
+            usage=stream_usage,
+            tool_args_truncated=tool_args_truncated,
+        )
+    
+    @staticmethod
+    def _end_observability(
+        generation_ctx: Any,
+        trace_ctx: Any,
+        *,
+        output: Any = None,
+        usage: Any = None,
+        metadata: Any = None,
+        level: Optional[str] = None,
+        trace_output: Any = None,
+    ) -> None:
+        """Safely end observability scopes. Never raises."""
+        try:
+            if generation_ctx is not None:
+                gen_kwargs: Dict[str, Any] = {}
+                if output is not None:
+                    gen_kwargs["output"] = output
+                if usage is not None:
+                    gen_kwargs["usage"] = usage
+                if metadata is not None:
+                    gen_kwargs["metadata"] = metadata
+                if level is not None:
+                    gen_kwargs["level"] = level
+                generation_ctx.end(**gen_kwargs)
+        except Exception as _gen_err:
+            log.debug("runner.observability.generation_end_failed", {"error": str(_gen_err)})
+        try:
+            if trace_ctx is not None:
+                tr_kwargs: Dict[str, Any] = {}
+                if trace_output is not None:
+                    tr_kwargs["output"] = trace_output
+                elif output is not None:
+                    tr_kwargs["output"] = output
+                if level is not None:
+                    tr_kwargs["level"] = level
+                trace_ctx.end(**tr_kwargs)
+        except Exception as _tr_err:
+            log.debug("runner.observability.trace_end_failed", {"error": str(_tr_err)})
+
+    @staticmethod
+    def _session_permission_rules(session: Any) -> List[Any]:
+        """A session's own permission rules in ruleset form."""
+        from aegisops.permission.rule import (
+            PermissionLevel,
+            PermissionRule,
+            PermissionScope,
+        )
+
+        return [
+            PermissionRule(
+                permission=rule.permission,
+                level=PermissionLevel(rule.action),
+                scope=PermissionScope.PATTERN,
+                pattern=rule.pattern,
+            )
+            for rule in getattr(session, "permission", None) or []
+        ]
+
+    def _permission_ruleset_for_agent(self, agent: AgentInfo) -> List[Any]:
+        """Combine agent and session rules in effective priority order."""
+        from aegisops.permission.helpers import merge
+
+        return merge(
+            list(getattr(agent, "permission", None) or []),
+            self._session_permission_rules(self.session),
+        )
+
+    async def _delegating_sessions(self) -> List[Any]:
+        """The sessions this one was delegated from, cached for the turn.
+
+        A subagent must stay within the limits set on the session that
+        delegated to it (e.g. write denied there).
+        """
+        cached = getattr(self, "_turn_delegating_sessions", None)
+        if cached is None:
+            cached = await Session.delegating_sessions(self.session)
+            self._turn_delegating_sessions = cached
+        return cached
+
+    async def _effective_permission_ruleset(self) -> List[Any]:
+        ruleset = getattr(self, "_turn_permission_ruleset", None)
+        if ruleset is not None:
+            return ruleset
+        agent_name = getattr(self.session, "agent", None) or getattr(
+            self,
+            "agent_name",
+            None,
+        )
+        if not agent_name:
+            return []
+        agent = await Agent.get(agent_name) or await Agent.get("rex")
+        return self._permission_ruleset_for_agent(agent)
+
+    def _patterns_seen_by(
+        self,
+        other: Any,
+        patterns: List[str],
+        metadata: Dict[str, Any],
+    ) -> List[str]:
+        """File patterns as the rules of ``other`` (a delegating session) see them.
+
+        File tools name paths relative to the directory of the session they
+        run in (``pattern_base``), and a session's ``edit`` rules are written
+        relative to its own directory.  A delegated session can run in another
+        directory (an agent with its own session directory, for one), so its
+        patterns are re-expressed from there.  Patterns based elsewhere (the
+        host Memory or Skill roots, a sandbox) do not depend on the session.
+        """
+        base = metadata.get("pattern_base")
+        own = str(getattr(self.session, "directory", "") or "")
+        theirs = str(getattr(other, "directory", "") or "")
+        if not (isinstance(base, str) and base and own and theirs):
+            return patterns
+        from aegisops.tool.path_utils import normalize_user_path, safe_relpath
+
+        base = normalize_user_path(base)
+        their_base = normalize_user_path(theirs)
+        if base != normalize_user_path(own) or base == their_base:
+            return patterns
+        # An absolute pattern is a path the tool could not express relative to
+        # its base (another drive on Windows); it may still sit under theirs.
+        return [
+            safe_relpath(os.path.normpath(os.path.join(base, pattern)), their_base)
+            for pattern in patterns
+        ]
+
+    async def _handle_permission(self, request) -> None:
+        """Handle permission request."""
+        from aegisops.permission.next import PermissionNext
+
+        patterns = list(getattr(request, "patterns", None) or [])
+        metadata = dict(getattr(request, "metadata", None) or {})
+        # File tools ask for ``edit``; rules that name the tool itself apply too.
+        tool_name = metadata.get("tool") if isinstance(metadata.get("tool"), str) else None
+        aliases = [tool_name] if tool_name else []
+        ruleset = await self._effective_permission_ruleset()
+        configured_action = PermissionNext.evaluate_request(
+            request.permission,
+            patterns,
+            ruleset,
+            aliases,
+        )
+        delegating = await self._delegating_sessions()
+        for parent in delegating:
+            # Each delegating session's own rules are a separate limit.
+            inherited = self._session_permission_rules(parent)
+            if inherited:
+                configured_action = PermissionNext.stricter(
+                    configured_action,
+                    PermissionNext.evaluate_request(
+                        request.permission,
+                        self._patterns_seen_by(parent, patterns, metadata),
+                        inherited,
+                        aliases,
+                    ),
+                )
+        deny_only_preflight = metadata.get("reason") == "question_tool"
+
+        tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
+        if self.callbacks.event_publish_callback:
+            await self.callbacks.event_publish_callback("runtime.permission_gate", {
+                "sessionID": self.session.id,
+                "step": self._step,
+                "toolName": getattr(request, "permission", ""),
+                "alwaysLoad": tool_metadata.always_load,
+                "patterns": patterns,
+            })
+
+        if configured_action == "deny":
+            raise PermissionError(f"Permission denied: {request.permission}")
+        if configured_action == "allow":
+            return
+        if deny_only_preflight:
+            return
+
+        if self.callbacks.on_permission_request:
+            allowed = await self.callbacks.on_permission_request(request)
+            if not allowed:
+                raise PermissionError(f"Permission denied: {request.permission}")
+            return
+
+        from aegisops.permission.interactive import legacy_tool_permission_prompt_required
+
+        if configured_action is None and not legacy_tool_permission_prompt_required():
+            return
+
+        metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
+        metadata.setdefault("sessionID", self.session.id)
+        if delegating:
+            # The user is waiting in the sessions that delegated this one;
+            # they show the request too.
+            metadata["delegationChain"] = [parent.id for parent in delegating]
+
+        reply = await PermissionNext.ask(
+            session_id=self.session.id,
+            permission=request.permission,
+            patterns=patterns,
+            ruleset=ruleset,
+            metadata=metadata,
+            always=list(getattr(request, "always", None) or []),
+            tool={"name": tool_name or request.permission},
+        )
+        if reply in {"deny", "deny_session", "reject", "never"}:
+            raise PermissionError(f"Permission denied: {request.permission}")
+
+
+async def run_session(
+    session: SessionInfo,
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
+    agent_name: Optional[str] = None,
+    callbacks: Optional[RunnerCallbacks] = None,
+) -> Optional[MessageInfo]:
+    """
+    Run a session to completion.
+
+    Delegates to SessionLoop which is the single authoritative execution path.
+
+    Args:
+        session: Session to run
+        provider_id: Provider ID
+        model_id: Model ID
+        agent_name: Agent name
+        callbacks: RunnerCallbacks (wrapped into LoopCallbacks)
+
+    Returns:
+        Last assistant message
+    """
+    from aegisops.session.session_loop import SessionLoop, LoopCallbacks
+
+    loop_callbacks = LoopCallbacks(
+        runner_callbacks=callbacks,
+        event_publish_callback=callbacks.event_publish_callback if callbacks else None,
+    )
+    result = await SessionLoop.run(
+        session_id=session.id,
+        provider_id=provider_id,
+        model_id=model_id,
+        agent_name=agent_name,
+        callbacks=loop_callbacks,
+    )
+    return result.last_message

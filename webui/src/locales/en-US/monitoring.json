@@ -1,0 +1,35 @@
+{
+  "pageTitle": "System Monitoring",
+  "pageDescription": "Real-time system status and performance monitoring",
+  "systemStatus": "System Status",
+  "uptime": "Uptime",
+  "activeSessions": "Active Sessions",
+  "activeAgents": "Active Agents",
+  "messagesPerMin": "Messages/min",
+  "status": {
+    "healthy": "Healthy",
+    "degraded": "Degraded",
+    "down": "Down"
+  },
+  "realTimeMetrics": "Real-time Metrics",
+  "metrics": {
+    "messageRate": "Message Rate",
+    "toolCallRate": "Tool Calls",
+    "errorRate": "System Errors",
+    "toolParseFailureRate": "Tool Parse Failures",
+    "avgResponse": "Avg Response",
+    "activeRequests": "Active Requests"
+  },
+  "llmPerformance": "LLM Response Time",
+  "toolPerformance": "Tool Execution Time",
+  "noData": "No data",
+  "unavailable": "No data",
+  "calls": "calls",
+  "errors": "errors",
+  "performanceTrend": "Performance Trend",
+  "trendDescription": "Sampled every 5 seconds while this page is open; shows the last 10 minutes; rates are counted per minute",
+  "trendCollecting": "Sampling; rates are counted per minute, so the trend appears after about a minute",
+  "trendUnavailable": "No metrics available",
+  "trendAxis": "per minute",
+  "trendAriaLabel": "Performance trend: latest tool calls {{calls}}, tool parse failures {{failures}}"
+}

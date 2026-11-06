@@ -1,0 +1,608 @@
+"""
+Tests for CLI session title generation.
+
+Verifies that session titles are generated correctly when sessions are
+initiated from the CLI, covering both the happy path and edge cases
+(LLM failures, single-run mode where fire_and_forget may be cancelled).
+"""
+
+import pytest
+from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_session(title="New session - 2026-01-01T00:00:00", project_id="proj-1"):
+    s = MagicMock()
+    s.title = title
+    s.project_id = project_id
+    return s
+
+
+def _make_user_msg(text: str, msg_id="msg-1"):
+    msg = MagicMock()
+    msg.role = "user"
+    msg.id = msg_id
+    part = MagicMock()
+    part.type = "text"
+    part.text = text
+    return msg, part
+
+
+def _patch_title_deps(mock_session, user_msgs, parts, mock_provider, mock_update=None):
+    """Return a list of patch context managers for generate_title_after_first_message."""
+    if mock_update is None:
+        mock_update = AsyncMock()
+    return [
+        patch("aegisops.session.session.Session.get_by_id", new=AsyncMock(return_value=mock_session)),
+        patch("aegisops.session.session.Session.is_default_title", return_value=True),
+        patch("aegisops.session.session.Session.update", new=mock_update),
+        patch("aegisops.session.message.Message.list", new=AsyncMock(return_value=user_msgs)),
+        patch("aegisops.session.message.Message.parts", new=AsyncMock(return_value=parts)),
+        patch("aegisops.provider.provider.Provider._ensure_initialized"),
+        patch("aegisops.provider.provider.Provider.get", return_value=mock_provider),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: generate_title_after_first_message
+# ---------------------------------------------------------------------------
+
+class TestGenerateTitleAfterFirstMessage:
+    """Unit tests for SessionTitle.generate_title_after_first_message."""
+
+    @pytest.mark.asyncio
+    async def test_generates_title_and_saves_to_db(self):
+        """Title is generated for the first user message and persisted to DB."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        mock_session = _make_session()
+        msg, part = _make_user_msg("Help me debug this Python script")
+        mock_provider = MagicMock()
+
+        async def fake_stream(*args, **kwargs):
+            yield MagicMock(delta="Debug Python")
+
+        mock_provider.chat_stream = fake_stream
+        mock_update = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider, mock_update)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+            )
+
+        assert title == "Debug Python"
+        mock_update.assert_awaited_once_with("proj-1", "sess-1", title="Debug Python")
+
+    @pytest.mark.asyncio
+    async def test_rejects_tool_call_payload_title_and_falls_back(self):
+        """Tool-call payloads from the title model are not persisted as titles."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        question = (
+            "based on ThreatBook Threat Intelligence, please give me reports for "
+            "cyber news related to Hong Kong for the past 7 days"
+        )
+        mock_session = _make_session()
+        msg, part = _make_user_msg(question)
+        mock_provider = MagicMock()
+
+        async def fake_stream(*args, **kwargs):
+            yield MagicMock(delta='[TOOL_CALL]\n{tool => "news", args => {\n  --query: "Hong Kong"\n}}')
+
+        mock_provider.chat_stream = fake_stream
+        mock_update = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider, mock_update)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="minimax-m2.7",
+                provider_id="threatbook-cn-llm",
+            )
+
+        expected = SessionTitle._generate_simple_title(question)
+        assert title == expected
+        assert "TOOL_CALL" not in title
+        mock_update.assert_awaited_once_with("proj-1", "sess-1", title=expected)
+
+    def test_rejects_json_function_call_title_candidate(self):
+        """Structured function-call shaped JSON is invalid as a thread title."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        title = SessionTitle._sanitize_generated_title(
+            '{"name": "news", "arguments": {"query": "Hong Kong"}}'
+        )
+
+        assert title == ""
+
+    @pytest.mark.asyncio
+    async def test_skips_when_more_than_one_user_message(self):
+        """Returns None when there are 2+ user messages (not the first turn)."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        mock_session = _make_session()
+        msg1, msg2 = MagicMock(), MagicMock()
+        msg1.role = msg2.role = "user"
+
+        with (
+            patch("aegisops.session.session.Session.get_by_id", new=AsyncMock(return_value=mock_session)),
+            patch("aegisops.session.session.Session.is_default_title", return_value=True),
+            patch("aegisops.session.message.Message.list", new=AsyncMock(return_value=[msg1, msg2])),
+        ):
+            result = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+            )
+
+        assert result is None
+
+    @pytest.mark.asyncio
+    async def test_skips_when_title_already_set(self):
+        """Returns existing title immediately when session has a meaningful title."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        mock_session = _make_session(title="Debug Python Script")
+
+        with (
+            patch("aegisops.session.session.Session.get_by_id", new=AsyncMock(return_value=mock_session)),
+            patch("aegisops.session.session.Session.is_default_title", return_value=False),
+        ):
+            result = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+            )
+
+        assert result == "Debug Python Script"
+
+    @pytest.mark.asyncio
+    async def test_skip_reasons_are_logged_at_info(self):
+        """跳过生成的原因要和 title.generation.start 一样落 INFO（默认日志级别看得到）。"""
+        from aegisops.session.lifecycle import title as title_module
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        seen: list[str] = []
+
+        class _Spy:
+            def info(self, message=None, extra=None):
+                seen.append(f"INFO {message}")
+
+            def debug(self, message=None, extra=None):
+                seen.append(f"DEBUG {message}")
+
+            def warn(self, message=None, extra=None):
+                seen.append(f"WARN {message}")
+
+            warning = warn
+
+            def error(self, message=None, extra=None):
+                seen.append(f"ERROR {message}")
+
+        msg1, msg2 = MagicMock(), MagicMock()
+        msg1.role = msg2.role = "user"
+        with (
+            patch.object(title_module, "log", _Spy()),
+            patch("aegisops.session.session.Session.get_by_id", new=AsyncMock(return_value=_make_session(title="Debug Python Script"))),
+            patch("aegisops.session.session.Session.is_default_title", return_value=False),
+        ):
+            await SessionTitle.generate_title_after_first_message(session_id="sess-1", model_id="m", provider_id="p")
+        with (
+            patch.object(title_module, "log", _Spy()),
+            patch("aegisops.session.session.Session.get_by_id", new=AsyncMock(return_value=_make_session())),
+            patch("aegisops.session.session.Session.is_default_title", return_value=True),
+            patch("aegisops.session.message.Message.list", new=AsyncMock(return_value=[msg1, msg2])),
+        ):
+            await SessionTitle.generate_title_after_first_message(session_id="sess-1", model_id="m", provider_id="p")
+
+        assert "INFO title.already_exists" in seen
+        assert "INFO title.not_first_message" in seen
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_simple_title_when_llm_fails(self):
+        """Uses _generate_simple_title and still saves to DB when LLM raises."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        mock_session = _make_session()
+        msg, part = _make_user_msg("Help me with something")
+        mock_provider = MagicMock()
+
+        async def failing_stream(*args, **kwargs):
+            raise ConnectionError("LLM unreachable")
+            yield  # make it an async generator
+
+        mock_provider.chat_stream = failing_stream
+        mock_update = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider, mock_update)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+            )
+
+        assert title == "Help me with something"
+        mock_update.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_falls_back_without_provider_call_when_llm_before_hook_fails(self):
+        """A failing llm_before hook blocks title provider calls and uses local fallback."""
+        from aegisops.session.lifecycle.title import SessionTitle
+        from aegisops.hooks.pipeline import HookPipeline
+
+        question = "Contact alice@example.com about the alert"
+        mock_session = _make_session()
+        msg, part = _make_user_msg(question)
+        mock_provider = MagicMock()
+        mock_provider.chat_stream = MagicMock(side_effect=AssertionError("provider must not be called"))
+        mock_update = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider, mock_update)
+        with (
+            patches[0],
+            patches[1],
+            patches[2],
+            patches[3],
+            patches[4],
+            patches[5],
+            patches[6],
+            patch.object(HookPipeline, "has_stage_handlers", new=AsyncMock(return_value=True)),
+            patch.object(HookPipeline, "run_llm_before", new=AsyncMock(side_effect=RuntimeError("hook boom"))),
+        ):
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+            )
+
+        assert title == SessionTitle._generate_simple_title(question)
+        mock_provider.chat_stream.assert_not_called()
+        mock_update.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_publishes_sse_event_when_callback_provided(self):
+        """SSE event is published when event_publish_callback is given (Web path)."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        mock_session = _make_session()
+        msg, part = _make_user_msg("Hello world")
+        mock_provider = MagicMock()
+
+        async def fake_stream(*args, **kwargs):
+            yield MagicMock(delta="Hello World")
+
+        mock_provider.chat_stream = fake_stream
+        event_cb = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+                event_publish_callback=event_cb,
+            )
+
+        event_cb.assert_awaited_once_with(
+            "session.updated",
+            {"id": "sess-1", "title": "Hello World"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_sse_event_in_cli_path(self):
+        """No SSE event when event_publish_callback is None (CLI path)."""
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        mock_session = _make_session()
+        msg, part = _make_user_msg("CLI test message")
+        mock_provider = MagicMock()
+
+        async def fake_stream(*args, **kwargs):
+            yield MagicMock(delta="CLI Test")
+
+        mock_provider.chat_stream = fake_stream
+        mock_update = AsyncMock()
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider, mock_update)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+                event_publish_callback=None,
+            )
+
+        assert title == "CLI Test"
+        mock_update.assert_awaited_once_with("proj-1", "sess-1", title="CLI Test")
+
+
+# ---------------------------------------------------------------------------
+# Unit tests: PROMPT_TITLE language rule
+# ---------------------------------------------------------------------------
+
+class TestPromptTitleLanguageRule:
+    """Verify the LANGUAGE rule and Chinese examples are present in PROMPT_TITLE."""
+
+    def test_prompt_contains_language_rule(self):
+        from aegisops.session.prompt_strings import PROMPT_TITLE
+
+        assert "LANGUAGE" in PROMPT_TITLE or "same language" in PROMPT_TITLE.lower(), (
+            "PROMPT_TITLE must contain a language-matching rule"
+        )
+
+    def test_prompt_contains_chinese_examples(self):
+        from aegisops.session.prompt_strings import PROMPT_TITLE
+
+        has_chinese = any(
+            char in PROMPT_TITLE for char in ["分析", "重构", "调试", "你好"]
+        )
+        assert has_chinese, "PROMPT_TITLE should include at least one Chinese example"
+
+    @pytest.mark.asyncio
+    async def test_language_rule_is_sent_to_llm(self):
+        """The system prompt passed to the LLM contains the LANGUAGE rule."""
+        from aegisops.session.lifecycle.title import SessionTitle, _CANONICAL_TITLE_PROMPT
+
+        assert (
+            "LANGUAGE" in _CANONICAL_TITLE_PROMPT
+            or "same language" in _CANONICAL_TITLE_PROMPT.lower()
+        ), "_CANONICAL_TITLE_PROMPT must include the language-matching rule"
+
+        mock_session = _make_session()
+        msg, part = _make_user_msg("帮我分析这个IP地址的威胁情报")
+        mock_provider = MagicMock()
+        captured_messages = []
+
+        async def fake_stream(model_id, messages, **kwargs):
+            captured_messages.extend(messages)
+            yield MagicMock(delta="IP威胁情报分析")
+
+        mock_provider.chat_stream = fake_stream
+
+        patches = _patch_title_deps(mock_session, [msg], [part], mock_provider)
+        with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            title = await SessionTitle.generate_title_after_first_message(
+                session_id="sess-1",
+                model_id="claude-3",
+                provider_id="anthropic",
+            )
+
+        assert title == "IP威胁情报分析"
+
+        system_msg = next((m for m in captured_messages if m.role == "system"), None)
+        assert system_msg is not None
+        assert "LANGUAGE" in system_msg.content or "same language" in system_msg.content.lower()
+
+        user_msg = next((m for m in captured_messages if m.role == "user"), None)
+        assert user_msg is not None
+        assert "帮我分析" in user_msg.content
+
+
+# ---------------------------------------------------------------------------
+# Integration: _process_message calls title generation after the loop
+# ---------------------------------------------------------------------------
+
+class TestProcessMessageTitleGeneration:
+    """Tests that _process_message explicitly generates title after SessionLoop.run()."""
+
+    @pytest.mark.asyncio
+    async def test_title_generated_after_successful_loop(self):
+        """_process_message calls generate_title_after_first_message after a
+        successful loop, ensuring the title is saved even in single-run mode
+        where the fire_and_forget task may be cancelled by asyncio cleanup."""
+        from aegisops.cli.session_runner import CLISessionRunner
+        from aegisops.session.session_loop import LoopResult
+        import aegisops.session.session_loop as session_loop_mod
+        import aegisops.session.message as message_mod
+        import aegisops.agent.registry as agent_mod
+        import aegisops.provider.provider as provider_mod
+        import aegisops.session.lifecycle.title as title_mod
+        import aegisops.config.config as config_mod
+
+        runner = CLISessionRunner(console=MagicMock(), directory=Path("/tmp"))
+        runner._session = MagicMock()
+        runner._session.id = "sess-test"
+        runner._live = None
+        runner._content_buffer = []
+        runner._reasoning_buffer = []
+        runner._has_content = False
+        runner._has_reasoning = False
+        runner._accumulated_text = ""
+        runner._last_display_time = 0
+
+        mock_agent = MagicMock()
+        mock_agent.name = "rex"
+        mock_agent.require_dedicated_session = False
+        mock_provider_inst = MagicMock()
+        mock_provider_inst.is_configured = MagicMock(return_value=True)
+        title_generate_mock = AsyncMock(return_value="Test Title")
+
+        mock_live_ctx = MagicMock()
+        mock_live_ctx.__enter__ = MagicMock(return_value=mock_live_ctx)
+        mock_live_ctx.__exit__ = MagicMock(return_value=False)
+        mock_live_ctx.update = MagicMock()
+
+        with (
+            patch.object(message_mod.Message, "create", new=AsyncMock()),
+            patch.object(session_loop_mod.SessionLoop, "run",
+                         new=AsyncMock(return_value=LoopResult(action="done"))),
+            patch.object(agent_mod.Agent, "default_agent", new=AsyncMock(return_value="rex")),
+            patch.object(agent_mod.Agent, "get", new=AsyncMock(return_value=mock_agent)),
+            patch.object(provider_mod.Provider, "get", return_value=mock_provider_inst),
+            patch.object(title_mod.SessionTitle, "generate_title_after_first_message",
+                         new=title_generate_mock),
+            patch.object(config_mod.Config, "resolve_default_llm",
+                         new=AsyncMock(return_value={"provider_id": "anthropic", "model_id": "claude-3"})),
+            patch("aegisops.cli.session_runner.Live", return_value=mock_live_ctx),
+            patch("aegisops.cli.session_runner.Spinner"),
+        ):
+            await runner._process_message("test message")
+
+        title_generate_mock.assert_awaited_once()
+        kwargs = title_generate_mock.call_args.kwargs
+        assert kwargs["session_id"] == "sess-test"
+        assert kwargs["provider_id"] == "anthropic"
+        assert kwargs["model_id"] == "claude-3"
+
+    @pytest.mark.asyncio
+    async def test_title_not_generated_when_loop_errors(self):
+        """_process_message skips title generation when the loop returns an error."""
+        from aegisops.cli.session_runner import CLISessionRunner
+        from aegisops.session.session_loop import LoopResult
+        import aegisops.session.session_loop as session_loop_mod
+        import aegisops.session.message as message_mod
+        import aegisops.agent.registry as agent_mod
+        import aegisops.provider.provider as provider_mod
+        import aegisops.session.lifecycle.title as title_mod
+        import aegisops.config.config as config_mod
+
+        runner = CLISessionRunner(console=MagicMock(), directory=Path("/tmp"))
+        runner._session = MagicMock()
+        runner._session.id = "sess-test"
+        runner._live = None
+        runner._content_buffer = []
+        runner._reasoning_buffer = []
+        runner._has_content = False
+        runner._has_reasoning = False
+        runner._accumulated_text = ""
+        runner._last_display_time = 0
+
+        mock_agent = MagicMock()
+        mock_agent.name = "rex"
+        mock_agent.require_dedicated_session = False
+        mock_provider_inst = MagicMock()
+        mock_provider_inst.is_configured = MagicMock(return_value=True)
+        title_generate_mock = AsyncMock(return_value=None)
+
+        mock_live_ctx = MagicMock()
+        mock_live_ctx.__enter__ = MagicMock(return_value=mock_live_ctx)
+        mock_live_ctx.__exit__ = MagicMock(return_value=False)
+        mock_live_ctx.update = MagicMock()
+
+        with (
+            patch.object(message_mod.Message, "create", new=AsyncMock()),
+            patch.object(session_loop_mod.SessionLoop, "run",
+                         new=AsyncMock(return_value=LoopResult(action="error", error="provider failed"))),
+            patch.object(agent_mod.Agent, "default_agent", new=AsyncMock(return_value="rex")),
+            patch.object(agent_mod.Agent, "get", new=AsyncMock(return_value=mock_agent)),
+            patch.object(provider_mod.Provider, "get", return_value=mock_provider_inst),
+            patch.object(title_mod.SessionTitle, "generate_title_after_first_message",
+                         new=title_generate_mock),
+            patch.object(config_mod.Config, "resolve_default_llm",
+                         new=AsyncMock(return_value={"provider_id": "anthropic", "model_id": "claude-3"})),
+            patch("aegisops.cli.session_runner.Live", return_value=mock_live_ctx),
+            patch("aegisops.cli.session_runner.Spinner"),
+        ):
+            await runner._process_message("test message")
+
+        title_generate_mock.assert_not_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Output budget: a model that thinks first (INC-F0EC905C)
+# ---------------------------------------------------------------------------
+
+_SCREENSHOT_QUESTION = "主agent和子agent是怎么协作的 如何避免上下文过长导致的记忆问题 重复执行同个动作问题"
+_FULL_TITLE = "主 Agent 与子 Agent 的协作与记忆问题"
+
+
+def _thinking_provider(thinking_tokens: int, budgets: list):
+    """A reasoning model whose thinking counts toward max_tokens, one token per reasoning chunk or title character."""
+    from aegisops.provider.provider import StreamChunk
+
+    provider = MagicMock()
+
+    async def chat_stream(model_id, messages, **kwargs):
+        budget = kwargs.get("max_tokens")
+        budgets.append(budget)
+        chunks = [StreamChunk(event_type="reasoning", reasoning="想")] * thinking_tokens
+        chunks += [StreamChunk(delta=char) for char in _FULL_TITLE]
+        for used, chunk in enumerate(chunks):
+            if budget is not None and used >= budget:
+                yield StreamChunk(delta="", finish_reason="length")
+                return
+            yield chunk
+        yield StreamChunk(delta="", finish_reason="stop")
+
+    provider.chat_stream = chat_stream
+    return provider
+
+
+async def _title_with(provider) -> str:
+    from aegisops.session.lifecycle.title import SessionTitle
+
+    msg, part = _make_user_msg(_SCREENSHOT_QUESTION)
+    patches = _patch_title_deps(_make_session(), [msg], [part], provider, AsyncMock())
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+        return await SessionTitle.generate_title_after_first_message(
+            session_id="sess-1",
+            model_id="deepseek-v4.1-flash",
+            provider_id="threatbook-cn-llm",
+        )
+
+
+class TestTitleOutputBudget:
+    @pytest.mark.asyncio
+    async def test_a_model_that_thinks_first_still_gets_its_whole_title_out(self):
+        # 49 tokens of thinking: at the old budget of 50 only "主" was left.
+        budgets: list = []
+
+        title = await _title_with(_thinking_provider(49, budgets))
+
+        assert title == _FULL_TITLE
+        assert budgets and budgets[0] >= 49 + len(_FULL_TITLE)
+
+    @pytest.mark.asyncio
+    async def test_a_title_cut_off_by_the_budget_falls_back_to_the_question(self):
+        from aegisops.provider.provider import StreamChunk
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        provider = MagicMock()
+
+        async def cut_off(*args, **kwargs):
+            yield StreamChunk(event_type="reasoning", reasoning="thinking...")
+            yield StreamChunk(delta="主")
+            yield StreamChunk(delta="", finish_reason="length")
+
+        provider.chat_stream = cut_off
+
+        title = await _title_with(provider)
+
+        assert title == SessionTitle._generate_simple_title(_SCREENSHOT_QUESTION)
+        assert title != "主"
+
+    @pytest.mark.asyncio
+    async def test_a_title_that_ends_normally_is_kept(self):
+        budgets: list = []
+
+        assert await _title_with(_thinking_provider(0, budgets)) == _FULL_TITLE
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("after_length", ["stop", "error"])
+    async def test_a_cut_off_stays_cut_off_whatever_follows(self, after_length):
+        # Some adapters close with "stop" after passing "length" on; a stream
+        # may also fail once it was cut off.
+        from aegisops.provider.provider import StreamChunk
+        from aegisops.session.lifecycle.title import SessionTitle
+
+        provider = MagicMock()
+
+        async def cut_off(*args, **kwargs):
+            yield StreamChunk(delta="主")
+            yield StreamChunk(delta="", finish_reason="length")
+            if after_length == "stop":
+                yield StreamChunk(delta="", finish_reason="stop")
+            else:
+                raise RuntimeError("stream closed")
+
+        provider.chat_stream = cut_off
+
+        assert await _title_with(provider) == SessionTitle._generate_simple_title(_SCREENSHOT_QUESTION)

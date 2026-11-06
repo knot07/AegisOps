@@ -1,0 +1,410 @@
+"""
+Session CLI commands
+
+Provides session management commands: list, show, delete
+Ported from original cli/cmd/session.ts
+"""
+
+import asyncio
+import json
+import os
+from functools import cache
+from typing import Optional
+
+import typer
+from rich.console import Console
+from rich.table import Table
+
+from aegisops.session.session import Session
+from aegisops.project.project import Project
+from aegisops.storage.storage import Storage
+from aegisops.utils.locale import Locale
+
+
+session_app = typer.Typer(
+    name="session",
+    help="Manage sessions",
+    no_args_is_help=True,
+)
+
+console = Console()
+
+LIST_FORMATS = ("table", "json")
+
+
+def _validate_list_format(value: str) -> str:
+    """Reject unknown ``--format`` values instead of silently printing a table."""
+    normalized = (value or "").strip().lower()
+    if normalized not in LIST_FORMATS:
+        raise typer.BadParameter(f"Output format must be one of: {', '.join(LIST_FORMATS)}.")
+    return normalized
+
+
+def _format_time(timestamp_ms: int) -> str:
+    """Format timestamp for display"""
+    return Locale.today_time_or_datetime(timestamp_ms)
+
+
+def _truncate(text: str, max_width: int) -> str:
+    """Truncate text to max width with ellipsis"""
+    if len(text) <= max_width:
+        return text
+    return text[:max_width - 3] + "..."
+
+
+@session_app.command("list")
+def session_list(
+    max_count: Optional[int] = typer.Option(
+        None, "-n", "--max-count", min=1,
+        help="Limit to N most recent sessions"
+    ),
+    format: str = typer.Option(
+        "table", "--format",
+        callback=_validate_list_format,
+        help="Output format: table or json"
+    ),
+    project: Optional[str] = typer.Option(
+        None, "-p", "--project",
+        help="Filter by project ID (empty for current project)"
+    ),
+):
+    """
+    List all sessions
+    
+    Shows sessions sorted by last updated time (newest first).
+    Use --format json for machine-readable output.
+    """
+    asyncio.run(_list_sessions(max_count, format, project))
+
+
+async def _list_sessions(
+    max_count: Optional[int],
+    format: str,
+    project_filter: Optional[str]
+):
+    """Internal session list implementation"""
+    await Storage.init()
+
+    all_sessions = await Session.list_all()
+
+    if project_filter == "":
+        resolve_worktree = cache(Project.worktree_for_directory)
+        current_worktree = resolve_worktree(os.getcwd())
+        all_sessions = [
+            session
+            for session in all_sessions
+            if session.directory and resolve_worktree(session.directory) == current_worktree
+        ]
+    elif project_filter:
+        all_sessions = [s for s in all_sessions if s.project_id == project_filter]
+
+    # Only include parent sessions (not child/forked sessions); archived
+    # sessions stay hidden until `aegisops session restore`.
+    all_sessions = [
+        s for s in all_sessions
+        if not s.parent_id and not s.time.archived and s.status != "archived"
+    ]
+    
+    # Sort by updated time (newest first)
+    all_sessions.sort(key=lambda s: s.time.updated, reverse=True)
+    
+    # Apply limit
+    if max_count:
+        all_sessions = all_sessions[:max_count]
+    
+    if not all_sessions:
+        if format == "json":
+            typer.echo("[]")
+        else:
+            console.print("[dim]No sessions found[/dim]")
+        return
+
+    # Output
+    if format == "json":
+        json_data = [
+            {
+                "id": s.id,
+                "title": s.title,
+                "updated": s.time.updated,
+                "created": s.time.created,
+                "projectId": s.project_id,
+                "directory": s.directory,
+            }
+            for s in all_sessions
+        ]
+        # Not console.print: Rich wraps long strings and eats [markup].
+        typer.echo(json.dumps(json_data, indent=2))
+    else:
+        # Table format
+        table = Table(show_header=True, header_style="bold cyan")
+        table.add_column("Session ID", style="dim")
+        table.add_column("Title", style="")
+        table.add_column("Updated", style="green")
+        
+        for session in all_sessions:
+            table.add_row(
+                session.id,
+                _truncate(session.title, 50),
+                _format_time(session.time.updated)
+            )
+        
+        console.print(table)
+        console.print(f"\n[dim]{len(all_sessions)} session(s)[/dim]")
+
+
+async def _resolve_session(session_id: str, project_id: Optional[str]) -> Optional[tuple[str, object]]:
+    """Resolve a session, defaulting to global session lookup."""
+    if project_id:
+        session = await Session.get(project_id, session_id)
+        return (project_id, session) if session else None
+
+    session = await Session.get_by_id(session_id)
+    if not session:
+        return None
+    return session.project_id, session
+
+
+@session_app.command("show")
+def session_show(
+    session_id: str = typer.Argument(..., help="Session ID to show"),
+    project: Optional[str] = typer.Option(
+        None, "-p", "--project",
+        help="Project ID (uses current project if not specified)"
+    ),
+):
+    """
+    Show details of a specific session
+    """
+    asyncio.run(_show_session(session_id, project))
+
+
+async def _show_session(session_id: str, project_id: Optional[str]):
+    """Internal session show implementation"""
+    await Storage.init()
+
+    resolved = await _resolve_session(session_id, project_id)
+    if not resolved:
+        console.print(f"[red]Session not found: {session_id}[/red]")
+        raise typer.Exit(1)
+
+    _, session = resolved
+    
+    # Display session info
+    console.print()
+    console.print(f"[bold cyan]Session: {session.id}[/bold cyan]")
+    console.print(f"  Title:     {session.title}")
+    console.print(f"  Project:   {session.project_id}")
+    console.print(f"  Directory: {session.directory}")
+    console.print(f"  Status:    {session.status}")
+    console.print(f"  Agent:     {session.agent or 'default'}")
+    
+    if session.model:
+        console.print(f"  Model:     {session.provider}/{session.model}")
+    
+    if session.parent_id:
+        console.print(f"  Parent:    {session.parent_id}")
+    
+    console.print()
+    console.print("[dim]Timestamps:[/dim]")
+    console.print(f"  Created:   {_format_time(session.time.created)}")
+    console.print(f"  Updated:   {_format_time(session.time.updated)}")
+    
+    if session.time.archived:
+        console.print(f"  Archived:  {_format_time(session.time.archived)}")
+    
+    if session.summary:
+        console.print()
+        console.print("[dim]Summary:[/dim]")
+        console.print(f"  Files:     {session.summary.files}")
+        console.print(f"  Additions: +{session.summary.additions}")
+        console.print(f"  Deletions: -{session.summary.deletions}")
+    
+    # Get message count
+    message_count = await Session.get_message_count(session_id)
+    console.print()
+    console.print(f"[dim]Messages: {message_count}[/dim]")
+
+
+@session_app.command("delete")
+def session_delete(
+    session_id: str = typer.Argument(..., help="Session ID to permanently delete"),
+    project: Optional[str] = typer.Option(
+        None, "-p", "--project",
+        help="Project ID (uses current project if not specified)"
+    ),
+    force: bool = typer.Option(
+        False, "-f", "--force",
+        help="Skip permanent deletion confirmation"
+    ),
+):
+    """
+    Permanently delete a session and its persisted history.
+
+    This operation cannot be restored.
+    """
+    asyncio.run(_delete_session(session_id, project, force))
+
+
+async def _delete_session(session_id: str, project_id: Optional[str], force: bool):
+    """Internal session delete implementation"""
+    await Storage.init()
+
+    resolved = await _resolve_session(session_id, project_id)
+    if not resolved:
+        console.print(f"[red]Session not found: {session_id}[/red]")
+        raise typer.Exit(1)
+
+    project_id, session = resolved
+    
+    # Confirm deletion
+    if not force:
+        confirm = typer.confirm(
+            f"Permanently delete session '{session.title}' and all of its messages and history?",
+            default=False
+        )
+        if not confirm:
+            console.print("[yellow]Cancelled[/yellow]")
+            return
+    
+    # Delete session
+    success = await Session.delete(project_id, session_id)
+    
+    if success:
+        console.print(f"[green]Permanently deleted session: {session_id}[/green]")
+    else:
+        console.print(f"[red]Failed to delete session: {session_id}[/red]")
+        raise typer.Exit(1)
+
+
+@session_app.command("archive")
+def session_archive(
+    session_id: str = typer.Argument(..., help="Session ID to archive"),
+    project: Optional[str] = typer.Option(
+        None, "-p", "--project",
+        help="Project ID (uses current project if not specified)"
+    ),
+):
+    """
+    Archive a session
+    
+    Archived sessions are hidden from normal listings but can be restored.
+    """
+    asyncio.run(_archive_session(session_id, project))
+
+
+async def _archive_session(session_id: str, project_id: Optional[str]):
+    """Internal session archive implementation"""
+    await Storage.init()
+
+    resolved = await _resolve_session(session_id, project_id)
+    if not resolved:
+        console.print(f"[red]Session not found: {session_id}[/red]")
+        raise typer.Exit(1)
+
+    project_id, _ = resolved
+
+    success = await Session.archive(project_id, session_id)
+    
+    if success:
+        console.print(f"[green]Archived session: {session_id}[/green]")
+    else:
+        console.print(f"[red]Session not found: {session_id}[/red]")
+        raise typer.Exit(1)
+
+
+@session_app.command("restore")
+def session_restore(
+    session_id: str = typer.Argument(..., help="Session ID to restore"),
+    project: Optional[str] = typer.Option(
+        None, "-p", "--project",
+        help="Project ID (uses current project if not specified)"
+    ),
+):
+    """
+    Restore an archived session
+    """
+    asyncio.run(_restore_session(session_id, project))
+
+
+async def _restore_session(session_id: str, project_id: Optional[str]):
+    """Internal session restore implementation"""
+    await Storage.init()
+
+    resolved = await _resolve_session(session_id, project_id)
+    if not resolved:
+        console.print(f"[red]Failed to restore session (not found or not archived): {session_id}[/red]")
+        raise typer.Exit(1)
+
+    project_id, session = resolved
+    if session.parent_id is not None:
+        console.print(f"[red]Restore the root session for this session tree: {session_id}[/red]")
+        raise typer.Exit(1)
+    if not session.time.archived and session.status != "archived":
+        console.print(f"[red]Failed to restore session (not found or not archived): {session_id}[/red]")
+        raise typer.Exit(1)
+
+    success = await Session.restore(
+        project_id,
+        session_id,
+        project_owner_id=session.owner_user_id,
+    )
+    
+    if success:
+        console.print(f"[green]Restored session: {session_id}[/green]")
+    else:
+        console.print(f"[red]Failed to restore session (not found or not archived): {session_id}[/red]")
+        raise typer.Exit(1)
+
+
+@session_app.command("new")
+def session_new(
+    prompt: Optional[str] = typer.Argument(None, help="Optional initial prompt, or - for stdin"),
+    directory: str = typer.Option(".", "-C", "--cd"),
+    model: Optional[str] = typer.Option(None, "-m", "--model"),
+    agent: Optional[str] = typer.Option(None, "--agent"),
+    output_format: str = typer.Option("text", "--output-format"),
+):
+    """Create a session; when a prompt is provided, run its first turn."""
+    _invoke_session(prompt, directory, model, agent, output_format, create_only=prompt is None)
+
+
+@session_app.command("resume")
+def session_resume(
+    session_id: Optional[str] = typer.Argument(None, help="Session ID (or use --last)"),
+    last: bool = typer.Option(False, "--last"),
+    prompt: Optional[str] = typer.Option(None, "-p", "--prompt", help="New prompt, or - for stdin; omitted continues history"),
+    directory: str = typer.Option(".", "-C", "--cd"),
+    model: Optional[str] = typer.Option(None, "-m", "--model"),
+    agent: Optional[str] = typer.Option(None, "--agent"),
+    output_format: str = typer.Option("text", "--output-format"),
+):
+    """Run a turn in an existing session without entering a TUI.
+
+    For full tool, schema, sandbox and budget controls use exec --session/--last.
+    """
+    if bool(session_id) == last:
+        raise typer.BadParameter("Specify a session ID or --last (exactly one)")
+    _invoke_session(prompt, directory, model, agent, output_format, session_id=session_id, last=last)
+
+
+def _invoke_session(prompt, directory, model, agent, output_format, **kwargs):
+    from pathlib import Path
+    import sys
+    from aegisops.cli.managed import refuse_local_runtime_when_managed
+
+    refuse_local_runtime_when_managed("aegisops session new/resume")
+    from aegisops.cli.commands.exec import OutputFormat, invoke_headless
+    from aegisops.cli.headless import ExecOptions
+
+    directory = Path(directory).expanduser().resolve()
+    if not directory.is_dir():
+        raise typer.BadParameter("--cd must be an existing directory")
+    try:
+        format_value = OutputFormat(output_format)
+    except ValueError as exc:
+        raise typer.BadParameter("--output-format must be text, json or stream-json") from exc
+    if prompt == "-":
+        prompt = sys.stdin.read()
+    if prompt is not None and not prompt.strip():
+        raise typer.BadParameter("Prompt must not be empty")
+    invoke_headless(ExecOptions(directory=directory, prompt=prompt, model=model, agent=agent, **kwargs), format_value)

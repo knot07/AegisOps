@@ -1,0 +1,1122 @@
+"""
+Agent management routes
+
+Routes for listing and managing agents.
+
+AegisOps TUI expects Agent format:
+{
+    "name": string,
+    "description"?: string,
+    "descriptionCn"?: string,
+    "mode": "subagent" | "primary" | "all",
+    "native"?: boolean,
+    "hidden"?: boolean,
+    "topP"?: number,
+    "temperature"?: number,
+    "color"?: string,
+    "permission": PermissionRuleset,  // Required
+    "model"?: { modelID, providerID },
+    "prompt"?: string,
+    "options": { [key]: unknown },    // Required
+}
+"""
+
+import asyncio
+from typing import List, Literal, Optional, Dict, Any
+
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field, StrictBool, field_validator
+
+import aegisops.agent.delegatable_settings as delegatable_settings
+from aegisops.agent.registry import Agent
+from aegisops.agent.tool_permissions import (
+    normalize_permission_items,
+    permission_items_to_ruleset,
+    sync_question_permission_with_tools,
+)
+from aegisops.agent.agent import AgentInfo as AgentInfoModel, AgentModel as AgentModelConfig, normalize_agent_group
+from aegisops.agent.agent_factory import (
+    _find_yaml_file,
+    delete_yaml_agent,
+    find_yaml_agent,
+    read_yaml_agent,
+    update_yaml_agent,
+)
+from aegisops.server.config_mutation import serialized_config_mutation
+from aegisops.utils.log import Log
+
+router = APIRouter()
+log = Log.create(service="routes.agent")
+
+# Custom agent names double as storage keys and URL path segments.
+AGENT_NAME_PATTERN = r"^[a-z0-9][a-z0-9_-]*$"
+AGENT_MODE_VALUES = ("primary", "subagent", "all")
+
+
+def _require_admin_for_agent_config(request: Request) -> None:
+    """Agents are global configuration; only admins may change them."""
+    from aegisops.server.auth import require_admin
+
+    require_admin(request)
+
+
+def _require_known_provider(model: Optional["AgentModelInfo"]) -> None:
+    if model is None:
+        return
+    from aegisops.provider.provider import Provider
+
+    Provider._ensure_initialized()
+    if Provider.get(model.providerID) is None:
+        raise HTTPException(status_code=400, detail=f"Provider {model.providerID} not found")
+
+# Lazily-initialised lock to prevent concurrent read-modify-write on model_overrides.
+# Created on first use so it is always bound to the running event loop.
+_model_overrides_lock: Optional[asyncio.Lock] = None
+
+
+def _get_overrides_lock() -> asyncio.Lock:
+    global _model_overrides_lock
+    if _model_overrides_lock is None:
+        _model_overrides_lock = asyncio.Lock()
+    return _model_overrides_lock
+
+
+class AgentModelInfo(BaseModel):
+    """Agent model configuration"""
+    modelID: str
+    providerID: str
+
+
+# Agents whose package seals their prompt: readable by the runtime only.
+PROTECTED_PROMPT_DETAIL = "This agent's prompt is protected and cannot be read or changed"
+
+
+async def _protected_agent(name: str) -> Optional[AgentInfoModel]:
+    """The sealed definition behind *name*, also when ``enabled_agents`` hides it."""
+    from aegisops.agent.managed import managed_agent_ids, managed_agents
+
+    if name in managed_agent_ids():
+        # The deployment manages this name (aegisops.content.managed): sealed
+        # even when hidden or when its definition is unusable, so nothing
+        # local can be created, edited or deleted under it.
+        return managed_agents().get(name) or AgentInfoModel(
+            name=name, native=True, prompt_protected=True,
+        )
+    registered = Agent.registered(name)
+    if registered is not None and registered.prompt_protected:
+        return registered
+    current = await Agent.get(name)
+    if current is not None and current.prompt_protected:
+        return current
+    return None
+
+
+class AgentResponse(BaseModel):
+    """
+    Agent response - AegisOps TUI compatible format.
+
+    Includes required 'permission' and 'options' fields.
+    """
+    name: str
+    nameCn: Optional[str] = None
+    group: Optional[str] = None
+    group_readonly: bool = False
+    description: Optional[str] = None
+    descriptionCn: Optional[str] = None
+    mode: str = "primary"
+    native: Optional[bool] = True
+    hidden: Optional[bool] = False
+    topP: Optional[float] = None
+    temperature: Optional[float] = None
+    color: Optional[str] = None
+    permission: List[Dict[str, Any]] = Field(default_factory=list)
+    model: Optional[AgentModelInfo] = None
+    prompt: Optional[str] = None
+    # The prompt is sealed by the package that registered the agent; ``prompt`` is omitted.
+    promptProtected: bool = False
+    options: Dict[str, Any] = Field(default_factory=dict)
+    delegatable: bool = True
+    steps: Optional[int] = None
+    skills: List[str] = Field(default_factory=list)
+    tools: List[str] = Field(default_factory=list)
+    tags: List[str] = Field(default_factory=list)
+
+
+# =============================================================================
+# Internal helpers
+# =============================================================================
+
+def agent_to_response(
+    agent: AgentInfoModel,
+    model_override: Optional[Dict[str, str]] = None,
+    temperature_override: Optional[float] = None,
+    delegatable_override: Optional[bool] = None,
+    skills: Optional[List[str]] = None,
+    tools: Optional[List[str]] = None,
+    permission: Optional[List[Dict[str, Any]]] = None,
+) -> AgentResponse:
+    """Convert internal AgentInfo to API response format."""
+    delegatable = (
+        delegatable_override
+        if delegatable_override is not None
+        else agent.delegatable if agent.delegatable is not None else agent.mode != "primary"
+    )
+
+    if model_override:
+        model_info = AgentModelInfo(
+            modelID=model_override["modelID"],
+            providerID=model_override["providerID"],
+        )
+    elif agent.model:
+        model_info = AgentModelInfo(
+            modelID=agent.model.model_id,
+            providerID=agent.model.provider_id,
+        )
+    else:
+        model_info = None
+
+    return AgentResponse(
+        name=agent.name,
+        group=agent.group,
+        group_readonly=agent.group_readonly,
+        nameCn=agent.name_cn,
+        description=agent.description,
+        descriptionCn=agent.description_cn,
+        mode=agent.mode,
+        native=agent.native,
+        hidden=agent.hidden,
+        topP=agent.top_p,
+        temperature=temperature_override if temperature_override is not None else agent.temperature,
+        color=agent.color,
+        permission=permission or [],
+        model=model_info,
+        prompt=None if agent.prompt_protected else agent.prompt,
+        promptProtected=agent.prompt_protected,
+        options=agent.options,
+        delegatable=delegatable,
+        steps=agent.steps,
+        skills=list(agent.skills if skills is None else skills),
+        tools=tools or [],
+        tags=agent.tags,
+    )
+
+
+def _agent_data_to_info(agent_data: Dict[str, Any]) -> AgentInfoModel:
+    """Build an in-memory AgentInfo from a custom agent's stored data dict.
+
+    Used after create/update to keep ``_custom_agents`` in sync with Storage.
+    """
+    model_data = agent_data.get("model")
+    mode = agent_data.get("mode", "primary")
+    delegatable = agent_data.get("delegatable")
+    if delegatable is None:
+        delegatable = mode != "primary"
+    return AgentInfoModel(
+        name=agent_data["name"],
+        group=agent_data.get("group"),
+        name_cn=agent_data.get("name_cn") or agent_data.get("nameCn"),
+        description=agent_data.get("description") or "",
+        description_cn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
+        prompt=agent_data.get("prompt") or "",
+        temperature=agent_data.get("temperature"),
+        color=agent_data.get("color"),
+        mode=mode,
+        permission=permission_items_to_ruleset(agent_data.get("permission")),
+        tools=agent_data.get("tools", []),
+        model=AgentModelConfig(
+            model_id=model_data["modelID"],
+            provider_id=model_data["providerID"],
+        ) if model_data else None,
+        native=False,
+        hidden=False,
+        delegatable=delegatable,
+        skills=agent_data.get("skills", []),
+    )
+
+
+def _custom_agent_data_to_response(agent_data: Dict[str, Any]) -> AgentResponse:
+    """Build an AgentResponse from a custom agent's stored data dict."""
+    model_data = agent_data.get("model")
+    model_info = AgentModelInfo(**model_data) if model_data else None
+    mode = agent_data.get("mode", "primary")
+    delegatable = agent_data.get("delegatable")
+    if delegatable is None:
+        delegatable = mode != "primary"
+    return AgentResponse(
+        name=agent_data["name"],
+        group=agent_data.get("group"),
+        nameCn=agent_data.get("name_cn") or agent_data.get("nameCn"),
+        description=agent_data.get("description"),
+        descriptionCn=agent_data.get("description_cn") or agent_data.get("descriptionCn"),
+        prompt=agent_data.get("prompt"),
+        temperature=agent_data.get("temperature"),
+        color=agent_data.get("color"),
+        mode=mode,
+        model=model_info,
+        native=agent_data.get("native", False),
+        hidden=agent_data.get("hidden", False),
+        permission=normalize_permission_items(agent_data.get("permission")),
+        options={},
+        delegatable=delegatable,
+        skills=agent_data.get("skills", []),
+        tools=agent_data.get("tools", []),
+        tags=agent_data.get("tags", []),
+    )
+
+
+async def _load_model_overrides() -> Dict[str, Dict[str, Any]]:
+    """Load all agent overrides from storage. Returns {agent_name: {modelID?, providerID?, temperature?}}"""
+    from aegisops.storage.storage import Storage
+    try:
+        data = await Storage.read("agent/model_overrides")
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _load_delegatable_overrides() -> Dict[str, bool]:
+    return delegatable_settings.load_overrides()
+
+
+async def _load_custom_agent_extras(name: str) -> tuple[List[str], List[str], List[Dict[str, Any]]]:
+    """Load skills/tools/permission overlay for an agent from storage.
+
+    Works for both full Storage-based custom agents and YAML agents with
+    a skills/tools overlay (written by the YAML update path).
+    """
+    from aegisops.storage.storage import Storage
+    try:
+        data = await Storage.read(f"agent/custom/{name}")
+        if not isinstance(data, dict):
+            return [], [], []
+        return (
+            data.get("skills", []),
+            data.get("tools", []),
+            normalize_permission_items(data.get("permission")),
+        )
+    except Exception:
+        return [], [], []
+
+
+async def _load_custom_agent_overlay(name: str) -> Optional[Dict[str, Any]]:
+    """The stored overlay of *name*, or None when nothing was stored."""
+    from aegisops.storage.storage import Storage
+    try:
+        data = await Storage.read(f"agent/custom/{name}")
+    except Exception:
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _get_all_tool_names() -> List[str]:
+    """Return all registered tool names, initialising ToolRegistry if needed."""
+    from aegisops.tool.registry import ToolRegistry
+    ToolRegistry.init()
+    return [t.name for t in ToolRegistry.list_tools()]
+
+
+async def _get_all_tool_names_async() -> List[str]:
+    """Return all registered tool names without blocking the event loop."""
+    from aegisops.tool.registry import ToolRegistry
+
+    await ToolRegistry.init_async()
+    return [t.name for t in ToolRegistry.list_tools()]
+
+
+def _compute_native_agent_tools(agent: AgentInfoModel, all_tool_names: List[str]) -> List[str]:
+    """Return the concrete tools explicitly declared for the agent."""
+    tools = list(agent.tools or [])
+    if tools:
+        return [name for name in tools if name in all_tool_names]
+    return []
+
+
+async def _build_single_agent_response(
+    agent: AgentInfoModel,
+    overrides: Dict[str, Dict[str, Any]],
+    delegatable_overrides: Dict[str, bool],
+    all_tool_names: List[str],
+) -> AgentResponse:
+    """Build AgentResponse for one agent, resolving model overrides and tools/skills."""
+    skills = list(agent.skills)
+    if agent.native:
+        tools = _compute_native_agent_tools(agent, all_tool_names)
+        permission: List[Dict[str, Any]] = []
+    else:
+        # A stored overlay (YAML agents edited in the UI, storage-backed agents)
+        # is what the user saved; agents registered at runtime have none and
+        # report their own definition.
+        overlay = await _load_custom_agent_overlay(agent.name) or {}
+        permission = normalize_permission_items(overlay.get("permission"))
+        tools = list(agent.tools or [])
+        if isinstance(overlay.get("skills"), list):
+            skills = list(overlay["skills"])
+        if isinstance(overlay.get("tools"), list):
+            tools = list(overlay["tools"])
+    override = overrides.get(agent.name, {})
+    model_override = {k: override[k] for k in ("modelID", "providerID") if k in override} or None
+    temperature_override = override.get("temperature")
+    return agent_to_response(
+        agent,
+        model_override=model_override,
+        temperature_override=temperature_override,
+        delegatable_override=delegatable_overrides.get(agent.name),
+        skills=skills,
+        tools=tools,
+        permission=permission,
+    )
+
+
+# =============================================================================
+# Refresh
+# =============================================================================
+
+@router.post("/refresh", summary="Reload agents from all sources")
+async def refresh_agents():
+    """Invalidate agent cache and reload from disk (plugins, YAML, etc.)."""
+    try:
+        agents = await Agent.refresh()
+        return {"count": len(agents)}
+    except Exception as e:
+        log.error("agent.refresh.error", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Read routes
+# =============================================================================
+
+@router.get("", response_model=List[AgentResponse], summary="List agents")
+async def list_agents():
+    """List all available agents with model overrides applied."""
+    try:
+        agents = await Agent.list()
+        overrides = await _load_model_overrides()
+        delegatable_overrides = _load_delegatable_overrides()
+        all_tool_names = await _get_all_tool_names_async()
+        result = []
+        for agent in agents:
+            if agent.hidden:
+                continue
+            result.append(await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names))
+        return result
+    except Exception as e:
+        log.error("agent.list.error", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{name}", response_model=AgentResponse, summary="Get agent")
+async def get_agent(name: str):
+    """Get a specific agent by name with model override applied."""
+    try:
+        agent = await Agent.get(name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+        overrides = await _load_model_overrides()
+        delegatable_overrides = _load_delegatable_overrides()
+        all_tool_names = await _get_all_tool_names_async()
+        return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.get.error", {"error": str(e), "name": name})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{name}/prompt", response_model=Dict[str, str], summary="Get agent prompt")
+async def get_agent_prompt(name: str):
+    """Get the system prompt for an agent."""
+    try:
+        agent = await Agent.get(name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+        if agent.prompt_protected:
+            raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
+        return {"prompt": agent.prompt or ""}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.prompt.error", {"error": str(e), "name": name})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Custom Agent CRUD
+# =============================================================================
+
+class AgentCreateRequest(BaseModel):
+    """Request to create a custom agent"""
+    name: str = Field(..., min_length=1, max_length=64, pattern=AGENT_NAME_PATTERN, description="Agent name")
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_agent_group)
+
+    nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
+    description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
+    descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
+    prompt: str = Field(..., description="System prompt")
+    temperature: Optional[float] = Field(None, ge=0, le=2, description="Temperature")
+    color: Optional[str] = Field(None, description="Color")
+    mode: Literal["primary", "subagent", "all"] = Field("primary", description="Agent mode")
+    model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
+    delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
+    permission: List[Dict[str, Any]] = Field(default_factory=list, description="Permission rules")
+    skills: List[str] = Field(default_factory=list, description="Enabled skill names")
+    tools: List[str] = Field(default_factory=list, description="Enabled tool names")
+
+
+class AgentUpdateRequest(BaseModel):
+    """Request to update a custom agent"""
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_agent_group)
+
+    nameCn: Optional[str] = Field(None, description="Chinese UI agent name")
+    description: Optional[str] = Field(None, description="Agent description (English; used for delegation)")
+    descriptionCn: Optional[str] = Field(None, description="Chinese UI description")
+    prompt: Optional[str] = Field(None, description="System prompt")
+    temperature: Optional[float] = Field(None, ge=0, le=2, description="Temperature")
+    color: Optional[str] = Field(None, description="Color")
+    model: Optional[AgentModelInfo] = Field(None, description="Preferred model")
+    delegatable: Optional[bool] = Field(None, description="Whether this agent can be delegated to")
+    permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
+    skills: Optional[List[str]] = Field(None, description="Enabled skill names")
+    tools: Optional[List[str]] = Field(None, description="Enabled tool names")
+
+
+class AgentModelUpdateRequest(BaseModel):
+    """Request to update the model (and optionally temperature) for any agent (native or custom)"""
+    model: Optional[AgentModelInfo] = Field(None, description="New model, or null to reset to default")
+    temperature: Optional[float] = Field(None, ge=0, le=2, description="Temperature override for native agents")
+
+    @property
+    def model_given(self) -> bool:
+        """Whether ``model`` was sent at all (``null`` resets, absent keeps)."""
+        return "model" in self.model_fields_set
+
+
+class AgentDelegatableUpdateRequest(BaseModel):
+    """Request to update the delegatable toggle without rewriting YAML."""
+    delegatable: StrictBool = Field(..., description="Whether this agent can be delegated to")
+
+
+@router.post("", response_model=AgentResponse, summary="Create custom agent")
+async def create_agent(req: AgentCreateRequest, request: Request):
+    """
+    Create a custom agent
+
+    Saves custom agent configuration to storage.
+    """
+    from aegisops.storage.storage import Storage
+
+    _require_admin_for_agent_config(request)
+    _require_known_provider(req.model)
+    try:
+        if await _protected_agent(req.name) is not None:
+            raise HTTPException(status_code=409, detail=f"Agent {req.name} already exists")
+        existing = await Agent.get(req.name)
+        if existing is None:
+            selected = await Agent.get_group_definition(req.name)
+            if selected is not None and selected.group_readonly:
+                existing = selected
+        if existing:
+            raise HTTPException(status_code=409, detail=f"Agent {req.name} already exists")
+
+        permission = (
+            sync_question_permission_with_tools(req.permission, req.tools)
+            if "tools" in req.model_fields_set
+            else normalize_permission_items(req.permission)
+        )
+        agent_data: Dict[str, Any] = {
+            "name": req.name,
+            "group": req.group,
+            "name_cn": req.nameCn,
+            "description": req.description,
+            "description_cn": req.descriptionCn,
+            "prompt": req.prompt,
+            "temperature": req.temperature,
+            "color": req.color,
+            "mode": req.mode,
+            "model": req.model.model_dump() if req.model else None,
+            "delegatable": req.delegatable if req.delegatable is not None else req.mode != "primary",
+            "native": False,
+            "hidden": False,
+            "permission": permission,
+            "skills": req.skills,
+            "tools": req.tools,
+        }
+        await Storage.write(f"agent/custom/{req.name}", agent_data)
+        from aegisops.agent.registry import Agent as AgentRegistry
+        AgentRegistry.register(req.name, _agent_data_to_info(agent_data))
+        AgentRegistry.invalidate_cache()
+        log.info("agent.created", {"name": req.name})
+        return _custom_agent_data_to_response(agent_data)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.create.error", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@serialized_config_mutation
+async def _save_agent_group_override(agent: AgentInfoModel, group: Optional[str]) -> None:
+    """Patch only the raw group field, preserving references and unknown config."""
+    from aegisops.config.config_writer import ConfigWriter
+    from aegisops.config.references import contains_reference
+
+    value = normalize_agent_group(group)
+    if contains_reference(value):
+        # aegisops.json is reference-expanded on load, so this would show a secret as the group name.
+        raise HTTPException(status_code=400, detail="Agent 分组不能包含 {env:…}、{secret:…}、{file:…} 这类引用")
+    if agent.group_readonly:
+        if value != normalize_agent_group(agent.group):
+            raise HTTPException(status_code=403, detail="System agent group is read-only")
+        return
+    ConfigWriter.set_agent_group(agent.name, value)
+    # Shared definitions/overrides affect every pre-warmed project context.
+    Agent.invalidate_cache()
+
+
+@router.put("/{name}", response_model=AgentResponse, summary="Update custom agent")
+@serialized_config_mutation
+async def update_agent(name: str, req: AgentUpdateRequest, request: Request):
+    """
+    Update a custom agent (Storage-based or YAML plugin).
+    """
+    from aegisops.storage.storage import Storage
+
+    _require_admin_for_agent_config(request)
+    _require_known_provider(req.model)
+    try:
+        protected = await _protected_agent(name)
+        if protected is not None:
+            # Only the group can change, as a config overlay: the Storage and YAML
+            # branches below would re-register an unsealed definition.
+            if req.model_fields_set - {"group"}:
+                raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
+            if await Agent.get(name) is None:
+                # Hidden by enabled_agents: like every other read, it is not there.
+                raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+            if "group" in req.model_fields_set:
+                if protected.group_readonly and req.group != normalize_agent_group(protected.group):
+                    raise HTTPException(status_code=403, detail="System agent group is read-only")
+                if not protected.group_readonly:
+                    await _save_agent_group_override(protected, req.group)
+            return await get_agent(name)
+        group_agent = None
+        use_group_override = False
+        if "group" in req.model_fields_set:
+            from aegisops.config.config import Config
+
+            group_agent = await Agent.get(name)
+            if group_agent is None:
+                raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+            if group_agent.group_readonly:
+                if req.group != normalize_agent_group(group_agent.group):
+                    raise HTTPException(status_code=403, detail="System agent group is read-only")
+                if req.model_fields_set == {"group"}:
+                    return await get_agent(name)
+                # Full edit forms may echo the unchanged system group. Treat it
+                # as omitted while keeping all pre-existing non-group controls.
+                req = AgentUpdateRequest.model_validate(req.model_dump(exclude_unset=True, exclude={"group"}))
+            else:
+                configured = (await Config.get()).agent.get(group_agent.name)
+                use_group_override = group_agent.native or (
+                    configured is not None and configured.group is not None
+                )
+                if use_group_override and req.model_fields_set == {"group"}:
+                    await _save_agent_group_override(group_agent, req.group)
+                    return await get_agent(name)
+
+        # --- Try Storage-based custom agent first ---
+        agent_key = f"agent/custom/{name}"
+        agent_data: Optional[Dict[str, Any]] = None
+        try:
+            agent_data = await Storage.read(agent_key)
+        except Storage.NotFoundError:
+            pass
+
+        # Storage-based custom agents always have a "name" key.
+        # YAML agents may also have an overlay entry (skills/tools only) which
+        # lacks the "name" key; those should fall through to the YAML path.
+        if agent_data is not None and agent_data.get("name"):
+            if use_group_override:
+                await _save_agent_group_override(group_agent, req.group)
+            if "group" in req.model_fields_set and not use_group_override:
+                agent_data["group"] = req.group
+            if req.nameCn is not None:
+                agent_data["name_cn"] = req.nameCn
+            if req.description is not None:
+                agent_data["description"] = req.description
+            if req.descriptionCn is not None:
+                agent_data["description_cn"] = req.descriptionCn
+            if req.prompt is not None:
+                agent_data["prompt"] = req.prompt
+            if req.temperature is not None:
+                agent_data["temperature"] = req.temperature
+            if req.color is not None:
+                agent_data["color"] = req.color
+            if req.model is not None:
+                agent_data["model"] = req.model.model_dump()
+            if req.delegatable is not None:
+                agent_data["delegatable"] = req.delegatable
+                delegatable_settings.forget_override(name)
+            if req.permission is not None:
+                agent_data["permission"] = normalize_permission_items(req.permission)
+            if req.skills is not None:
+                agent_data["skills"] = req.skills
+            if req.tools is not None:
+                agent_data["tools"] = req.tools
+                agent_data["permission"] = sync_question_permission_with_tools(
+                    agent_data.get("permission"),
+                    req.tools,
+                )
+
+            await Storage.write(agent_key, agent_data)
+
+            from aegisops.agent.registry import Agent as AgentRegistry
+            AgentRegistry.register(name, _agent_data_to_info(agent_data))
+            AgentRegistry.invalidate_cache()
+
+            log.info("agent.updated", {"name": name, "source": "storage"})
+            return await get_agent(name)
+
+        # --- Fall back to YAML plugin agent ---
+        if find_yaml_agent(name) is not None:
+            updates: Dict[str, Any] = {}
+            if "group" in req.model_fields_set and not use_group_override:
+                updates["group"] = req.group
+            if req.nameCn is not None:
+                updates["name_cn"] = req.nameCn
+            if req.description is not None:
+                updates["description"] = req.description
+            if req.descriptionCn is not None:
+                updates["description_cn"] = req.descriptionCn
+            if req.prompt is not None:
+                updates["prompt"] = req.prompt
+            if req.temperature is not None:
+                updates["temperature"] = req.temperature
+            if req.color is not None:
+                updates["color"] = req.color
+            if req.model is not None:
+                updates["model"] = req.model.model_dump()
+            if req.delegatable is not None:
+                updates["delegatable"] = req.delegatable
+            if req.skills is not None:
+                updates["skills"] = req.skills
+            if req.tools is not None:
+                updates["tools"] = req.tools
+
+            if use_group_override:
+                await _save_agent_group_override(group_agent, req.group)
+            if not update_yaml_agent(name, updates):
+                raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
+
+            # Persist skills/tools overlay for YAML agents in Storage.
+            # The entry intentionally omits "name" so it is not mistaken
+            # for a full Storage-based custom agent on subsequent updates.
+            if req.skills is not None or req.tools is not None or req.permission is not None:
+                extras: Dict[str, Any] = agent_data if isinstance(agent_data, dict) else {}
+                if req.permission is not None:
+                    extras["permission"] = normalize_permission_items(req.permission)
+                if req.skills is not None:
+                    extras["skills"] = req.skills
+                if req.tools is not None:
+                    extras["tools"] = req.tools
+                    extras["permission"] = sync_question_permission_with_tools(
+                        extras.get("permission"),
+                        req.tools,
+                    )
+                await Storage.write(agent_key, extras)
+
+            # Sync: apply updates to the in-memory AgentInfo cache
+            agent = await Agent.get(name)
+            if agent:
+                if "group" in req.model_fields_set:
+                    agent.group = req.group
+                if req.nameCn is not None:
+                    agent.name_cn = req.nameCn
+                if req.description is not None:
+                    agent.description = req.description
+                if req.descriptionCn is not None:
+                    agent.description_cn = req.descriptionCn
+                if req.prompt is not None:
+                    agent.prompt = req.prompt
+                if req.temperature is not None:
+                    agent.temperature = req.temperature
+                if req.color is not None:
+                    agent.color = req.color
+                if req.model is not None:
+                    agent.model = AgentModelConfig(
+                        model_id=req.model.modelID,
+                        provider_id=req.model.providerID,
+                    )
+                if req.delegatable is not None:
+                    agent.delegatable = req.delegatable
+                if req.skills is not None:
+                    agent.skills = list(req.skills)
+                if req.tools is not None:
+                    agent.tools = req.tools
+                    agent.permission = permission_items_to_ruleset(extras.get("permission"))
+                elif req.permission is not None:
+                    agent.permission = permission_items_to_ruleset(extras.get("permission"))
+                Agent.invalidate_cache()
+                overrides = await _load_model_overrides()
+                delegatable_overrides = _load_delegatable_overrides()
+                all_tool_names = await _get_all_tool_names_async()
+                return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
+            Agent.invalidate_cache()
+            yaml_data = read_yaml_agent(name) or {}
+            return _custom_agent_data_to_response(yaml_data)
+
+        if group_agent is not None and req.model_fields_set == {"group"}:
+            await _save_agent_group_override(group_agent, req.group)
+            return await get_agent(name)
+
+        raise HTTPException(status_code=404, detail=f"Custom agent {name} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.update.error", {"error": str(e), "name": name})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch("/{name}/delegatable", response_model=AgentResponse, summary="Update agent delegatable toggle")
+async def update_agent_delegatable(name: str, req: AgentDelegatableUpdateRequest, request: Request):
+    """Update footer-toggle delegatable state without rewriting YAML sources."""
+    from aegisops.storage.storage import Storage
+
+    _require_admin_for_agent_config(request)
+    try:
+        if await _protected_agent(name) is not None:
+            raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
+        agent = await Agent.get(name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+
+        agent_key = f"agent/custom/{name}"
+        agent_data: Optional[Dict[str, Any]] = None
+        try:
+            agent_data = await Storage.read(agent_key)
+        except Storage.NotFoundError:
+            pass
+
+        if agent_data is not None and agent_data.get("name"):
+            agent_data["delegatable"] = req.delegatable
+            await Storage.write(agent_key, agent_data)
+            delegatable_settings.forget_override(name)
+
+            from aegisops.agent.registry import Agent as AgentRegistry
+
+            AgentRegistry.register(name, _agent_data_to_info(agent_data))
+            await AgentRegistry.refresh()
+
+            log.info("agent.delegatable.updated", {"name": name, "source": "storage", "delegatable": req.delegatable})
+            return await get_agent(name)
+
+        delegatable_settings.set_override(name, req.delegatable)
+        await Agent.refresh()
+        agent = await Agent.get(name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+
+        overrides = await _load_model_overrides()
+        delegatable_overrides = _load_delegatable_overrides()
+        all_tool_names = await _get_all_tool_names_async()
+
+        log.info("agent.delegatable.updated", {"name": name, "source": "override", "delegatable": req.delegatable})
+        return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.delegatable.update.error", {"error": str(e), "name": name})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.delete("/{name}", summary="Delete custom agent")
+async def delete_agent(name: str, request: Request):
+    """
+    Delete a custom agent (Storage-based and/or YAML plugin).
+
+    Cleans up both Storage and YAML sources if they exist.
+    Built-in (native) agents cannot be deleted.
+    """
+    from aegisops.storage.storage import Storage
+
+    _require_admin_for_agent_config(request)
+    try:
+        if await _protected_agent(name) is not None:
+            raise HTTPException(status_code=403, detail=PROTECTED_PROMPT_DETAIL)
+        deleted_storage = False
+        deleted_yaml = False
+
+        # Built-in and project-bundled agents are not deletable through the
+        # API (only user-level plugin YAML is); a stale ``agent/custom/<name>``
+        # overlay record must not turn into a "deleted" answer for them.
+        existing = await Agent.get(name)
+        if (
+            existing is not None
+            and getattr(existing, "native", False)
+            and _find_yaml_file(name, include_project=False, include_user=True) is None
+        ):
+            raise HTTPException(
+                status_code=404,
+                detail=f"Custom agent {name} not found or is a built-in agent",
+            )
+
+        # Always try both sources — an agent can have a Storage entry
+        # AND a YAML file (e.g. YAML base + Storage overlay from edits).
+
+        agent_key = f"agent/custom/{name}"
+        # Storage.read returns None for a missing key instead of raising, so
+        # only the removal result tells whether a Storage entry existed.
+        if await Storage.remove(agent_key):
+            deleted_storage = True
+            log.info("agent.deleted", {"name": name, "source": "storage"})
+
+        if delete_yaml_agent(name):
+            deleted_yaml = True
+            log.info("agent.deleted", {"name": name, "source": "yaml"})
+
+        if not deleted_storage and not deleted_yaml:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Custom agent {name} not found or is a built-in agent",
+            )
+
+        from aegisops.hub import local as hub_local
+
+        hub_local.remove_installed_record("agent", name)
+        delegatable_settings.forget_override(name)
+
+        # Sync: remove from in-memory agent cache
+        from aegisops.agent.registry import Agent as AgentRegistry
+        AgentRegistry.unregister(name)
+        AgentRegistry.invalidate_cache()
+
+        return {"status": "success", "message": f"Agent {name} deleted"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.delete.error", {"error": str(e), "name": name})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.put("/{name}/model", response_model=AgentResponse, summary="Update agent model")
+async def update_agent_model(name: str, req: AgentModelUpdateRequest, request: Request):
+    """
+    Update the model for any agent (native, Storage-based custom, or YAML plugin).
+
+    For native agents: saves a model override to storage (applied at query time).
+    For custom/YAML agents: updates the model in the agent config.
+    Pass null model to reset to system default; omit it to keep the current one.
+    """
+    from aegisops.storage.storage import Storage
+
+    _require_admin_for_agent_config(request)
+    _require_known_provider(req.model)
+    try:
+        agent = await Agent.get(name)
+        if not agent:
+            raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+
+        # Sealed definitions take a model override too: rewriting them from a
+        # Storage or YAML record would re-register an unsealed copy.
+        if agent.native or agent.prompt_protected:
+            async with _get_overrides_lock():
+                overrides = await _load_model_overrides()
+                entry = overrides.get(name, {})
+                if req.model:
+                    entry["modelID"] = req.model.modelID
+                    entry["providerID"] = req.model.providerID
+                elif req.model_given:
+                    entry.pop("modelID", None)
+                    entry.pop("providerID", None)
+                if req.temperature is not None:
+                    entry["temperature"] = req.temperature
+                if entry:
+                    overrides[name] = entry
+                else:
+                    overrides.pop(name, None)
+                await Storage.write("agent/model_overrides", overrides)
+            log.info("agent.model_override.saved", {"name": name, "model": req.model, "temperature": req.temperature})
+            override = overrides.get(name, {})
+            model_override = {k: override[k] for k in ("modelID", "providerID") if k in override} or None
+            return agent_to_response(
+                agent,
+                model_override=model_override,
+                temperature_override=override.get("temperature"),
+                delegatable_override=_load_delegatable_overrides().get(name),
+            )
+        else:
+            # --- Try Storage-based custom agent ---
+            agent_key = f"agent/custom/{name}"
+            agent_data: Optional[Dict[str, Any]] = None
+            try:
+                agent_data = await Storage.read(agent_key)
+            except Storage.NotFoundError:
+                pass
+
+            if agent_data is not None and agent_data.get("name"):
+                if req.model:
+                    agent_data["model"] = req.model.model_dump()
+                elif req.model_given:
+                    agent_data["model"] = None
+                await Storage.write(agent_key, agent_data)
+
+                from aegisops.agent.registry import Agent as AgentRegistry
+                AgentRegistry.register(name, _agent_data_to_info(agent_data))
+                AgentRegistry.invalidate_cache()
+
+                log.info("agent.model.updated", {"name": name, "source": "storage"})
+                return await get_agent(name)
+
+            # --- Fall back to YAML plugin agent ---
+            if find_yaml_agent(name) is not None:
+                if req.model_given:
+                    model_update = req.model.model_dump() if req.model else None
+                    if not update_yaml_agent(name, {"model": model_update}):
+                        raise HTTPException(status_code=500, detail=f"Failed to write YAML for agent {name}")
+
+                    # Sync in-memory cache
+                    if req.model:
+                        agent.model = AgentModelConfig(
+                            model_id=req.model.modelID,
+                            provider_id=req.model.providerID,
+                        )
+                    else:
+                        agent.model = None
+
+                log.info("agent.model.updated", {"name": name, "source": "yaml"})
+                overrides = await _load_model_overrides()
+                delegatable_overrides = _load_delegatable_overrides()
+                all_tool_names = await _get_all_tool_names_async()
+                return await _build_single_agent_response(agent, overrides, delegatable_overrides, all_tool_names)
+
+            raise HTTPException(status_code=404, detail=f"Custom agent {name} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.model.update.error", {"error": str(e), "name": name})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# =============================================================================
+# Test route
+# =============================================================================
+
+class AgentTestRequest(BaseModel):
+    """Request body for testing an agent"""
+    test_prompt: str = Field(
+        default="Hello, this is a test message.",
+        description="Test prompt to send to the agent",
+    )
+
+
+@router.post("/{name}/test", summary="Test agent")
+async def test_agent(name: str, req: AgentTestRequest = AgentTestRequest()):
+    """
+    Test an agent.
+
+    Creates a test session (category="test", hidden from session list), sends
+    the prompt, and runs the agent loop asynchronously in the background.
+
+    Returns immediately with the new sessionId so the caller can subscribe to
+    the global SSE /api/event stream for live updates (same as normal sessions).
+
+    Response:
+      {"sessionId": "...", "status": "started"}
+    """
+    import os
+    import asyncio
+    import time as _time
+
+    try:
+        agent_info = await Agent.get(name)
+        if not agent_info:
+            raise HTTPException(status_code=404, detail=f"Agent {name} not found")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+    try:
+        import os
+        from aegisops.project.instance import Instance
+        from aegisops.session.session import Session
+        from aegisops.session.message import Message, MessageRole
+        from aegisops.utils.id import Identifier
+        from aegisops.provider.provider import Provider
+        from aegisops.tool.registry import ToolRegistry
+
+        # --- 1. resolve directory / project ---
+        try:
+            directory = Instance.directory
+            project_id = Instance.project.id if hasattr(Instance, "project") else "default"
+        except Exception:
+            directory = os.getcwd()
+            project_id = "default"
+
+        # --- 2. create test session ---
+        session = await Session.create(
+            project_id=project_id,
+            directory=directory,
+            title=f"[Test] {name}",
+            agent=name,
+            category="test",
+        )
+        session_id = session.id
+
+        # --- 3. create user message ---
+        now_ms = int(_time.time() * 1000)
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content=req.test_prompt,
+            id=Identifier.create("message"),
+            time={"created": now_ms},
+            agent=name,
+        )
+
+        # --- 4. init provider / tools ---
+        Provider._ensure_initialized()
+        await ToolRegistry.init_async()
+
+        # --- 5. run agent loop in background (publishes to global SSE bus) ---
+        from aegisops.session.session_loop import SessionLoop, LoopCallbacks
+        from aegisops.server.routes.event import publish_event
+
+        async def _on_error(error: str) -> None:
+            await publish_event("session.error", {
+                "sessionID": session_id,
+                "error": {"name": "TestError", "message": error, "data": {"message": error}},
+            })
+
+        loop_cbs = LoopCallbacks(
+            on_error=_on_error,
+            event_publish_callback=publish_event,
+        )
+
+        async def _run_loop() -> None:
+            try:
+                await SessionLoop.run(
+                    session_id=session_id,
+                    agent_name=name,
+                    callbacks=loop_cbs,
+                )
+            except Exception as exc:
+                log.error("agent.test.loop.error", {"name": name, "error": str(exc)})
+                error_msg = str(exc)
+                await publish_event("session.error", {
+                    "sessionID": session_id,
+                    "error": {"name": "LoopError", "message": error_msg, "data": {"message": error_msg}},
+                })
+
+        asyncio.create_task(_run_loop())
+        log.info("agent.tested", {"name": name, "session_id": session_id})
+
+        return {"sessionId": session_id, "status": "started"}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("agent.test.error", {"error": str(e), "name": name})
+        raise HTTPException(status_code=500, detail=str(e))

@@ -1,0 +1,584 @@
+"""
+Tests for configuration module
+"""
+
+import pytest
+import json
+from pathlib import Path
+from unittest.mock import patch
+
+from aegisops.config.config import Config, GlobalConfig, ConfigInfo, PermissionAction, PermissionConfig
+from aegisops.permission.helpers import from_config
+
+
+@pytest.fixture(autouse=True)
+def isolated_user_config(tmp_path, monkeypatch):
+    """Isolate config state under a temporary ~/.aegisops/config directory."""
+    home_dir = tmp_path / "home"
+    home_dir.mkdir()
+    monkeypatch.setenv("HOME", str(home_dir))
+    monkeypatch.delenv("AEGISOPS_ROOT", raising=False)
+    monkeypatch.delenv("AEGISOPS_CONFIG_DIR", raising=False)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    Config._global_config = None
+    Config._cached_config = None
+    yield home_dir / ".aegisops" / "config"
+    Config._global_config = None
+    Config._cached_config = None
+
+
+def test_global_config():
+    """Test global configuration"""
+    config = Config.get_global()
+    
+    assert isinstance(config, GlobalConfig)
+    assert config.config_dir.exists()
+    assert config.server_port == 8000
+
+
+def test_delegate_categories_are_not_part_of_config_schema():
+    assert "categories" not in ConfigInfo.model_fields
+
+
+def test_removed_delegate_categories_are_not_silently_preserved():
+    with patch("aegisops.utils.log.Log.create") as create_log:
+        config = ConfigInfo.model_validate(
+            {
+                "categories": {
+                    "quick": {
+                        "model": "anthropic/claude-haiku-4-5",
+                    }
+                }
+            }
+        )
+
+    assert "categories" not in config.model_dump(exclude_none=True)
+    create_log.return_value.warn.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_config_loading():
+    """Test configuration loading"""
+    # Get merged config (global + project + env)
+    config = await Config.get()
+    
+    assert isinstance(config, ConfigInfo)
+    # Should have defaults
+    assert config.agent is not None
+    assert config.plugin is not None
+    assert config.keybinds is not None
+
+
+@pytest.mark.asyncio
+async def test_fallback_providers_use_effective_high_priority_config(
+    isolated_user_config,
+    monkeypatch,
+):
+    isolated_user_config.mkdir(parents=True, exist_ok=True)
+    (isolated_user_config / "aegisops.json").write_text(
+        json.dumps({
+            "fallback_providers": [
+                {"provider_id": "global", "model_id": "global-model"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "AEGISOPS_CONFIG_CONTENT",
+        json.dumps({
+            "fallback_providers": [
+                {"provider_id": "inline", "model_id": "effective-model"},
+            ],
+        }),
+    )
+    Config._global_config = None
+    Config._cached_config = None
+
+    config = await Config.get()
+
+    assert [
+        fallback.model_dump()
+        for fallback in config.fallback_providers or []
+    ] == [
+        {"provider_id": "inline", "model_id": "effective-model"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_shared_jsonc_parser_preserves_comment_markers_in_strings(tmp_path):
+    config = await Config.load_text(
+        """{
+          // Actual comment.
+          "theme": "https://example.com/themes/*literal*/dark"
+        }""",
+        tmp_path / "aegisops.jsonc",
+    )
+
+    assert config.theme == "https://example.com/themes/*literal*/dark"
+
+
+def test_local_mcp_config_accepts_legacy_env_alias():
+    """Legacy ``env`` should hydrate the canonical ``environment`` field."""
+    config = ConfigInfo.model_validate(
+        {
+            "mcp": {
+                "demo": {
+                    "type": "local",
+                    "command": ["python", "-m", "demo"],
+                    "env": {"DEMO_TOKEN": "secret"},
+                }
+            }
+        }
+    )
+
+    server = config.mcp["demo"]
+    assert server.environment == {"DEMO_TOKEN": "secret"}
+    assert server.model_dump(exclude_none=True) == {
+        "type": "local",
+        "command": ["python", "-m", "demo"],
+        "environment": {"DEMO_TOKEN": "secret"},
+    }
+
+
+@pytest.mark.parametrize("section", ["agent", "mode", "mcp", "api_services", "tool_settings"])
+@pytest.mark.parametrize("clear", [None, ""])
+def test_native_group_clear_survives_config_merge(section, clear):
+    entry = {"group": "Package", "future_metadata": {"kept": True}}
+    if section == "mcp":
+        entry.update(type="remote", url="https://example.invalid/mcp")
+    original = ConfigInfo.model_validate({section: {"example": entry}})
+    omitted = ConfigInfo.model_validate({section: {"example": {"enabled": False}}})
+    merged = Config.merge_config_concat_arrays(original, omitted)
+    assert merged.model_dump(exclude_none=True)[section]["example"]["group"] == "Package"
+
+    patch_entry = {"group": clear}
+    # Full MCP config exercises its typed model, not just the partial-dict fallback.
+    if section == "mcp":
+        patch_entry.update(type="remote", url="https://example.invalid/mcp")
+    update = ConfigInfo.model_validate({section: {"example": patch_entry}})
+    assert patch_entry["group"] == clear  # Validation must not mutate the input.
+    cleared = Config.merge_config_concat_arrays(merged, update)
+    reloaded = ConfigInfo.model_validate(cleared.model_dump(exclude_none=True))
+    saved = reloaded.model_dump(exclude_none=True)[section]["example"]
+    assert saved["group"] == ""
+    assert saved["future_metadata"] == {"kept": True}
+    assert Config.merge_config_concat_arrays(reloaded, omitted).model_dump(exclude_none=True)[section]["example"]["group"] == ""
+
+
+def test_explicit_group_clear_in_prevalidated_plugin_configs():
+    from aegisops.config.config import AgentConfig, McpLocalConfig, McpRemoteConfig
+
+    agent = AgentConfig(group=None)
+    local = McpLocalConfig(type="local", command=["test"], group=None)
+    remote = McpRemoteConfig(type="remote", url="https://example.invalid", group=None)
+    config = ConfigInfo(agent={"clear": agent, "omitted": AgentConfig()}, mcp={"local": local, "remote": remote})
+    dumped = config.model_dump(exclude_none=True)
+    assert dumped["agent"]["clear"]["group"] == ""
+    assert "group" not in dumped["agent"]["omitted"]
+    assert dumped["mcp"]["local"]["group"] == dumped["mcp"]["remote"]["group"] == ""
+    assert agent.group == local.group == remote.group == ""
+    assert agent.model_dump(exclude_none=True)["group"] == ""
+    assert "group" not in AgentConfig().model_dump(exclude_none=True)
+
+
+@pytest.mark.asyncio
+async def test_config_update_persists_null_group_clear_without_resurrection():
+    original = ConfigInfo.model_validate({
+        "agent": {"example": {"group": "Package", "model": "test/model"}},
+        "mcp": {"example": {"type": "remote", "url": "https://example.invalid", "group": "Package"}},
+        "tool_settings": {"example": {"group": "Package", "enabled": False}},
+        "api_services": {"example_v1": {"group": "Package", "enabled": False}},
+    })
+    await Config.update(original)
+    await Config.update(ConfigInfo.model_validate({
+        "agent": {"example": {"group": None}},
+        "mcp": {"example": {"group": None}},
+        "tool_settings": {"example": {"group": None}},
+        "api_services": {"example_v1": {"group": None}},
+    }))
+    await Config.update(ConfigInfo(theme="dark"))
+    raw = json.loads(Config.get_config_file().read_text())
+    loaded = (await Config.get()).model_dump(exclude_none=True)
+    for section, name in [("agent", "example"), ("mcp", "example"), ("tool_settings", "example"), ("api_services", "example_v1")]:
+        assert raw[section][name]["group"] == loaded[section][name]["group"] == ""
+    assert raw["agent"]["example"]["model"] == "test/model"
+    assert raw["mcp"]["example"]["url"] == "https://example.invalid"
+    assert raw["tool_settings"]["example"]["enabled"] is False
+
+
+def test_legacy_todo_permission_names_migrate_to_todo():
+    permission = PermissionConfig.model_validate({
+        "todowrite": "deny",
+        "todoread": "allow",
+        "bash": "ask",
+    })
+
+    dumped = permission.model_dump(exclude_none=True)
+    assert dumped["todo"] == PermissionAction.DENY
+    assert "todowrite" not in dumped
+    assert "todoread" not in dumped
+    assert dumped["bash"] == PermissionAction.ASK
+
+
+def test_legacy_task_permission_name_migrates_to_delegate_task():
+    permission = PermissionConfig.model_validate({
+        "delegate_task": "allow",
+        "task": {"explore": "deny"},
+    })
+
+    dumped = permission.model_dump(exclude_none=True)
+    assert dumped["delegate_task"] == {
+        "*": PermissionAction.ALLOW,
+        "explore": PermissionAction.DENY,
+    }
+    assert "task" not in dumped
+
+
+@pytest.mark.parametrize(
+    "raw_permission",
+    [
+        {
+            "task": {"explore": "allow", "legacy-only": "ask"},
+            "delegate_task": {"explore": "ask", "canonical-only": "allow"},
+        },
+        {
+            "delegate_task": {"explore": "ask", "canonical-only": "allow"},
+            "task": {"explore": "allow", "legacy-only": "ask"},
+        },
+    ],
+)
+def test_legacy_task_permission_merge_is_order_independent(raw_permission):
+    direct_rules = from_config(raw_permission)
+    model_rules = from_config(PermissionConfig.model_validate(raw_permission))
+
+    expected = {
+        ("delegate_task", "explore", "ask"),
+        ("delegate_task", "legacy-only", "ask"),
+        ("delegate_task", "canonical-only", "allow"),
+    }
+    assert {
+        (rule.permission, rule.pattern, rule.level.value)
+        for rule in direct_rules
+    } == expected
+    assert {
+        (rule.permission, rule.pattern, rule.level.value)
+        for rule in model_rules
+    } == expected
+
+
+def test_config_layers_preserve_legacy_permission_override_priority():
+    low_priority = ConfigInfo.model_validate({
+        "permission": {"delegate_task": "allow"},
+    })
+    high_priority = ConfigInfo.model_validate({
+        "permission": {"task": "ask"},
+    })
+
+    merged = Config.merge_config_concat_arrays(low_priority, high_priority)
+
+    assert merged.model_dump(exclude_none=True)["permission"] == {
+        "delegate_task": "ask",
+    }
+
+
+def test_config_layers_merge_scalar_and_pattern_permission_overrides():
+    low_priority = ConfigInfo.model_validate({
+        "permission": {"delegate_task": "allow"},
+    })
+    high_priority = ConfigInfo.model_validate({
+        "permission": {"task": {"explore": "ask"}},
+    })
+
+    merged = Config.merge_config_concat_arrays(low_priority, high_priority)
+
+    assert merged.model_dump(exclude_none=True)["permission"] == {
+        "delegate_task": {"*": "allow", "explore": "ask"},
+    }
+
+
+def test_legacy_todo_tool_flags_migrate_to_todo_permission():
+    config = ConfigInfo.model_validate({
+        "tools": {
+            "todowrite": False,
+            "todoread": True,
+        },
+        "agent": {
+            "worker": {
+                "tools": {
+                    "todowrite": False,
+                    "bash": True,
+                },
+            },
+        },
+    })
+
+    assert isinstance(config.permission, dict)
+    assert config.permission["todo"] == PermissionAction.DENY
+    assert "todowrite" not in config.permission
+    assert "todoread" not in config.permission
+
+    worker = config.agent["worker"]
+    assert isinstance(worker.permission, dict)
+    assert worker.permission["todo"] == PermissionAction.DENY
+    assert worker.permission["bash"] == PermissionAction.ALLOW
+
+
+def test_ui_config_normalizes_and_dumps_aliases():
+    config = ConfigInfo.model_validate({
+        "ui": {
+            "displayName": "  Acme SOC  ",
+            "faviconPath": "assets/favicon.png",
+        }
+    })
+
+    assert config.ui is not None
+    assert config.ui.display_name == "Acme SOC"
+    assert config.ui.favicon_path == "assets/favicon.png"
+    assert config.model_dump(by_alias=True, exclude_none=True)["ui"] == {
+        "displayName": "Acme SOC",
+        "faviconPath": "assets/favicon.png",
+    }
+
+
+def test_ui_display_name_rejects_control_characters():
+    with pytest.raises(ValueError):
+        ConfigInfo.model_validate({"ui": {"displayName": "Acme\nSOC"}})
+
+
+def test_ui_favicon_path_rejects_unsafe_paths():
+    with pytest.raises(ValueError):
+        ConfigInfo.model_validate({"ui": {"faviconPath": "../favicon.svg"}})
+
+
+@pytest.mark.asyncio
+async def test_config_file_loading(tmp_path):
+    """Test loading configuration from file"""
+    config_file = tmp_path / "test_config.json"
+    config_data = {
+        "$schema": "https://opencode.ai/config.json",
+        "model": "gpt-4",
+        "theme": "dark",
+        "agent": {
+            "test": {
+                "name": "Test Agent",
+                "temperature": 0.8
+            }
+        }
+    }
+    config_file.write_text(json.dumps(config_data, indent=2))
+    
+    # Load
+    config = await Config.load_file(config_file)
+    
+    assert config.model == "gpt-4"
+    assert config.theme == "dark"
+    assert "test" in config.agent
+    assert config.agent["test"].temperature == 0.8
+
+
+@pytest.mark.asyncio
+async def test_config_update(tmp_path, monkeypatch):
+    """Test configuration update"""
+    # Create a config
+    config = ConfigInfo.model_validate({
+        "model": "gpt-4",
+        "theme": "dark",
+    })
+    
+    # Update
+    await Config.update(config)
+    
+    # Verify file was created in the user config directory
+    config_file = Config.get_config_file()
+    assert config_file.exists()
+    
+    # Load and verify
+    loaded = await Config.load_file(config_file)
+    assert loaded.model == "gpt-4"
+    assert loaded.theme == "dark"
+
+
+@pytest.mark.asyncio
+async def test_config_merge(tmp_path, monkeypatch):
+    """Test configuration merging"""
+    # Create initial config
+    config1 = ConfigInfo.model_validate({
+        "model": "gpt-3.5",
+        "theme": "light",
+    })
+    await Config.update(config1)
+    
+    # Update with new config (should merge)
+    config2 = ConfigInfo.model_validate({
+        "model": "gpt-4",  # Override
+        "username": "testuser",  # Add
+    })
+    await Config.update(config2)
+    
+    # Load and verify from the user config directory
+    config_file = Config.get_config_file()
+    loaded = await Config.load_file(config_file)
+    
+    assert loaded.model == "gpt-4"  # Overridden
+    assert loaded.theme == "light"  # Preserved
+    assert loaded.username == "testuser"  # Added
+
+
+@pytest.mark.asyncio
+async def test_xdg_config_dir(tmp_path, monkeypatch):
+    """The config dir should stay under ~/.aegisops/config."""
+    xdg_config = tmp_path / "config"
+    xdg_config.mkdir()
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg_config))
+    
+    # Clear cached config
+    Config._global_config = None
+    Config._cached_config = None
+    
+    # Get global config - XDG should not override the unified ~/.aegisops/config path.
+    global_cfg = Config.get_global()
+    expected_dir = Path(tmp_path / "home" / ".aegisops" / "config")
+    assert global_cfg.config_dir == expected_dir
+
+    # Create config file in the unified config directory
+    config_dir = expected_dir
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config_file = config_dir / "aegisops.json"
+    config_data = {
+        "model": "gpt-4-xdg",
+        "theme": "xdg-theme"
+    }
+    config_file.write_text(json.dumps(config_data, indent=2))
+    
+    # Load global config
+    loaded = await Config.load_global_config()
+    assert loaded.model == "gpt-4-xdg"
+    assert loaded.theme == "xdg-theme"
+
+
+@pytest.mark.asyncio
+async def test_backward_compatibility_legacy_dir(tmp_path, monkeypatch):
+    """Default config location should be ~/.aegisops/config."""
+    config_dir = tmp_path / "home" / ".aegisops" / "config"
+    config_dir.mkdir(parents=True)
+    config_file = config_dir / "aegisops.json"
+    config_data = {
+        "model": "home-model",
+        "theme": "home-theme"
+    }
+    config_file.write_text(json.dumps(config_data, indent=2))
+    
+    # Clear cached config
+    Config._global_config = None
+    Config._cached_config = None
+    
+    global_cfg = Config.get_global()
+    assert global_cfg.config_dir == config_dir
+
+    loaded = await Config.load_global_config()
+    assert loaded.model == "home-model"
+    assert loaded.theme == "home-theme"
+
+
+@pytest.mark.asyncio
+async def test_project_config_is_discovered_from_nested_cwd(tmp_path, monkeypatch):
+    """Config.get should ignore project .aegisops and only use the user config."""
+    project_root = tmp_path / "project"
+    config_dir = project_root / ".aegisops"
+    nested_dir = project_root / "nested" / "deeper"
+    config_dir.mkdir(parents=True)
+    nested_dir.mkdir(parents=True)
+
+    config_file = config_dir / "aegisops.json"
+    config_file.write_text(
+        json.dumps({"model": "nested-provider/nested-model", "theme": "nested-theme"}, indent=2)
+    )
+
+    user_config_dir = tmp_path / "home" / ".aegisops" / "config"
+    user_config_dir.mkdir(parents=True)
+    (user_config_dir / "aegisops.json").write_text(
+        json.dumps({"model": "home-provider/home-model", "theme": "home-theme"}, indent=2)
+    )
+    monkeypatch.chdir(nested_dir)
+
+    Config._global_config = None
+    Config._cached_config = None
+
+    loaded = await Config.get()
+
+    assert loaded.model == "home-provider/home-model"
+    assert loaded.theme == "home-theme"
+
+
+def test_deprecated_workflow_runtime_is_ignored():
+    """Deprecated workflow.runtime should not raise validation errors."""
+    config = ConfigInfo.model_validate(
+        {
+            "workflow": {
+                "runtime": {
+                    "default": "sandbox",
+                }
+            }
+        }
+    )
+    assert isinstance(config, ConfigInfo)
+
+
+def test_sandbox_mode_config_parsing():
+    """ConfigInfo should parse sandbox mode as unified runtime switch."""
+    config = ConfigInfo.model_validate({"sandbox": {"mode": "on"}})
+    assert config.sandbox is not None
+    assert config.sandbox.get("mode") == "on"
+
+
+@pytest.mark.asyncio
+async def test_load_text_handles_secret_with_backslash(tmp_path, monkeypatch):
+    """Secret values containing ``\\`` must be JSON-escaped on substitution.
+
+    Regression test for the "Invalid \\escape" failure observed on Anolis OS
+    after configuring an API service whose key contained a backslash.
+    The substituted value used to land verbatim inside the JSON string,
+    producing an unparsable file (``json.JSONDecodeError: Invalid \\escape``).
+    """
+    secret_value = r"abc\def\u1234\"qq"  # backslashes + quote + \u sequence
+
+    monkeypatch.setattr(
+        "aegisops.security.resolve_secret_value",
+        lambda secret_id, secrets=None: secret_value if secret_id == "broken_key" else None,
+    )
+    monkeypatch.setattr(
+        "aegisops.security.get_secret_manager",
+        lambda: object(),
+    )
+
+    config_file = tmp_path / "aegisops.json"
+    config_file.write_text(
+        json.dumps({"provider": {"x": {"options": {"apiKey": "{secret:broken_key}"}}}}, indent=2),
+        encoding="utf-8",
+    )
+
+    loaded = await Config.load_file(config_file)
+
+    provider = (loaded.provider or {}).get("x")
+    assert provider is not None
+    assert provider.options is not None
+    assert provider.options.api_key == secret_value
+
+
+@pytest.mark.asyncio
+async def test_load_text_handles_env_with_backslash(tmp_path, monkeypatch):
+    """Environment values containing ``\\`` must also be JSON-escaped."""
+    monkeypatch.setenv("AEGISOPS_TEST_BACKSLASH", r"C:\Users\me\token\nVAL")
+
+    config_file = tmp_path / "aegisops.json"
+    config_file.write_text(
+        json.dumps({"provider": {"x": {"options": {"apiKey": "{env:AEGISOPS_TEST_BACKSLASH}"}}}}, indent=2),
+        encoding="utf-8",
+    )
+
+    loaded = await Config.load_file(config_file)
+
+    provider = (loaded.provider or {}).get("x")
+    assert provider is not None
+    assert provider.options is not None
+    assert provider.options.api_key == r"C:\Users\me\token\nVAL"

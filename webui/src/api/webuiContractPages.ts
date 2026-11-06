@@ -1,0 +1,126 @@
+import client from './client';
+
+export interface WebUIContractPageListItem {
+  id: string;
+  title: string;
+  titleEn?: string | null;
+  route: string;
+  icon: string;
+  order: number;
+  enabled: boolean;
+  placement: string;
+  buildHash: string;
+  buildStatus: 'idle' | 'building' | 'ready' | 'failed';
+  workspaceId?: string | null;
+  workspaceTitle?: string | null;
+  workspaceTitleEn?: string | null;
+  workspaceRoute?: string | null;
+}
+
+export interface WebUIContractWorkspaceSection {
+  query?: Record<string, string>;
+  id: string;
+  label: string;
+  labelEn?: string | null;
+  pageIds: string[];
+  defaultPageId?: string | null;
+  contentPadding?: 'comfortable' | 'none';
+  themeOverride?: 'light' | 'dark' | null;
+  /** One navigation item named by the section label (its default page), without a group header. */
+  flat?: boolean;
+  /** Icon of that navigation item; the default page's icon otherwise. */
+  icon?: string | null;
+}
+
+export interface WebUIContractWorkspaceListItem {
+  id: string;
+  version?: string;
+  title: string;
+  titleEn?: string | null;
+  route: string;
+  icon: string;
+  order: number;
+  enabled: boolean;
+  placement: 'sceneWorkspace' | 'aiWorkbench';
+  defaultPageId?: string | null;
+  sections?: WebUIContractWorkspaceSection[];
+  pages: WebUIContractPageListItem[];
+  /** Scene suite that ships the workspace; the API only lists scenes that have one. */
+  suiteId?: string | null;
+  /** An extension locked it: it stays installed but cannot open. */
+  locked?: boolean;
+  /** The extension's own reason, handed to its `workspace.lockedNotice` component. */
+  lockReason?: string | null;
+}
+
+export interface WebUIContractPageManifest {
+  id: string;
+  title: string;
+  titleEn?: string | null;
+  route: string;
+  icon: string;
+  order: number;
+  enabled: boolean;
+  placement: string;
+  entry: string;
+  updatedAt: number;
+}
+
+export interface WebUIContractPageBuildMeta {
+  hash: string;
+  builtAt: number;
+  status: 'idle' | 'building' | 'ready' | 'failed';
+  error?: string | null;
+}
+
+export interface WebUIContractPageDetail {
+  manifest: WebUIContractPageManifest;
+  build: WebUIContractPageBuildMeta;
+  sourceFiles: string[];
+}
+
+export interface WebUIContractPageCreateRequest {
+  id: string;
+  title: string;
+  icon?: string;
+  order?: number;
+}
+
+export interface WebUIContractPageSaveRequest {
+  manifest?: Partial<WebUIContractPageManifest>;
+  sourcePath?: string;
+  sourceContent?: string;
+}
+
+export const webuiContractPagesAPI = {
+  list: (enabledOnly = false) =>
+    client.get<WebUIContractPageListItem[]>('/api/contracts/webui/pages', {
+      params: enabledOnly ? { enabledOnly: true } : undefined,
+    }),
+
+  listWorkspaces: (enabledOnly = false) =>
+    client.get<WebUIContractWorkspaceListItem[]>('/api/contracts/webui/workspaces', {
+      params: enabledOnly ? { enabledOnly: true } : undefined,
+    }),
+
+  setWorkspaceEnabled: (workspaceId: string, enabled: boolean) =>
+    client.patch<WebUIContractWorkspaceListItem>(
+      `/api/contracts/webui/workspaces/${workspaceId}`,
+      { enabled },
+    ),
+
+  create: (payload: WebUIContractPageCreateRequest) =>
+    client.post<WebUIContractPageDetail>('/api/contracts/webui/pages', payload),
+
+  get: (pageId: string) =>
+    client.get<WebUIContractPageDetail>(`/api/contracts/webui/pages/${pageId}`),
+
+  save: (pageId: string, payload: WebUIContractPageSaveRequest) =>
+    client.put<{ manifest: WebUIContractPageManifest; build: WebUIContractPageBuildMeta }>(
+      `/api/contracts/webui/pages/${pageId}`,
+      payload,
+    ),
+
+  build: (pageId: string) =>
+    client.post<WebUIContractPageBuildMeta>(`/api/contracts/webui/pages/${pageId}/build`),
+};

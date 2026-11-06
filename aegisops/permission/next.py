@@ -1,0 +1,629 @@
+"""
+Permission handling for session operations.
+
+Ported from original permission/next.ts PermissionNext namespace.
+Handles permission requests, replies, and rule evaluation.
+"""
+
+import asyncio
+from datetime import datetime
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Iterable
+
+from pydantic import BaseModel, Field
+
+from aegisops.utils.log import Log
+from aegisops.utils.id import Identifier
+from aegisops.permission.interactive import auto_approve_enabled
+from aegisops.permission.rule import PermissionRule, PermissionLevel
+from aegisops.permission.helpers import Ruleset, from_config, merge
+from aegisops.storage.storage import Storage
+
+log = Log.create(service="permission")
+
+
+class PermissionRequestInfo(BaseModel):
+    """Permission request information"""
+
+    model_config = {"populate_by_name": True}
+
+    id: str
+    session_id: str = Field(alias="sessionID")
+    permission: str
+    patterns: List[str]
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    always: List[str] = Field(default_factory=list)
+    tool: Optional[Dict[str, str]] = None
+    time: Dict[str, int] = Field(
+        default_factory=lambda: {"created": int(datetime.now().timestamp() * 1000)}
+    )
+
+
+class DeniedError(Exception):
+    """Exception raised when permission is denied"""
+
+    def __init__(self, rules: List[PermissionRule]):
+        self.rules = rules
+        super().__init__(f"Permission denied by rules: {rules}")
+
+
+class PermissionNext:
+    """
+    Permission management namespace.
+
+    Handles:
+    - Permission rule evaluation
+    - Permission request/reply flow
+    - Session-scoped permission caching
+    """
+
+    _pending: Dict[str, Dict[str, Any]] = {}
+    _session_permissions: Dict[str, Dict[str, str]] = {}
+    _permanent_rules: Dict[str, str] = {}
+    _state_loaded: bool = False
+    _persistence_tasks: set[asyncio.Task[Any]] = set()
+
+    _PENDING_PREFIX = "permission_pending:"
+    _REPLY_PREFIX = "permission_reply:"
+    _SESSION_PREFIX = "permission_session:"
+    _PERMANENT_PREFIX = "permission_rule:"
+    _DEFAULT_TIMEOUT_SECONDS = 300.0
+
+    _on_permission_asked: Optional[Callable[[PermissionRequestInfo], Awaitable[None]]] = None
+    _on_permission_replied: Optional[Callable[[str, str, str], Awaitable[None]]] = None
+
+    @classmethod
+    def set_callbacks(
+        cls,
+        on_asked: Optional[Callable[[PermissionRequestInfo], Awaitable[None]]] = None,
+        on_replied: Optional[Callable[[str, str, str], Awaitable[None]]] = None,
+    ) -> None:
+        """Set event callbacks for permission events."""
+        cls._on_permission_asked = on_asked
+        cls._on_permission_replied = on_replied
+
+    @classmethod
+    async def _ensure_persisted_state_loaded(cls) -> None:
+        if cls._state_loaded:
+            return
+
+        try:
+            permanent_entries = await Storage.list_entries(prefix=cls._PERMANENT_PREFIX)
+            session_entries = await Storage.list_entries(prefix=cls._SESSION_PREFIX)
+        except Exception as exc:
+            log.debug("permission.state_load_failed", {"error": str(exc)})
+            return
+
+        permanent_rules: Dict[str, str] = {}
+        session_permissions: Dict[str, Dict[str, str]] = {}
+
+        for key, value in permanent_entries:
+            permission = key.removeprefix(cls._PERMANENT_PREFIX)
+            if isinstance(value, str):
+                permanent_rules[permission] = value
+
+        for key, value in session_entries:
+            session_id = key.removeprefix(cls._SESSION_PREFIX)
+            if isinstance(value, dict):
+                session_permissions[session_id] = {
+                    str(rule_key): str(rule_value)
+                    for rule_key, rule_value in value.items()
+                }
+
+        cls._permanent_rules = permanent_rules
+        cls._session_permissions = session_permissions
+        cls._state_loaded = True
+
+    @classmethod
+    def _schedule_persist(cls, coro: Awaitable[Any]) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            task = loop.create_task(coro)
+            cls._persistence_tasks.add(task)
+            task.add_done_callback(cls._persistence_tasks.discard)
+        except RuntimeError:
+            pass
+
+    @classmethod
+    async def _flush_persistence(cls) -> None:
+        """Wait for permission writes already scheduled in this process."""
+
+        while cls._persistence_tasks:
+            await asyncio.gather(*tuple(cls._persistence_tasks))
+
+    @classmethod
+    async def _persist_pending_request(cls, request_info: PermissionRequestInfo) -> None:
+        await Storage.set(
+            f"{cls._PENDING_PREFIX}{request_info.id}",
+            request_info.model_dump(by_alias=True),
+            "permission_pending",
+        )
+
+    @classmethod
+    async def _delete_pending_request(cls, request_id: str) -> None:
+        await Storage.delete(f"{cls._PENDING_PREFIX}{request_id}")
+
+    @classmethod
+    async def _persist_reply(
+        cls,
+        request_id: str,
+        reply: str,
+        *,
+        session_id: Optional[str] = None,
+    ) -> None:
+        payload: Dict[str, Any] = {
+            "reply": reply,
+            "time": {"created": int(datetime.now().timestamp() * 1000)},
+        }
+        if session_id:
+            payload["sessionID"] = session_id
+        await Storage.set(
+            f"{cls._REPLY_PREFIX}{request_id}",
+            payload,
+            "permission_reply",
+        )
+
+    @classmethod
+    async def _delete_reply(cls, request_id: str) -> None:
+        await Storage.delete(f"{cls._REPLY_PREFIX}{request_id}")
+
+    @classmethod
+    async def _consume_persisted_reply(cls, request_id: str) -> Optional[str]:
+        stored = await Storage.get(f"{cls._REPLY_PREFIX}{request_id}")
+        if stored is None:
+            return None
+        await cls._delete_reply(request_id)
+        if isinstance(stored, dict):
+            reply = stored.get("reply")
+        else:
+            reply = stored
+        if not reply:
+            return None
+        return str(reply)
+
+    @classmethod
+    async def _persist_permanent_rule(cls, permission: str, action: str) -> None:
+        await Storage.set(
+            f"{cls._PERMANENT_PREFIX}{permission}",
+            action,
+            "permission_rule",
+        )
+
+    @classmethod
+    async def list_permanent_rules(cls) -> Dict[str, str]:
+        """Return the durable permission -> action ("allow"/"deny") rules."""
+        await cls._ensure_persisted_state_loaded()
+        return dict(cls._permanent_rules)
+
+    @classmethod
+    async def set_permanent_rule(cls, permission: str, action: str) -> None:
+        """Create or replace a durable rule (same store an "always" reply writes)."""
+        if action not in {"allow", "deny"}:
+            raise ValueError("action must be 'allow' or 'deny'")
+        await cls._ensure_persisted_state_loaded()
+        cls._permanent_rules[permission] = action
+        await cls._persist_permanent_rule(permission, action)
+
+    @classmethod
+    async def delete_permanent_rule(cls, permission: str) -> bool:
+        """Remove a durable rule; False when there was none."""
+        await cls._ensure_persisted_state_loaded()
+        if permission not in cls._permanent_rules:
+            return False
+        cls._permanent_rules.pop(permission, None)
+        await Storage.delete(f"{cls._PERMANENT_PREFIX}{permission}")
+        return True
+
+    @classmethod
+    async def _persist_session_rules(cls, session_id: str) -> None:
+        await Storage.set(
+            f"{cls._SESSION_PREFIX}{session_id}",
+            cls._session_permissions.get(session_id, {}),
+            "permission_session",
+        )
+
+    @classmethod
+    async def deletion_storage_keys(cls, session_ids: Iterable[str]) -> List[str]:
+        """Return every persisted permission key owned by the given sessions."""
+
+        ids = {session_id for session_id in session_ids if session_id}
+        if not ids:
+            return []
+
+        await cls._flush_persistence()
+        keys = {f"{cls._SESSION_PREFIX}{session_id}" for session_id in ids}
+        request_ids = {
+            request_id
+            for request_id, pending in cls._pending.items()
+            if getattr(pending.get("info"), "session_id", None) in ids
+        }
+
+        for key, value in await Storage.list_entries(prefix=cls._PENDING_PREFIX):
+            if isinstance(value, dict) and value.get("sessionID") in ids:
+                keys.add(key)
+                request_ids.add(key.removeprefix(cls._PENDING_PREFIX))
+
+        for key, value in await Storage.list_entries(prefix=cls._REPLY_PREFIX):
+            if isinstance(value, dict) and value.get("sessionID") in ids:
+                keys.add(key)
+                request_ids.add(key.removeprefix(cls._REPLY_PREFIX))
+
+        for request_id in request_ids:
+            keys.add(f"{cls._PENDING_PREFIX}{request_id}")
+            keys.add(f"{cls._REPLY_PREFIX}{request_id}")
+        return sorted(keys)
+
+    @classmethod
+    def clear_session_runtime(cls, session_ids: Iterable[str]) -> None:
+        """Drop session permission caches and cancel their pending requests."""
+
+        ids = {session_id for session_id in session_ids if session_id}
+        for session_id in ids:
+            cls._session_permissions.pop(session_id, None)
+
+        for request_id, pending in list(cls._pending.items()):
+            if getattr(pending.get("info"), "session_id", None) not in ids:
+                continue
+            future = pending.get("future")
+            if isinstance(future, asyncio.Future) and not future.done():
+                future.cancel()
+            cls._pending.pop(request_id, None)
+
+    @classmethod
+    async def list_pending_infos(cls) -> List[PermissionRequestInfo]:
+        pending_infos = [
+            pending["info"]
+            for pending in cls._pending.values()
+            if isinstance(pending, dict) and pending.get("info") is not None
+        ]
+        try:
+            stored_entries = await Storage.list_entries(prefix=cls._PENDING_PREFIX)
+        except Exception:
+            stored_entries = []
+
+        seen_ids = {info.id for info in pending_infos}
+        for _key, value in stored_entries:
+            try:
+                info = PermissionRequestInfo.model_validate(value)
+            except Exception:
+                continue
+            if info.id not in seen_ids:
+                pending_infos.append(info)
+                seen_ids.add(info.id)
+        return pending_infos
+
+    @classmethod
+    async def get_pending_info(cls, request_id: str) -> Optional[PermissionRequestInfo]:
+        pending = cls._pending.get(request_id)
+        if pending and pending.get("info") is not None:
+            return pending["info"]
+        stored = await Storage.get(f"{cls._PENDING_PREFIX}{request_id}")
+        if stored is None:
+            return None
+        try:
+            return PermissionRequestInfo.model_validate(stored)
+        except Exception:
+            return None
+
+    @classmethod
+    async def _apply_reply_without_future(
+        cls,
+        request_info: PermissionRequestInfo,
+        reply: str,
+        session_id: Optional[str] = None,
+    ) -> None:
+        resolved_session_id = session_id or request_info.session_id
+        permission = request_info.permission
+
+        if reply == "always":
+            cls._permanent_rules[permission] = "allow"
+            await cls._persist_permanent_rule(permission, "allow")
+            return
+        if reply == "never":
+            cls._permanent_rules[permission] = "deny"
+            await cls._persist_permanent_rule(permission, "deny")
+            return
+        if reply in {"allow_session", "deny_session"}:
+            if resolved_session_id not in cls._session_permissions:
+                cls._session_permissions[resolved_session_id] = {}
+            cls._session_permissions[resolved_session_id][permission] = (
+                "allow" if reply == "allow_session" else "deny"
+            )
+            await cls._persist_session_rules(resolved_session_id)
+
+    @staticmethod
+    async def _delegation_chain(session_id: str) -> List[str]:
+        """IDs of the sessions that delegated ``session_id``, nearest first."""
+        try:
+            from aegisops.session.session import Session
+
+            session = await Session.get_by_id_unfiltered(session_id)
+            if session is None:
+                return []
+            return [parent.id for parent in await Session.delegating_sessions(session)]
+        except Exception as exc:
+            log.debug("permission.delegation_chain.failed", {"error": str(exc)})
+            return []
+
+    @classmethod
+    async def ask(
+        cls,
+        session_id: str,
+        permission: str,
+        patterns: List[str],
+        ruleset: Ruleset,
+        metadata: Optional[Dict[str, Any]] = None,
+        always: Optional[List[str]] = None,
+        tool: Optional[Dict[str, str]] = None,
+        request_id: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
+    ) -> str:
+        """
+        Ask for permission to perform an action.
+
+        Ported from original PermissionNext.ask().
+        """
+        metadata = dict(metadata or {})
+
+        if auto_approve_enabled():
+            log.debug("permission.auto_approved", {
+                "permission": permission,
+                "reason": "AEGISOPS_AUTO_APPROVE=true",
+            })
+            return "allow"
+
+        if "delegationChain" not in metadata:
+            # Every caller (session runner, extension confirmations, tool routes)
+            # gets it, so the sessions that delegated this one show it too.
+            chain = await cls._delegation_chain(session_id)
+            if chain:
+                metadata["delegationChain"] = chain
+
+        req_id = request_id or Identifier.create("permission")
+        request_info = PermissionRequestInfo(
+            id=req_id,
+            sessionID=session_id,
+            permission=permission,
+            patterns=patterns,
+            metadata=metadata,
+            always=always or [],
+            tool=tool,
+        )
+
+        reply: Optional[str] = None
+        try:
+            # Persist before exposing the request through callbacks/SSE.  A reply
+            # can now safely locate this request even when it reaches another
+            # process before the in-memory future is visible.
+            await cls._persist_pending_request(request_info)
+            future = asyncio.Future()
+            cls._pending[req_id] = {
+                "info": request_info,
+                "future": future,
+            }
+
+            if cls._on_permission_asked:
+                await cls._on_permission_asked(request_info)
+
+            try:
+                from aegisops.server.routes.event import publish_event
+                await publish_event("permission.request", {
+                    "requestID": req_id,
+                    "sessionID": session_id,
+                    "permission": permission,
+                    "patterns": patterns,
+                    "metadata": metadata,
+                    "tool": tool,
+                })
+            except Exception as exc:
+                log.debug("permission.request.publish_failed", {"error": str(exc)})
+
+            timeout = (
+                cls._DEFAULT_TIMEOUT_SECONDS
+                if timeout_seconds is None
+                else max(float(timeout_seconds), 0.0)
+            )
+            timeout_at = asyncio.get_running_loop().time() + timeout
+            while reply is None:
+                persisted_reply = await cls._consume_persisted_reply(req_id)
+                if persisted_reply is not None:
+                    reply = persisted_reply
+                    break
+
+                remaining = timeout_at - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    raise asyncio.TimeoutError(
+                        f"Permission request timed out after {timeout:.0f}s: {permission}"
+                    )
+
+                try:
+                    reply = await asyncio.wait_for(asyncio.shield(future), timeout=min(0.25, remaining))
+                except asyncio.TimeoutError:
+                    continue
+        finally:
+            # Answered, timed out, or the waiting turn was stopped (even while
+            # the request was still being announced): nobody waits on it any
+            # more, so no view should offer it -- the session itself and the
+            # sessions that delegated it all show it.
+            cls._pending.pop(req_id, None)
+            await cls._delete_pending_request(req_id)
+            await cls._delete_reply(req_id)
+            try:
+                from aegisops.server.routes.event import publish_event
+                await publish_event("permission.replied", {
+                    "requestID": req_id,
+                    "sessionID": session_id,
+                    "reply": reply,
+                })
+            except Exception as exc:
+                log.debug("permission.replied.publish_failed", {"error": str(exc)})
+        # AegisOps only transports the reply; the policy extension decides whether
+        # it means a denial, one-time grant, or durable authorization.
+        return str(reply)
+
+    @classmethod
+    async def reply(
+        cls,
+        request_id: str,
+        reply: str,
+        session_id: Optional[str] = None,
+    ) -> None:
+        """Reply to a pending permission request."""
+        await cls._ensure_persisted_state_loaded()
+        pending = cls._pending.get(request_id)
+        pending_info = pending.get("info") if pending else await cls.get_pending_info(request_id)
+
+        if pending is None:
+            log.warn("permission.reply.not_found", {"request_id": request_id})
+            resolved_session_id = session_id or (pending_info.session_id if pending_info else None)
+            await cls._persist_reply(request_id, reply, session_id=resolved_session_id)
+            await cls._delete_pending_request(request_id)
+            if pending_info is not None:
+                await cls._apply_reply_without_future(
+                    pending_info,
+                    reply,
+                    session_id=session_id,
+                )
+            if cls._on_permission_replied and resolved_session_id:
+                try:
+                    task = cls._on_permission_replied(resolved_session_id, request_id, reply)
+                    if asyncio.iscoroutine(task):
+                        asyncio.create_task(task)
+                except Exception as exc:
+                    log.debug("permission.reply.callback_failed", {"error": str(exc)})
+            return
+
+        future = pending["future"]
+        request_info = pending["info"]
+
+        log.info("permission.replied", {
+            "request_id": request_id,
+            "reply": reply,
+        })
+
+        if not future.done():
+            future.set_result(reply)
+        await cls._delete_pending_request(request_id)
+        await cls._apply_reply_without_future(
+            request_info,
+            reply,
+            session_id=session_id,
+        )
+
+        if cls._on_permission_replied:
+            resolved_session_id = session_id or request_info.session_id
+            try:
+                task = cls._on_permission_replied(resolved_session_id, request_id, reply)
+                if asyncio.iscoroutine(task):
+                    asyncio.create_task(task)
+            except Exception as exc:
+                log.debug("permission.reply.callback_failed", {"error": str(exc)})
+
+        if request_id in cls._pending:
+            del cls._pending[request_id]
+
+    @classmethod
+    def evaluate(
+        cls,
+        permission: str,
+        pattern: str,
+        ruleset: Ruleset,
+    ) -> str:
+        """
+        Public interface: evaluate permission action for a (permission, pattern) pair
+        against a ruleset using last-matching-rule-wins semantics.
+
+        Returns one of: 'allow', 'deny', 'ask'.
+        """
+        return cls._evaluate(permission, pattern, ruleset)
+
+    @classmethod
+    def evaluate_request(
+        cls,
+        permission: str,
+        patterns: List[str],
+        ruleset: Ruleset,
+        aliases: Iterable[str] = (),
+    ) -> Optional[str]:
+        """Evaluate a tool request, or return None when it has no configured rule.
+
+        ``aliases`` are other names the request answers to: file tools ask for
+        ``edit`` while a rule may name the tool itself (``write``). A rule
+        applies when its permission matches any of the names, and the last
+        applicable rule still wins.
+        """
+        names = [permission, *(alias for alias in aliases if alias and alias != permission)]
+        if not any(
+            cls._pattern_matches(name, rule.permission or "*")
+            for rule in ruleset
+            for name in names
+        ):
+            return None
+
+        actions = {
+            cls._evaluate_names(names, pattern, ruleset)
+            for pattern in (patterns or ["*"])
+        }
+        return cls.stricter(*actions)
+
+    @staticmethod
+    def stricter(*actions: Optional[str]) -> Optional[str]:
+        """Most restrictive configured action (deny > ask > allow), None if none."""
+        for action in ("deny", "ask", "allow"):
+            if action in actions:
+                return action
+        return None
+
+    @classmethod
+    def _evaluate(
+        cls,
+        permission: str,
+        pattern: str,
+        ruleset: Ruleset,
+    ) -> str:
+        """Evaluate permission action for a pattern."""
+        return cls._evaluate_names([permission], pattern, ruleset)
+
+    @classmethod
+    def _evaluate_names(
+        cls,
+        names: List[str],
+        pattern: str,
+        ruleset: Ruleset,
+    ) -> str:
+        """Last rule matching any of ``names`` and ``pattern`` wins; else ask."""
+        matched_rule = None
+        for rule in reversed(ruleset):
+            if not any(cls._pattern_matches(name, rule.permission or "*") for name in names):
+                continue
+            if not cls._pattern_matches(pattern, rule.pattern or "*"):
+                continue
+            matched_rule = rule
+            break
+
+        if matched_rule:
+            return matched_rule.level.value if hasattr(matched_rule.level, "value") else str(matched_rule.level)
+
+        return "ask"
+
+    @classmethod
+    def _pattern_matches(cls, text: str, pattern: str) -> bool:
+        """Check if text matches pattern (with wildcard support)."""
+        if pattern == "*":
+            return True
+        if "*" in pattern:
+            import fnmatch
+            return fnmatch.fnmatch(text, pattern)
+        return text == pattern
+
+    @classmethod
+    def from_config(cls, permission_config):
+        """Alias for from_config function."""
+        return from_config(permission_config)
+
+    @classmethod
+    def merge(cls, *rulesets: Ruleset) -> Ruleset:
+        """Alias for merge function."""
+        return merge(*rulesets)
+
+
+__all__ = ["PermissionNext", "PermissionRequestInfo", "DeniedError", "Ruleset"]

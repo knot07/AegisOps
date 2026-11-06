@@ -1,0 +1,503 @@
+"""
+Write Tool - File writing with diff generation
+
+Writes files to the local filesystem with:
+- Diff generation for existing files
+- LSP diagnostics reporting
+- Directory creation as needed
+"""
+
+import mimetypes
+import os
+from difflib import unified_diff
+from pathlib import Path
+from typing import Optional
+
+from aegisops.tool import nofollow
+from aegisops.tool.registry import (
+    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
+)
+from aegisops.tool.path_utils import (
+    changed_before_asking,
+    checked_error,
+    moved_since_resolved,
+    paths_changed,
+    resolve_tool_path,
+    resolved_identities,
+)
+from aegisops.utils.id import Identifier
+from aegisops.utils.log import Log
+
+
+log = Log.create(service="tool.write")
+
+
+DESCRIPTION = """Writes a file to the local filesystem.
+
+Usage:
+- This tool will overwrite the existing file if there is one at the provided path.
+- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
+- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked."""
+
+
+def generate_diff(filepath: str, old_content: str, new_content: str) -> str:
+    """
+    Generate unified diff between old and new content
+    
+    Args:
+        filepath: File path for diff header
+        old_content: Original content
+        new_content: New content
+        
+    Returns:
+        Unified diff string
+    """
+    old_lines = old_content.splitlines(keepends=True)
+    new_lines = new_content.splitlines(keepends=True)
+    
+    diff_lines = list(unified_diff(
+        old_lines,
+        new_lines,
+        fromfile=filepath,
+        tofile=filepath,
+        lineterm=""
+    ))
+    
+    return "".join(diff_lines)
+
+
+def trim_diff(diff: str) -> str:
+    """
+    Trim indentation from diff content lines
+    
+    Ported from original trimDiff function for cleaner display.
+    
+    Args:
+        diff: Original diff string
+        
+    Returns:
+        Trimmed diff string
+    """
+    if not diff:
+        return diff
+    
+    lines = diff.split("\n")
+    
+    # Find content lines (starting with +, -, or space, but not --- or +++)
+    content_lines = [
+        line for line in lines
+        if (line.startswith("+") or line.startswith("-") or line.startswith(" "))
+        and not line.startswith("---")
+        and not line.startswith("+++")
+    ]
+    
+    if not content_lines:
+        return diff
+    
+    # Find minimum indentation
+    min_indent = float('inf')
+    for line in content_lines:
+        content = line[1:]  # Skip the first character (+, -, or space)
+        if content.strip():
+            indent = len(content) - len(content.lstrip())
+            min_indent = min(min_indent, indent)
+    
+    if min_indent == float('inf') or min_indent == 0:
+        return diff
+    
+    # Trim lines
+    trimmed_lines = []
+    for line in lines:
+        if (line.startswith("+") or line.startswith("-") or line.startswith(" ")) \
+           and not line.startswith("---") and not line.startswith("+++"):
+            prefix = line[0]
+            content = line[1:]
+            trimmed_lines.append(prefix + content[min_indent:])
+        else:
+            trimmed_lines.append(line)
+    
+    return "\n".join(trimmed_lines)
+
+def _is_filename_only(raw_path: str) -> bool:
+    """Only a bare filename opts into default outputs; never infer intent from cwd."""
+    normalized = (raw_path or "").strip().replace("\\", "/")
+    return bool(normalized) and not os.path.splitdrive(normalized)[0] and "/" not in normalized
+
+
+async def _resolve_output_owner(ctx: ToolContext) -> tuple[Optional[str], Optional[str]]:
+    """Resolve a trusted output writer's username and immutable account id."""
+    try:
+        from aegisops.auth.context import get_current_auth_user
+        auth_user = get_current_auth_user()
+        if auth_user and getattr(auth_user, "username", None):
+            return str(auth_user.username), str(auth_user.id)
+    except Exception:
+        pass
+
+    session_id = getattr(ctx, "session_id", None)
+    if not session_id or session_id == "default":
+        return None, None
+    try:
+        from aegisops.session.session import Session
+
+        session = await Session.get_by_id(session_id)
+        if session:
+            return session.owner_username, session.owner_user_id
+    except Exception:
+        pass
+    return None, None
+
+
+async def _build_output_attachment(
+    ctx: ToolContext,
+    filepath: str,
+) -> Optional[dict]:
+    """Describe a completed Workspace output without exposing its host path."""
+
+    try:
+        from aegisops.workspace.manager import WorkspaceManager
+
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
+        scope = WorkspaceManager.get_instance().resolve_output_scope(
+            filepath, username=owner_username, user_id=owner_user_id,
+        )
+        if scope is None or not scope.path.is_file():
+            return None
+
+        target = scope.path
+        stat = target.stat()
+        attachment_id = Identifier.ascending("part")
+        return {
+            "id": attachment_id,
+            "sessionID": ctx.session_id,
+            "messageID": ctx.message_id,
+            "type": "file",
+            "mime": mimetypes.guess_type(target.name)[0] or "application/octet-stream",
+            "filename": target.name,
+            "size": stat.st_size,
+            "modifiedAt": int(stat.st_mtime * 1000),
+            "origin": "agent_output",
+            "source": {
+                "root": "workspace-output",
+                "path": scope.relative_path,
+                "username": scope.username,
+                "userID": scope.user_id,
+            },
+        }
+    except (OSError, RuntimeError, ValueError) as exc:
+        log.debug("write.output_attachment.failed", {"error": str(exc)})
+        return None
+
+
+async def _maybe_redirect_to_default_outputs(
+    ctx: ToolContext,
+    *,
+    original_path: str,
+    resolved_path: str,
+) -> str:
+    """
+    For filename-only writes, force stable default output location.
+
+    Explicit paths (including absolute source-root paths and ``./name``)
+    retain the destination selected by shared path resolution.
+    """
+    if not _is_filename_only(original_path):
+        return resolved_path
+    if os.path.exists(resolved_path):
+        # Existing file writes should remain explicit and deterministic.
+        return resolved_path
+
+    filename = os.path.basename(original_path.strip()) or os.path.basename(resolved_path)
+    if not filename:
+        return resolved_path
+
+    try:
+        from aegisops.workspace.manager import WorkspaceManager
+
+        owner_username, owner_user_id = await _resolve_output_owner(ctx)
+        outputs_dir = WorkspaceManager.get_instance().get_default_outputs_dir(
+            username=owner_username, user_id=owner_user_id,
+        )
+        redirected = str((outputs_dir / filename).resolve())
+        if redirected != resolved_path:
+            log.info(
+                "write.default_output_redirect",
+                {"from": resolved_path, "to": redirected, "session_id": ctx.session_id},
+            )
+        return redirected
+    except Exception as exc:
+        log.debug("write.default_output_redirect.failed", {"error": str(exc)})
+        return resolved_path
+
+
+def _existing_memory_write_error(filepath: str) -> Optional[str]:
+    """Prevent invalid whole-file replacement of Memory files."""
+    from aegisops.config import Config
+    from aegisops.memory.paths import (
+        DAILY_AGENT_WRITE_ERROR,
+        is_daily_memory_path,
+        is_registered_project_id,
+    )
+
+    path = Path(filepath).expanduser().resolve(strict=False)
+    memory_root = (
+        Config.get_data_path() / "memory"
+    ).expanduser().resolve(strict=False)
+    if is_daily_memory_path(memory_root, path):
+        return DAILY_AGENT_WRITE_ERROR
+
+    protected_files = {
+        memory_root / "MEMORY.md",
+        memory_root / "USER.md",
+    }
+    is_project_memory = (
+        path.name == "MEMORY.md"
+        and path.parent.parent == memory_root / "projects"
+        and is_registered_project_id(path.parent.name)
+    )
+    if path.exists() and (path in protected_files or is_project_memory):
+        return (
+            "Existing Memory files cannot be overwritten with write. "
+            "Read the current content and use edit for a precise change."
+        )
+    return None
+
+
+@ToolRegistry.register_function(
+    name="write",
+    group="文件操作",
+    description=DESCRIPTION,
+    category=ToolCategory.FILE,
+    parameters=[
+        ToolParameter(
+            name="content",
+            type=ParameterType.STRING,
+            description="The content to write to the file",
+            required=True
+        ),
+        ToolParameter(
+            name="filePath",
+            type=ParameterType.STRING,
+            description=(
+                "The path to the file to write. It may be absolute, use `~`, or be relative to the current project directory.\n"
+                "\n"
+                "IMPORTANT:\n"
+                "- Explicit paths keep their destination, including absolute paths, `~/name`, and `./name`.\n"
+                "- For Project source files (source code, tests, and configs), use the explicit Project path"
+                " (e.g. `./pyproject.toml` for a project-root file).\n"
+                "- For Agent-generated outputs requested by the user (reports, tables, examples, analysis, and drafts),"
+                " use a filename-only path unless the user specified a destination. The tool routes filename-only"
+                " writes for new files on the host to the current Session's dated Workspace outputs directory."
+                " Existing project files stay in place; sandbox writes stay inside the sandbox.\n"
+                "- The result includes the actual path; use it for subsequent read or bash calls.\n"
+                "\n"
+                "Do not write Agent-generated outputs into the Project source directory unless the user"
+                " explicitly selected that destination."
+            ),
+            required=True
+        ),
+    ]
+)
+async def write_tool(
+    ctx: ToolContext,
+    content: str,
+    filePath: str,
+) -> ToolResult:
+    """
+    Write content to a file
+    
+    Args:
+        ctx: Tool context
+        content: Content to write
+        filePath: Target file path
+        
+    Returns:
+        ToolResult with operation status
+    """
+    # Coerce non-string content: dicts/lists → JSON, everything else → str
+    if not isinstance(content, str):
+        if isinstance(content, (dict, list)):
+            import json as _json
+            content = _json.dumps(content, ensure_ascii=False, indent=2)
+        else:
+            content = str(content)
+
+    try:
+        resolution = await resolve_tool_path(
+            ctx,
+            filePath,
+            allow_host_memory=True,
+            allow_host_skills=True,
+        )
+        if resolution.sandbox_root is None:
+            redirected_path = await _maybe_redirect_to_default_outputs(
+                ctx,
+                original_path=filePath,
+                resolved_path=resolution.resolved_path,
+            )
+            if redirected_path != resolution.resolved_path:
+                resolution = await resolve_tool_path(
+                    ctx,
+                    redirected_path,
+                    base_dir=resolution.base_dir,
+                    worktree=resolution.worktree,
+                    allow_host_memory=True,
+                    allow_host_skills=True,
+                )
+    except ValueError as exc:
+        return ToolResult(
+            success=False,
+            error=str(exc),
+            title=filePath,
+        )
+    filepath = resolution.resolved_path
+    memory_error = _existing_memory_write_error(filepath)
+    if memory_error:
+        return ToolResult(
+            success=False,
+            error=memory_error,
+            title=filePath,
+        )
+
+    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
+    if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
+        from aegisops.session.execution_mode import is_plan_file_edit
+
+        plan_file_edit = is_plan_file_edit(
+            ctx.extra.get("execution_mode"),
+            ctx,
+            filepath,
+        )
+    else:
+        plan_file_edit = False
+    if (
+        isinstance(sandbox, dict)
+        and sandbox.get("workspace_access") == "ro"
+        and not plan_file_edit
+    ):
+        return ToolResult(
+            success=False,
+            error=(
+                "Write is blocked in sandbox read-only workspace mode. "
+                "Set sandbox.workspace_access to 'rw' to allow writes."
+            ),
+            title=filePath,
+        )
+    
+    # Get relative title for display
+    title = resolution.display_path
+    
+    # Nothing is read through a path that moved since it was checked, nor
+    # through a link put on the way while it is read.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+
+    # Check if file exists and get old content
+    try:
+        existing = nofollow.read_text(filepath)
+    except nofollow.LinkOnTheWay:
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            error=checked_error((filepath,), f"Failed to read existing file: {str(e)}"),
+            title=title
+        )
+    exists = existing is not None
+    old_content = existing.text if existing is not None else ""
+
+    if (
+        ctx.agent == "self-improve"
+        and Path(filepath).name == "SKILL.md"
+    ):
+        from aegisops.memory.evolution.skill_guard import (
+            validate_evolution_skill_write,
+        )
+
+        evolution_error = await validate_evolution_skill_write(
+            Path(filepath),
+            content,
+            exists=exists,
+        )
+        if evolution_error:
+            return ToolResult(
+                success=False,
+                error=evolution_error,
+                title=title,
+            )
+
+    # Generate diff
+    from aegisops.workflow.definition_io import validate_file_write
+    try:
+        validate_file_write(filepath, content)
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc), title=title)
+    diff = trim_diff(generate_diff(filepath, old_content, content))
+
+    # Explicit edit/write rules (session, agent, delegating session) apply here.
+    # The request carries the diff: none read after the path moved.
+    if moved_since_resolved(filepath):
+        return ToolResult(success=False, error=changed_before_asking(filepath), title=title)
+    identities = resolved_identities(filepath)
+    await ctx.ask(
+        permission="edit",
+        patterns=[resolution.permission_pattern],
+        always=["*"],
+        metadata={
+            "tool": "write", "filepath": filepath, "diff": diff,
+            "pattern_base": resolution.worktree,
+        },
+    )
+    changed = f"{filepath} changed while waiting for permission; check it again and retry."
+    if paths_changed(identities):
+        return ToolResult(success=False, error=changed, title=title)
+
+    # Create parent directory if needed, opening each one on the way without
+    # following a link.
+    parent_dir = os.path.dirname(filepath)
+    if parent_dir and not os.path.exists(parent_dir):
+        try:
+            nofollow.makedirs(parent_dir)
+        except nofollow.LinkOnTheWay:
+            return ToolResult(success=False, error=changed, title=title)
+        except Exception as e:
+            return ToolResult(
+                success=False,
+                error=f"Failed to create directory: {str(e)}",
+                title=title
+            )
+    
+    # Write the file the request was about: the one read above, or none.
+    try:
+        from aegisops.workflow.definition_io import is_definition_path
+        if existing is not None and is_definition_path(filepath):
+            nofollow.replace_text(filepath, content, before=existing)
+        else:
+            nofollow.write_text(filepath, content, expect=existing.identity if existing is not None else None)
+    except (nofollow.LinkOnTheWay, nofollow.StaleFile):
+        return ToolResult(success=False, error=changed, title=title)
+    except Exception as e:
+        return ToolResult(
+            success=False,
+            error=f"Failed to write file: {str(e)}",
+            title=title
+        )
+    
+    # Build output
+    output = f"Wrote file successfully.\nPath: {filepath}"
+    output_attachment = await _build_output_attachment(ctx, filepath)
+
+    # Note: LSP diagnostics integration would go here
+    # For now we just return success
+
+    return ToolResult(
+        success=True,
+        output=output,
+        title=title,
+        metadata={
+            "filepath": filepath,
+            "exists": exists,
+            "diagnostics": {}
+        },
+        attachments=[output_attachment] if output_attachment else None,
+    )

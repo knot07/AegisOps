@@ -1,0 +1,2452 @@
+"""
+Tests for the channel system refactoring.
+
+Covers:
+  - AsyncTokenBucket (rate limiter extracted to utils)
+  - ChannelStatus.to_dict()
+  - ChannelPlugin status management methods
+  - ChannelPlugin.chunk_text()
+  - ChannelConfig merged into config.config
+  - MessageDedup (merged into dispatcher)
+  - _check_allowlist (merged into dispatcher)
+  - ChannelDeliveryCallbacks (merged into dispatcher)
+  - OutboundDelivery.deliver() with OutboundContext API
+  - ChannelRegistry basic operations
+  - GatewayManager helpers
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+import weakref
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from aegisops.channel.base import (
+    ChannelCapabilities,
+    ChannelMeta,
+    ChannelPlugin,
+    ChannelStatus,
+    ChatType,
+    DeliveryResult,
+    InboundMessage,
+    NonRetryableChannelError,
+    OutboundContext,
+)
+from aegisops.config.config import ChannelAccountConfig, ChannelConfig, ConfigInfo
+from aegisops.utils.rate_limiter import AsyncTokenBucket
+
+
+async def _persist_inbound_session(session_id):
+    from aegisops.session.session import SessionInfo
+    from aegisops.storage.storage import Storage
+
+    session = SessionInfo(id=session_id, project_id="channel-test", directory="/tmp")
+    await Storage.set(f"session:channel-test:{session_id}", session, "session")
+
+
+# =====================================================================
+# Helpers — minimal concrete ChannelPlugin for testing
+# =====================================================================
+
+class _StubChannel(ChannelPlugin):
+    """Minimal concrete implementation used throughout this test module."""
+
+    def __init__(self, channel_id: str = "stub", label: str = "Stub") -> None:
+        super().__init__()
+        self._id = channel_id
+        self._label = label
+        self._sent: list[OutboundContext] = []
+
+    def meta(self) -> ChannelMeta:
+        return ChannelMeta(id=self._id, label=self._label, aliases=["s"])
+
+    def capabilities(self) -> ChannelCapabilities:
+        return ChannelCapabilities(chat_types=[ChatType.DIRECT, ChatType.GROUP])
+
+    async def send_text(self, ctx: OutboundContext) -> DeliveryResult:
+        self._sent.append(ctx)
+        return DeliveryResult(channel_id=self._id, message_id="msg_001", success=True)
+
+
+# =====================================================================
+# 1. AsyncTokenBucket
+# =====================================================================
+
+class TestAsyncTokenBucket:
+    async def test_acquire_within_burst(self):
+        limiter = AsyncTokenBucket(rate=100.0, burst=3)
+        for _ in range(3):
+            await limiter.acquire()
+
+    async def test_acquire_blocks_when_exhausted(self):
+        limiter = AsyncTokenBucket(rate=1000.0, burst=1)
+        await limiter.acquire()
+        t0 = time.monotonic()
+        await limiter.acquire()
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.1  # high rate → very short wait
+
+    async def test_no_double_spend_at_rate_boundary(self):
+        """After the burst is spent, exactly one token per 1/rate elapses.
+
+        Zeroing the balance while sleeping let the refill earned during that
+        sleep be spent again by the next caller, so two sends slipped through
+        on every rate boundary.
+        """
+        import time as _time
+        from aegisops.utils.rate_limiter import AsyncTokenBucket
+
+        bucket = AsyncTokenBucket(rate=20.0, burst=2)
+        t0 = _time.perf_counter()
+        stamps = []
+        for _ in range(5):
+            await bucket.acquire()
+            stamps.append(_time.perf_counter() - t0)
+        # burst of 2 immediately, then 3 more spaced by ~50ms each
+        assert stamps[1] < 0.02
+        assert 0.035 <= stamps[2] <= 0.09
+        assert 0.085 <= stamps[3] <= 0.14
+        assert 0.135 <= stamps[4] <= 0.2
+
+    async def test_tokens_refill_over_time(self):
+        limiter = AsyncTokenBucket(rate=1000.0, burst=2)
+        await limiter.acquire()
+        await limiter.acquire()
+        await asyncio.sleep(0.01)
+        await limiter.acquire()
+
+
+# =====================================================================
+# 2. ChannelStatus.to_dict
+# =====================================================================
+
+class TestChannelStatusToDict:
+    def test_serialises_all_fields(self):
+        status = ChannelStatus(
+            channel_id="feishu",
+            connected=True,
+            last_message_at=1234.5,
+            last_error="oops",
+            error_count=2,
+            reconnect_count=1,
+            uptime_seconds=99.999,
+        )
+        d = status.to_dict()
+        assert d["connected"] is True
+        assert d["uptime_seconds"] == 100.0
+        assert d["last_message_at"] == 1234.5
+        assert d["last_error"] == "oops"
+        assert d["error_count"] == 2
+        assert d["reconnect_count"] == 1
+        assert "channel_id" not in d
+        assert "started_at" not in d
+
+
+# =====================================================================
+# 3. ChannelPlugin status management
+# =====================================================================
+
+class TestChannelPluginStatus:
+    def test_reset_status(self):
+        ch = _StubChannel()
+        ch.reset_status("feishu", attempt=3)
+        assert ch.status.channel_id == "feishu"
+        assert ch.status.connected is False
+        assert ch.status.reconnect_count == 3
+        assert ch.status.started_at is not None
+
+    def test_mark_connected(self):
+        ch = _StubChannel()
+        ch.reset_status("feishu")
+        ch.mark_disconnected(error="timeout")
+        ch.mark_connected()
+        assert ch.status.connected is True
+        assert ch.status.last_error is None
+        assert ch.status.error_count == 1
+
+    def test_mark_disconnected_without_error(self):
+        ch = _StubChannel()
+        ch.reset_status("feishu")
+        ch.mark_connected()
+        ch.mark_disconnected()
+        assert ch.status.connected is False
+        assert ch.status.error_count == 0
+
+    def test_mark_disconnected_with_error(self):
+        ch = _StubChannel()
+        ch.reset_status("feishu")
+        ch.mark_disconnected(error="timeout")
+        assert ch.status.connected is False
+        assert ch.status.last_error == "timeout"
+        assert ch.status.error_count == 1
+        ch.mark_disconnected(error="refused")
+        assert ch.status.error_count == 2
+
+    def test_record_message(self):
+        ch = _StubChannel()
+        ch.reset_status("feishu")
+        assert ch.status.last_message_at is None
+        ch.record_message()
+        assert ch.status.last_message_at is not None
+
+
+# =====================================================================
+# 4. chunk_text
+# =====================================================================
+
+class TestChunkText:
+    def setup_method(self):
+        self.ch = _StubChannel()
+
+    def test_empty_text(self):
+        assert self.ch.chunk_text("", 100) == []
+
+    def test_within_limit(self):
+        assert self.ch.chunk_text("hello", 100) == ["hello"]
+
+    def test_split_by_paragraphs(self):
+        text = "aaa\n\nbbb\n\nccc"
+        chunks = self.ch.chunk_text(text, 8)
+        assert all(len(c) <= 8 for c in chunks)
+        assert "aaa" in chunks[0]
+
+    def test_force_split_long_line(self):
+        text = "x" * 20
+        chunks = self.ch.chunk_text(text, 8)
+        assert all(len(c) <= 8 for c in chunks)
+        assert "".join(chunks) == text
+
+
+# =====================================================================
+# 5. ChannelConfig in config.config
+# =====================================================================
+
+class TestChannelConfigMerge:
+    def test_channel_config_defaults(self):
+        cfg = ChannelConfig()
+        assert cfg.enabled is False
+        assert cfg.group_trigger == "mention"
+        assert cfg.default_agent is None
+        assert not hasattr(cfg, "permission_mode")
+
+    def test_channel_config_extra_fields(self):
+        cfg = ChannelConfig(enabled=True, appId="abc", appSecret="xyz")
+        assert cfg.get_extra("appId") == "abc"
+        assert cfg.get_extra("missing", "fallback") == "fallback"
+
+    def test_channel_account_config(self):
+        acc = ChannelAccountConfig(enabled=False, name="bot1")
+        assert acc.enabled is False
+        assert acc.name == "bot1"
+
+    def test_config_info_get_channel_config_default(self):
+        info = ConfigInfo()
+        cfg = info.get_channel_config("nonexistent")
+        assert isinstance(cfg, ChannelConfig)
+        assert cfg.enabled is False
+
+    def test_config_info_get_channel_configs_empty(self):
+        info = ConfigInfo()
+        assert info.get_channel_configs() == {}
+
+    def test_config_info_parses_channels_dict(self):
+        info = ConfigInfo(channels={
+            "feishu": {"enabled": True, "defaultAgent": "helper"},
+        })
+        assert isinstance(info.channels["feishu"], ChannelConfig)
+        assert info.channels["feishu"].enabled is True
+        assert info.channels["feishu"].default_agent == "helper"
+
+    def test_get_channel_config_accessor(self):
+        info = ConfigInfo(channels={
+            "feishu": {"enabled": True, "groupTrigger": "all"},
+        })
+        cfg = info.get_channel_config("feishu")
+        assert cfg.enabled is True
+        assert cfg.group_trigger == "all"
+
+        missing = info.get_channel_config("discord")
+        assert missing.enabled is False
+
+
+# =====================================================================
+# 6. MessageDedup (now in dispatcher module)
+# =====================================================================
+
+class TestMessageDedup:
+    def test_first_message_not_duplicate(self):
+        from aegisops.channel.inbound.dispatcher import MessageDedup
+        dedup = MessageDedup(ttl_seconds=10, max_size=100)
+        assert dedup.is_duplicate("msg_1") is False
+
+    def test_second_same_message_is_duplicate(self):
+        from aegisops.channel.inbound.dispatcher import MessageDedup
+        dedup = MessageDedup(ttl_seconds=10, max_size=100)
+        dedup.is_duplicate("msg_1")
+        assert dedup.is_duplicate("msg_1") is True
+
+    def test_different_messages_not_duplicate(self):
+        from aegisops.channel.inbound.dispatcher import MessageDedup
+        dedup = MessageDedup(ttl_seconds=10, max_size=100)
+        dedup.is_duplicate("msg_1")
+        assert dedup.is_duplicate("msg_2") is False
+
+
+class TestParseSlashCommand:
+    """Regression coverage for ``dispatcher._parse_slash_command`` after the
+    PR #321 fix that tightened the channel fallback to bot-mention prefixes
+    only.  Group-IM platforms (WeCom, Feishu) inject short ``- BotName`` or
+    ``@BotName`` prefixes before commands; natural-language messages that
+    happen to contain ``/word`` must NOT be hijacked as slash commands.
+    """
+
+    def test_strict_leading_slash(self):
+        from aegisops.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("/compact") == ("compact", "")
+        assert _parse_slash_command("/compact focus_arg") == (
+            "compact",
+            "focus_arg",
+        )
+
+    def test_dash_prefix_wecom_style(self):
+        """WeCom group-mention injects ``- BotName`` before the command."""
+        from aegisops.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("- rex /compact") == ("compact", "")
+        assert _parse_slash_command("- test /compact arg1") == (
+            "compact",
+            "arg1",
+        )
+
+    def test_at_prefix_feishu_style(self):
+        """Feishu group-mention injects ``@BotName`` before the command."""
+        from aegisops.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("@aegisops_bot /compact") == ("compact", "")
+        assert _parse_slash_command("@bot /help") == ("help", "")
+
+    def test_unicode_bot_name_accepted(self):
+        """The bot name may contain Unicode word characters (e.g. CJK)."""
+        from aegisops.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("- 测试机器人 /compact") == ("compact", "")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "请解释一下 /help",
+            "I want to know about /status",
+            "prefix /new thanks",
+            "see /tmp/foo.log",  # /tmp does not resolve, must be rejected
+            "hello /help",  # bare word + slash, missing mention prefix
+            "this is a long sentence about /model selection",
+        ],
+    )
+    def test_natural_language_with_slash_word_rejected(self, text: str):
+        """Plain chatter that *contains* a slash-prefixed word must NOT be
+        hijacked as a slash command — the LLM should see the original text.
+        """
+        from aegisops.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command(text) == (None, "")
+
+    def test_unknown_command_rejected_even_with_mention_prefix(self):
+        """Even with a valid bot-mention prefix, an unregistered command name
+        must fall through to the LLM rather than failing dispatch.
+        """
+        from aegisops.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("- rex /this_is_not_a_command") == (
+            None,
+            "",
+        )
+
+    def test_empty_input(self):
+        from aegisops.channel.inbound.dispatcher import _parse_slash_command
+
+        assert _parse_slash_command("") == (None, "")
+        assert _parse_slash_command("   ") == (None, "")
+
+
+class TestFeishuNativeCommands:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("category", "model_auto", "expected"),
+        [
+            ("user", True, True),
+            ("user", False, False),
+            ("task", True, False),
+        ],
+    )
+    async def test_im_loop_uses_supported_persisted_auto_mode(
+        self,
+        monkeypatch,
+        category,
+        model_auto,
+        expected,
+    ):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        binding = SessionBinding(
+            channel_id="slack",
+            account_id="T1",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_1",
+                    category=category,
+                    model_auto=model_auto,
+                )
+            ),
+        )
+        run_mock = AsyncMock(return_value=SimpleNamespace(last_message=None))
+        monkeypatch.setattr(
+            "aegisops.session.session_loop.SessionLoop.run",
+            run_mock,
+        )
+
+        loop_callbacks = SimpleNamespace()
+        await InboundDispatcher._run_session_loop(binding, loop_callbacks)
+
+        run_mock.assert_awaited_once_with(
+            session_id="session_1",
+            agent_name="rex",
+            callbacks=loop_callbacks,
+            auto_failover=expected,
+        )
+
+    @pytest.mark.asyncio
+    async def test_status_command_reports_session_state(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        binding = SessionBinding(
+            channel_id="feishu",
+            account_id="default",
+            chat_id="ou_user",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="feishu",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="ou_user",
+            chat_id="ou_user",
+            chat_type=ChatType.DIRECT,
+            text="/status",
+            mention_text="/status",
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_1",
+                    project_id="channel",
+                    agent="rex",
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session_loop.SessionLoop._resolve_model",
+            AsyncMock(return_value=("anthropic", "claude-sonnet-4-20250514")),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.core.status.SessionStatus.get",
+            lambda _session_id: SimpleNamespace(type="idle"),
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/status",
+            scope_override=None,
+        )
+
+        assert handled is True
+        assert delivered
+        assert "session_1" in delivered[0]
+        assert "anthropic/claude-sonnet-4-20250514" in delivered[0]
+
+    @pytest.mark.asyncio
+    async def test_model_command_updates_session_model(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        binding = SessionBinding(
+            channel_id="feishu",
+            account_id="default",
+            chat_id="ou_user",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="feishu",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="ou_user",
+            chat_id="ou_user",
+            chat_type=ChatType.DIRECT,
+            text="/model anthropic/claude-sonnet-4-20250514",
+            mention_text="/model anthropic/claude-sonnet-4-20250514",
+        )
+
+        delivered: list[str] = []
+        updated: list[tuple[str, str, dict]] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        async def fake_update(project_id, session_id, **updates):
+            updated.append((project_id, session_id, updates))
+            return SimpleNamespace(id=session_id, project_id=project_id, **updates)
+
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_1",
+                    project_id="channel",
+                    agent="rex",
+                    provider=None,
+                    model=None,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "aegisops.provider.provider.Provider.get",
+            lambda provider_id: object() if provider_id == "anthropic" else None,
+        )
+        monkeypatch.setattr(
+            "aegisops.provider.provider.Provider.list_models",
+            lambda provider_id=None: [SimpleNamespace(id="claude-sonnet-4-20250514")],
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.update",
+            fake_update,
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text=msg.text,
+            scope_override=None,
+        )
+
+        assert handled is True
+        assert updated == [
+            (
+                "channel",
+                "session_1",
+                {
+                    "provider": "anthropic",
+                    "model": "claude-sonnet-4-20250514",
+                    "model_pinned": True,
+                    "model_auto": False,
+                },
+            )
+        ]
+        assert "已切换到模型" in delivered[0]
+
+    @pytest.mark.asyncio
+    async def test_new_command_rebinds_conversation(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="feishu",
+                account_id="default",
+                chat_id="oc_group",
+                chat_type=ChatType.GROUP,
+                thread_id="root_1",
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="feishu",
+            account_id="default",
+            chat_id="oc_group",
+            chat_type=ChatType.GROUP,
+            thread_id="root_1",
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="feishu",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="ou_user",
+            chat_id="oc_group",
+            chat_type=ChatType.GROUP,
+            text="/new",
+            mention_text="/new",
+            thread_id="root_1",
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    provider="anthropic",
+                    model="claude-sonnet-4-20250514",
+                    model_pinned=True,
+                )
+            ),
+        )
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                id="session_new",
+                agent="rex",
+            )
+        )
+        monkeypatch.setattr("aegisops.session.session.Session.create", create_mock)
+        update_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr("aegisops.session.session.Session.update", update_mock)
+        profile_upsert = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "aegisops.session.execution_profile.upsert_session_execution_profile",
+            profile_upsert,
+        )
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/new",
+            scope_override="group_topic",
+        )
+
+        assert handled is True
+        dispatcher.binding_service.rebind.assert_awaited_once()
+        assert dispatcher.binding_service.rebind.await_args.kwargs["scope_override"] == "group_topic"
+        create_kwargs = create_mock.await_args.kwargs
+        assert "parent_id" not in create_kwargs or create_kwargs["parent_id"] is None
+        assert create_kwargs["title"] == "[Feishu] oc_group"
+        assert "session_new" in delivered[0]
+        assert "已开始全新对话。" in delivered[0]
+        # Starting a new conversation must not archive the previous session.
+        update_mock.assert_not_awaited()
+        profile_upsert.assert_awaited_once()
+        assert profile_upsert.await_args.args[0] == "session_new"
+        assert profile_upsert.await_args.kwargs["patch"]["entry"] == "channel"
+        assert profile_upsert.await_args.kwargs["patch"]["channel_id"] == "feishu"
+        assert profile_upsert.await_args.kwargs["patch"]["account_id"] == "default"
+        # Rebinding only changes the active IM target; it must preserve the
+        # existing session and its history for later WebUI inspection.
+        update_mock.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_new_command_inherits_auto_model_mode(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="wecom",
+                account_id="default",
+                chat_id="room_1",
+                chat_type=ChatType.DIRECT,
+                thread_id=None,
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/new",
+            mention_text="/new",
+        )
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    category="user",
+                    model_auto=True,
+                    model_pinned=False,
+                    provider=None,
+                    model=None,
+                )
+            ),
+        )
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(id="session_new", agent="rex")
+        )
+        monkeypatch.setattr("aegisops.session.session.Session.create", create_mock)
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.update",
+            AsyncMock(return_value=None),
+        )
+
+        await dispatcher._handle_session_command(
+            binding=binding,
+            msg=msg,
+            callbacks=dispatcher._build_callbacks(binding, msg),
+            scope_override=None,
+            channel_config=ChannelConfig(enabled=True),
+        )
+
+        create_kwargs = create_mock.await_args.kwargs
+        assert create_kwargs["model_auto"] is True
+        assert create_kwargs["model_pinned"] is False
+        assert "provider" not in create_kwargs
+        assert "model" not in create_kwargs
+
+    @pytest.mark.asyncio
+    async def test_new_command_with_args_sends_args_to_new_session(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        append_mock = AsyncMock()
+        run_mock = AsyncMock()
+        monkeypatch.setattr(dispatcher, "_append_user_message", append_mock)
+        monkeypatch.setattr(dispatcher, "_run_agent", run_mock)
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="slack",
+                account_id="T1",
+                chat_id="C123",
+                chat_type=ChatType.CHANNEL,
+                thread_id="171.1",
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="slack",
+            account_id="T1",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            thread_id="171.1",
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="slack",
+            account_id="T1",
+            message_id="171.1",
+            sender_id="U123",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            text="<@UBOT> /new 叫我uuuu",
+            mention_text="/new 叫我uuuu",
+            thread_id="171.1",
+            mentioned=True,
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    provider="anthropic",
+                    model="claude-sonnet-4-20250514",
+                    model_pinned=True,
+                )
+            ),
+        )
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(id="session_new", agent="rex")
+        )
+        monkeypatch.setattr("aegisops.session.session.Session.create", create_mock)
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.update",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "aegisops.channel.inbound.dispatcher._resolve_session_model",
+            AsyncMock(return_value={"providerID": "anthropic", "modelID": "claude"}),
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/new 叫我uuuu",
+            scope_override=None,
+        )
+
+        assert handled is True
+        assert "已开始全新对话。" in delivered[0]
+        assert create_mock.await_args.kwargs["title"] == "[Slack] 叫我uuuu"
+        append_mock.assert_awaited_once()
+        assert append_mock.await_args.args[:3] == ("session_new", "叫我uuuu", msg)
+        assert append_mock.await_args.kwargs["agent"] == "rex"
+        run_mock.assert_awaited_once()
+        assert run_mock.await_args.args[0].session_id == "session_new"
+
+    @pytest.mark.asyncio
+    async def test_reset_alias_matches_new_semantics(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="wecom",
+                account_id="default",
+                chat_id="room_1",
+                chat_type=ChatType.DIRECT,
+                thread_id=None,
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/reset",
+            mention_text="/reset",
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(
+                id="session_new",
+                agent="rex",
+            )
+        )
+
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    provider="anthropic",
+                    model="claude-sonnet-4-20250514",
+                )
+            ),
+        )
+        monkeypatch.setattr("aegisops.session.session.Session.create", create_mock)
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/reset",
+            scope_override=None,
+        )
+
+        assert handled is True
+        create_kwargs = create_mock.await_args.kwargs
+        assert "parent_id" not in create_kwargs or create_kwargs["parent_id"] is None
+        assert create_kwargs["title"] == "[Wecom] DM — user_1"
+        dispatcher._trigger_command_hook.assert_awaited_once()
+        assert dispatcher._trigger_command_hook.await_args.args[0] == "new"
+        assert "已开始全新对话。" in delivered[0]
+
+    @pytest.mark.asyncio
+    async def test_help_command_works_for_non_feishu_channel(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/help",
+            mention_text="/help",
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/help",
+            scope_override=None,
+        )
+
+        assert handled is True
+        assert delivered
+        assert "Available / commands:" in delivered[0]
+
+    @pytest.mark.asyncio
+    async def test_clear_command_clears_channel_session_history(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/clear",
+            mention_text="/clear",
+        )
+
+        delivered: list[str] = []
+        clear_history = AsyncMock(return_value=3)
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "aegisops.server.routes.session._clear_session_history",
+            clear_history,
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/clear",
+            scope_override=None,
+        )
+
+        assert handled is True
+        clear_history.assert_awaited_once_with("session_1")
+        assert delivered == ["已清空当前会话历史，共删除 3 条消息。"]
+
+    @pytest.mark.asyncio
+    async def test_append_user_message_stores_feishu_media_part(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.config.config import ChannelConfig
+
+        created_message = SimpleNamespace(id="message_user_1")
+        store_part = AsyncMock()
+
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "aegisops.channel.builtin.feishu.inbound_media.download_inbound_media",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    filename="diagram.png",
+                    mime="image/png",
+                    url="file:///tmp/diagram.png",
+                    source={"channel": "feishu"},
+                )
+            ),
+        )
+
+        await _persist_inbound_session("session_1")
+        await InboundDispatcher._append_user_message(
+            "session_1",
+            "",
+            InboundMessage(
+                channel_id="feishu",
+                account_id="default",
+                message_id="om_1",
+                sender_id="ou_user",
+                chat_id="oc_group",
+                chat_type=ChatType.GROUP,
+                media_url="lark://image/img_1",
+            ),
+            ChannelConfig(enabled=True, appId="app-id", appSecret="app-secret"),
+        )
+
+        store_part.assert_awaited_once()
+        stored_part = store_part.await_args.args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "diagram.png"
+        assert stored_part.mime == "image/png"
+        assert stored_part.url == "file:///tmp/diagram.png"
+
+    @pytest.mark.asyncio
+    async def test_append_user_message_accepts_windows_file_uri(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.config.config import ChannelConfig
+
+        created_message = SimpleNamespace(id="message_user_1")
+        store_part = AsyncMock()
+        paths_checked: list[str] = []
+
+        def fake_isfile(path: str) -> bool:
+            paths_checked.append(path)
+            return path == "C:/Users/demo/Pictures/channel image.png"
+
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.parts",
+            AsyncMock(return_value=[]),
+        )
+        monkeypatch.setattr("os.path.isfile", fake_isfile)
+
+        await _persist_inbound_session("session_1")
+        await InboundDispatcher._append_user_message(
+            "session_1",
+            "[图片消息]",
+            InboundMessage(
+                channel_id="weixin",
+                account_id="default",
+                message_id="msg_1",
+                sender_id="user_1",
+                chat_type=ChatType.DIRECT,
+                media_url="file:///C:/Users/demo/Pictures/channel%20image.png",
+                media_mime="image/png",
+            ),
+            ChannelConfig(enabled=True),
+        )
+
+        assert paths_checked == ["C:/Users/demo/Pictures/channel image.png"]
+        store_part.assert_awaited_once()
+        stored_part = store_part.await_args.args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "channel image.png"
+        assert stored_part.mime == "image/png"
+
+
+class TestMultimodalInput:
+    @pytest.mark.asyncio
+    async def test_runner_builds_multimodal_user_message_for_image_parts(self, tmp_path, monkeypatch):
+        from aegisops.session.message import FilePart, MessageRole, TextPart
+        from aegisops.session.runner import SessionRunner
+
+        image_path = tmp_path / "sample.png"
+        image_path.write_bytes(b"image-bytes")
+
+        runner = SessionRunner(
+            session=SimpleNamespace(id="session_1"),
+            provider_id="anthropic",
+        )
+
+        monkeypatch.setattr(
+            "aegisops.session.runner.Message.parts_many",
+            AsyncMock(
+                return_value={"message_1": [
+                    TextPart(
+                        sessionID="session_1",
+                        messageID="message_1",
+                        text="请分析这张图",
+                    ),
+                    FilePart(
+                        sessionID="session_1",
+                        messageID="message_1",
+                        mime="image/png",
+                        filename="sample.png",
+                        url=image_path.resolve().as_uri(),
+                    ),
+                ]}
+            ),
+        )
+
+        chat_messages = await runner._to_chat_messages(
+            [SimpleNamespace(id="message_1", role=MessageRole.USER)],
+            [],
+        )
+
+        assert len(chat_messages) == 1
+        assert isinstance(chat_messages[0].content, list)
+        assert chat_messages[0].content[0] == {"type": "text", "text": "请分析这张图"}
+        assert chat_messages[0].content[1]["type"] == "image"
+        assert chat_messages[0].content[1]["mimeType"] == "image/png"
+
+    def test_anthropic_provider_formats_image_blocks(self):
+        from aegisops.provider.provider import ChatMessage
+        from aegisops.provider.sdk.anthropic import AnthropicProvider
+
+        formatted = AnthropicProvider._format_messages_anthropic([
+            ChatMessage(
+                role="user",
+                content=[
+                    {"type": "text", "text": "看图"},
+                    {"type": "image", "mimeType": "image/png", "data": "YWJj"},
+                ],
+            )
+        ])
+
+        assert formatted == [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "看图"},
+                    {
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": "YWJj",
+                        },
+                    },
+                ],
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_runner_extracts_plain_text_file_content(self, tmp_path, monkeypatch):
+        from aegisops.session.message import FilePart, MessageRole
+        from aegisops.session.runner import SessionRunner
+
+        text_path = tmp_path / "notes.txt"
+        text_path.write_text("line 1\nline 2", encoding="utf-8")
+
+        runner = SessionRunner(
+            session=SimpleNamespace(id="session_1"),
+            provider_id="anthropic",
+        )
+
+        monkeypatch.setattr(
+            "aegisops.session.runner.Message.parts_many",
+            AsyncMock(
+                return_value={"message_1": [
+                    FilePart(
+                        sessionID="session_1",
+                        messageID="message_1",
+                        mime="text/plain",
+                        filename="notes.txt",
+                        url=text_path.resolve().as_uri(),
+                    ),
+                ]}
+            ),
+        )
+
+        chat_messages = await runner._to_chat_messages(
+            [SimpleNamespace(id="message_1", role=MessageRole.USER)],
+            [],
+        )
+
+        assert len(chat_messages) == 1
+        assert isinstance(chat_messages[0].content, str)
+        assert "[Attached file: notes.txt]" in chat_messages[0].content
+        assert "line 1" in chat_messages[0].content
+        assert "line 2" in chat_messages[0].content
+
+    @pytest.mark.asyncio
+    async def test_runner_extracts_pdf_content(self, tmp_path, monkeypatch):
+        from aegisops.session.message import FilePart, MessageRole
+        from aegisops.session.runner import SessionRunner
+
+        pdf_path = tmp_path / "report.pdf"
+        pdf_path.write_bytes(b"%PDF-test")
+
+        runner = SessionRunner(
+            session=SimpleNamespace(id="session_1"),
+            provider_id="anthropic",
+        )
+
+        monkeypatch.setattr(
+            "aegisops.session.runner.Message.parts_many",
+            AsyncMock(
+                return_value={"message_1": [
+                    FilePart(
+                        sessionID="session_1",
+                        messageID="message_1",
+                        mime="application/pdf",
+                        filename="report.pdf",
+                        url=pdf_path.resolve().as_uri(),
+                    ),
+                ]}
+            ),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.utils.file_extractor.extract_pdf_text_from_bytes",
+            lambda data, *, max_pages=20, max_chars=12000: "PDF body text",
+        )
+
+        chat_messages = await runner._to_chat_messages(
+            [SimpleNamespace(id="message_1", role=MessageRole.USER)],
+            [],
+        )
+
+        assert len(chat_messages) == 1
+        assert isinstance(chat_messages[0].content, str)
+        assert "[Attached file: report.pdf]" in chat_messages[0].content
+        assert "PDF body text" in chat_messages[0].content
+
+    def test_max_size_eviction(self):
+        from aegisops.channel.inbound.dispatcher import MessageDedup
+        dedup = MessageDedup(ttl_seconds=300, max_size=3)
+        for i in range(4):
+            dedup.is_duplicate(f"msg_{i}")
+        assert dedup.is_duplicate("msg_0") is False
+
+
+# =====================================================================
+# 7. _check_allowlist (now in dispatcher module)
+# =====================================================================
+
+class TestCheckAllowlist:
+    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1", channel_id="test", raw=None):
+        return InboundMessage(
+            channel_id=channel_id, account_id="acc", message_id="m1",
+            sender_id=sender_id, chat_type=chat_type, raw=raw,
+        )
+
+    def test_dm_open_allows_all(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="open")
+        assert _check_allowlist(self._make_msg(), cfg) is True
+
+    def test_dm_allowlist_blocks_unlisted(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["u2"])
+        assert _check_allowlist(self._make_msg(sender_id="u1"), cfg) is False
+
+    def test_dm_allowlist_passes_listed(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["u1"])
+        assert _check_allowlist(self._make_msg(sender_id="u1"), cfg) is True
+
+    def test_slack_dm_allow_from_without_policy_blocks_unlisted(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["U_ALLOWED"])
+        msg = self._make_msg(channel_id="slack", sender_id="U_BLOCKED")
+        assert _check_allowlist(msg, cfg) is False
+
+    def test_slack_dm_allow_from_without_policy_passes_listed(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["U_ALLOWED"])
+        msg = self._make_msg(channel_id="slack", sender_id="U_ALLOWED")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_non_slack_dm_allow_from_without_policy_stays_open(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["u2"])
+        assert _check_allowlist(self._make_msg(channel_id="test", sender_id="u1"), cfg) is True
+
+    def test_dm_allowlist_empty_blocks_all(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=None)
+        assert _check_allowlist(self._make_msg(), cfg) is False
+
+    def test_group_allow_from_blocks(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["u2"])
+        msg = self._make_msg(chat_type=ChatType.GROUP, sender_id="u1")
+        assert _check_allowlist(msg, cfg) is False
+
+    def test_group_no_allow_from_passes(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig()
+        msg = self._make_msg(chat_type=ChatType.GROUP)
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_dm_allowlist_matches_lid_alias(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["25482795991095@lid"])
+        msg = self._make_msg(channel_id="whatsapp", sender_id="25482795991095")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_group_allowlist_matches_lid_alias(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["25482795991095@lid"])
+        msg = self._make_msg(channel_id="whatsapp", chat_type=ChatType.GROUP, sender_id="25482795991095")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_dm_allowlist_matches_sender_aliases(self):
+        from aegisops.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["8618803405095"])
+        msg = self._make_msg(
+            channel_id="whatsapp",
+            sender_id="25482795991095",
+            raw={"senderAliases": ["25482795991095@lid", "8618803405095@s.whatsapp.net"]},
+        )
+        assert _check_allowlist(msg, cfg) is True
+
+
+class TestFeishuGroupContext:
+    def test_group_override_can_disable_top_level_context_cache(self):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+
+        limit = InboundDispatcher._resolve_feishu_context_limit(
+            ChannelConfig(
+                enabled=True,
+                mentionContextMessages=3,
+                groups={"oc_group": {"mentionContextMessages": 0}},
+            ),
+            "oc_group",
+        )
+
+        assert limit == 0
+
+    def test_non_mentioned_group_message_is_cached_when_enabled(self):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+
+        dispatcher = InboundDispatcher()
+        result = dispatcher._cache_feishu_group_context(
+            InboundMessage(
+                channel_id="feishu",
+                account_id="default",
+                message_id="msg_1",
+                sender_id="ou_user",
+                chat_id="oc_group",
+                chat_type=ChatType.GROUP,
+                text="第一条上下文",
+                mentioned=False,
+            ),
+            ChannelConfig(enabled=True, mentionContextMessages=2),
+        )
+
+        assert result is True
+        cached = dispatcher._group_context["feishu:default:oc_group:thread:main"]
+        assert [entry.text for entry in cached] == ["第一条上下文"]
+
+    def test_mentioned_group_message_consumes_cached_context(self):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+
+        dispatcher = InboundDispatcher()
+        cfg = ChannelConfig(enabled=True, mentionContextMessages=2)
+
+        dispatcher._cache_feishu_group_context(
+            InboundMessage(
+                channel_id="feishu",
+                account_id="default",
+                message_id="msg_1",
+                sender_id="ou_a",
+                chat_id="oc_group",
+                chat_type=ChatType.GROUP,
+                text="先看这个日志",
+                mentioned=False,
+            ),
+            cfg,
+        )
+        dispatcher._cache_feishu_group_context(
+            InboundMessage(
+                channel_id="feishu",
+                account_id="default",
+                message_id="msg_2",
+                sender_id="ou_b",
+                chat_id="oc_group",
+                chat_type=ChatType.GROUP,
+                text="还有这个异常",
+                mentioned=False,
+            ),
+            cfg,
+        )
+
+        context = dispatcher._pull_feishu_group_context(
+            InboundMessage(
+                channel_id="feishu",
+                account_id="default",
+                message_id="msg_3",
+                sender_id="ou_c",
+                chat_id="oc_group",
+                chat_type=ChatType.GROUP,
+                text="@bot 帮我总结",
+                mention_text="帮我总结",
+                mentioned=True,
+            ),
+            cfg,
+        )
+
+        assert isinstance(context, str)
+        assert "[Recent group context]" in context
+        assert "- ou_a: 先看这个日志" in context
+        assert "- ou_b: 还有这个异常" in context
+        assert "feishu:default:oc_group:thread:main" not in dispatcher._group_context
+
+
+# =====================================================================
+# 8. ChannelDeliveryCallbacks
+# =====================================================================
+
+class TestChannelDeliveryCallbacks:
+    def test_build_ctx(self):
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc",
+            chat_id="chat_1", thread_id="t1", reply_to_id="r1",
+        )
+        ctx = cb._build_ctx("hello")
+        assert isinstance(ctx, OutboundContext)
+        assert ctx.channel_id == "feishu"
+        assert ctx.to == "chat_1"
+        assert ctx.text == "hello"
+        assert ctx.reply_to_id == "r1"
+        assert ctx.thread_id == "t1"
+
+    async def test_deliver_text_empty_noop(self):
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+        )
+        with patch("aegisops.channel.outbound.deliver.OutboundDelivery.deliver") as mock:
+            await cb.deliver_text("")
+            mock.assert_not_called()
+
+    async def test_on_error_delegates_to_deliver_text(self):
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+        )
+        cb.deliver_text = AsyncMock()
+        await cb.on_error("boom")
+        cb.deliver_text.assert_awaited_once()
+        call_arg = cb.deliver_text.call_args[0][0]
+        assert "boom" in call_arg
+
+    async def test_background_reply_retains_destination_without_duplicate_first_run(self):
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks, InboundDispatcher
+        from aegisops.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="original_account",
+            chat_id="original_chat", thread_id="original_thread",
+            reply_to_id="original_reply", session_id="original_session",
+        )
+        binding = SimpleNamespace(session_id="original_session", agent_id="rex")
+        first_message = SimpleNamespace(id="first_message")
+        background_message = SimpleNamespace(id="background_message")
+        with patch.object(
+            InboundDispatcher, "_run_session_loop", new_callable=AsyncMock,
+            return_value=LoopResult(action="stop", last_message=first_message),
+        ) as run_loop, patch(
+            "aegisops.session.message.Message.parts", new_callable=AsyncMock,
+            side_effect=[
+                [SimpleNamespace(type="text", text="First reply")],
+                [
+                    SimpleNamespace(type="reasoning", text="not a reply"),
+                    SimpleNamespace(type="text", text="Background reply"),
+                    SimpleNamespace(type="text", text="Second paragraph"),
+                ],
+            ],
+        ) as parts, patch(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            new_callable=AsyncMock,
+        ) as deliver:
+            await InboundDispatcher._run_agent(binding, cb)
+            deliver.assert_awaited_once()
+            assert deliver.await_args.args[0].text == "First reply"
+            background_callback = run_loop.await_args.args[1].on_background_result
+
+            # A later binding/result must not redirect the captured IM destination.
+            binding.session_id = "different_session"
+            await background_callback(LoopResult(
+                action="stop", last_message=background_message,
+                metadata={"session_id": "different_session"},
+            ))
+
+        run_loop.assert_awaited_once()
+        assert deliver.await_count == 2
+        ctx = deliver.await_args.args[0]
+        assert ctx.channel_id == "feishu"
+        assert ctx.account_id == "original_account"
+        assert ctx.to == "original_chat"
+        assert ctx.thread_id == "original_thread"
+        assert ctx.reply_to_id == "original_reply"
+        assert ctx.text == "Background reply\nSecond paragraph"
+        assert deliver.await_args.kwargs == {"session_id": "original_session"}
+        parts.assert_awaited_with("background_message", session_id="original_session")
+
+    async def test_streaming_card_preview_keeps_every_delta(self, monkeypatch):
+        """Deltas arrive once each; repeated and overlapping pieces must all reach the card."""
+        from aegisops.channel.builtin.feishu.streaming_card import StreamingCard
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks, InboundDispatcher
+        from aegisops.session.session_loop import LoopResult
+
+        card = StreamingCard(config={}, account_id="acc", chat_id="chat_1")
+        previews = []
+
+        async def start():
+            card._card_id = "card_1"
+            return "card_message"
+
+        async def finalize(final_text):
+            # What the chat showed while streaming, before the final text replaces it.
+            previews.append(card._pending_text if card._pending_text is not None else card._current_text)
+
+        card.start = start
+        card.finalize = finalize
+        card.abort = AsyncMock()
+        card._update_card_content = AsyncMock()
+        deltas = ["x" * 60, "哈", "哈", "ab", "b", "ba"]
+
+        async def run_loop(binding, loop_callbacks):
+            for delta in deltas:
+                await loop_callbacks.runner_callbacks.on_text_delta(delta)
+            return LoopResult(action="stop", last_message=SimpleNamespace(id="message_1"))
+
+        monkeypatch.setattr(InboundDispatcher, "_run_session_loop", run_loop)
+        cb = ChannelDeliveryCallbacks(channel_id="feishu", account_id="acc", chat_id="chat_1", session_id="session_1")
+        msg = InboundMessage(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+            sender_id="sender_1", message_id="reply_1", text="hello",
+        )
+        with patch(
+            "aegisops.channel.builtin.feishu.streaming_card.StreamingCard", return_value=card,
+        ), patch(
+            "aegisops.channel.inbound.dispatcher._extract_message_text",
+            new_callable=AsyncMock, return_value="".join(deltas),
+        ):
+            await InboundDispatcher._run_agent_with_streaming(
+                SimpleNamespace(session_id="session_1", agent_id="rex"), cb, msg, {},
+            )
+
+        assert previews == ["".join(deltas)]
+        card.abort.assert_not_awaited()
+
+    async def test_background_reply_does_not_retain_or_reuse_streaming_callbacks(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks, InboundDispatcher
+        from aegisops.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+            thread_id="thread_1", reply_to_id="reply_1", session_id="session_1",
+        )
+        binding = SimpleNamespace(session_id="session_1", agent_id="rex")
+        msg = InboundMessage(
+            channel_id="feishu", account_id="acc", chat_id="chat_1",
+            sender_id="sender_1", message_id="reply_1", text="hello",
+        )
+        card = MagicMock(is_degraded=False)
+        card.start = AsyncMock(return_value="card_1")
+        card.append = AsyncMock()
+        card.finalize = AsyncMock()
+        card.abort = AsyncMock()
+        retained = {}
+        runs = []
+
+        async def run_loop(binding, loop_callbacks):
+            runs.append(binding.session_id)
+            retained["background"] = loop_callbacks.on_background_result
+            retained["runner_ref"] = weakref.ref(loop_callbacks.runner_callbacks)
+            await loop_callbacks.runner_callbacks.on_text_delta("First reply")
+            return LoopResult(action="stop", last_message=SimpleNamespace(id="first_message"))
+
+        monkeypatch.setattr(InboundDispatcher, "_run_session_loop", run_loop)
+        with patch(
+            "aegisops.channel.builtin.feishu.streaming_card.StreamingCard", return_value=card,
+        ), patch(
+            "aegisops.channel.inbound.dispatcher._extract_message_text",
+            new_callable=AsyncMock, side_effect=["First reply", "Background reply"],
+        ), patch(
+            "aegisops.channel.outbound.deliver.OutboundDelivery.deliver",
+            new_callable=AsyncMock,
+        ) as deliver, patch.object(InboundDispatcher, "_run_agent", new_callable=AsyncMock) as rerun:
+            await InboundDispatcher._run_agent_with_streaming(binding, cb, msg, {})
+            card.finalize.assert_awaited_once_with("First reply")
+            deliver.assert_not_awaited()
+            assert retained["runner_ref"]() is None
+
+            await retained["background"](LoopResult(
+                action="stop", last_message=SimpleNamespace(id="background_message"),
+            ))
+
+        assert runs == ["session_1"]
+        rerun.assert_not_awaited()
+        deliver.assert_awaited_once()
+        assert deliver.await_args.args[0].text == "Background reply"
+        card.append.assert_awaited_once_with("First reply")
+        card.finalize.assert_awaited_once_with("First reply")
+        card.abort.assert_not_awaited()
+
+    @pytest.mark.parametrize("result_kwargs", [
+        {"action": "error"},
+        {"action": "queued"},
+        {"action": "continue"},
+        {"error": "failed"},
+        {"metadata": {"aborted": True}},
+        {"last_message": None},
+        {"last_message": SimpleNamespace(id="failed_message", error={"message": "failed"})},
+    ])
+    async def test_background_reply_filters_non_successful_results(self, result_kwargs):
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks
+        from aegisops.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1", session_id="session_1",
+        )
+        result = LoopResult(**{
+            "action": "stop", "last_message": SimpleNamespace(id="message_1"), **result_kwargs,
+        })
+        with patch(
+            "aegisops.channel.inbound.dispatcher._extract_message_text", new_callable=AsyncMock,
+        ) as extract, patch.object(cb, "deliver_text", new_callable=AsyncMock) as deliver:
+            await cb.to_loop_callbacks().on_background_result(result)
+        extract.assert_not_awaited()
+        deliver.assert_not_awaited()
+
+    @pytest.mark.parametrize("text", [None, "", " \n "])
+    async def test_background_reply_filters_empty_text(self, text):
+        from aegisops.channel.inbound.dispatcher import ChannelDeliveryCallbacks
+        from aegisops.session.session_loop import LoopResult
+
+        cb = ChannelDeliveryCallbacks(
+            channel_id="feishu", account_id="acc", chat_id="chat_1", session_id="session_1",
+        )
+        with patch(
+            "aegisops.channel.inbound.dispatcher._extract_message_text",
+            new_callable=AsyncMock, return_value=text,
+        ), patch.object(cb, "deliver_text", new_callable=AsyncMock) as deliver:
+            await cb.to_loop_callbacks().on_background_result(LoopResult(
+                action="stop", last_message=SimpleNamespace(id="message_1"),
+            ))
+        deliver.assert_not_awaited()
+
+
+# =====================================================================
+# 9. OutboundDelivery with OutboundContext
+# =====================================================================
+
+class TestOutboundDelivery:
+    async def test_deliver_unregistered_channel(self):
+        from aegisops.channel.outbound.deliver import OutboundDelivery
+        ctx = OutboundContext(channel_id="nonexistent", to="u1", text="hi")
+        with patch("aegisops.channel.outbound.deliver.default_registry") as reg:
+            reg.get.return_value = None
+            results = await OutboundDelivery.deliver(ctx)
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "not registered" in results[0].error
+
+    async def test_deliver_single_chunk(self):
+        from aegisops.channel.outbound.deliver import OutboundDelivery
+        plugin = _StubChannel()
+        ctx = OutboundContext(channel_id="stub", to="u1", text="hello")
+
+        with patch("aegisops.channel.outbound.deliver.default_registry") as reg, \
+             patch("aegisops.channel.outbound.deliver.HookPipeline") as hp:
+            reg.get.return_value = plugin
+            mock_hook_ctx = MagicMock()
+            mock_hook_ctx.output = {}
+            hp.run_channel_outbound_before = AsyncMock(return_value=mock_hook_ctx)
+            hp.run_channel_outbound_after = AsyncMock()
+
+            results = await OutboundDelivery.deliver(ctx, session_id="ses_1")
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].message_id == "msg_001"
+        assert len(plugin._sent) == 1
+        assert plugin._sent[0].text == "hello"
+
+    async def test_deliver_hook_blocks_message(self):
+        from aegisops.channel.outbound.deliver import OutboundDelivery
+        plugin = _StubChannel()
+        ctx = OutboundContext(channel_id="stub", to="u1", text="blocked msg")
+
+        with patch("aegisops.channel.outbound.deliver.default_registry") as reg, \
+             patch("aegisops.channel.outbound.deliver.HookPipeline") as hp:
+            reg.get.return_value = plugin
+            mock_hook_ctx = MagicMock()
+            mock_hook_ctx.output = {"blocked": True}
+            hp.run_channel_outbound_before = AsyncMock(return_value=mock_hook_ctx)
+
+            results = await OutboundDelivery.deliver(ctx)
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert len(plugin._sent) == 0
+
+
+# =====================================================================
+# 10. ChannelRegistry
+# =====================================================================
+
+class TestChannelRegistry:
+    def test_register_and_get(self):
+        from aegisops.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        plugin = _StubChannel("test_ch", "Test Channel")
+        reg.register(plugin)
+        assert reg.get("test_ch") is plugin
+
+    def test_register_keeps_existing_channel_instance(self):
+        from aegisops.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        first = _StubChannel("test_ch", "First")
+        replacement = _StubChannel("test_ch", "Replacement")
+
+        reg.register(first)
+        reg.register(replacement)
+
+        assert reg.get("test_ch") is first
+
+    def test_get_by_alias(self):
+        from aegisops.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        plugin = _StubChannel("test_ch", "Test Channel")
+        reg.register(plugin)
+        assert reg.get("s") is plugin
+
+    def test_get_case_insensitive(self):
+        from aegisops.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        plugin = _StubChannel("Feishu", "Feishu")
+        reg.register(plugin)
+        assert reg.get("feishu") is plugin
+        assert reg.get("FEISHU") is plugin
+
+    def test_get_missing_returns_none(self):
+        from aegisops.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        assert reg.get("nonexistent") is None
+
+    def test_list_channels_deduplicated(self):
+        from aegisops.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        p1 = _StubChannel("ch1", "CH1")
+        p2 = _StubChannel("ch2", "CH2")
+        reg.register(p1)
+        reg.register(p2)
+        channels = reg.list_channels()
+        assert len(channels) == 2
+
+    def test_reset_clears_state(self):
+        from aegisops.channel.registry import ChannelRegistry
+        reg = ChannelRegistry()
+        reg.register(_StubChannel())
+        reg.reset()
+        assert reg.get("stub") is None
+
+
+# =====================================================================
+# 11. GatewayManager helpers
+# =====================================================================
+
+class TestGatewayManagerHelpers:
+    async def test_sleep_or_abort_returns_false_on_timeout(self):
+        from aegisops.channel.gateway.manager import GatewayManager
+        event = asyncio.Event()
+        result = await GatewayManager._sleep_or_abort(event, 0.01)
+        assert result is False
+
+    async def test_sleep_or_abort_returns_true_on_abort(self):
+        from aegisops.channel.gateway.manager import GatewayManager
+        event = asyncio.Event()
+        event.set()
+        result = await GatewayManager._sleep_or_abort(event, 10.0)
+        assert result is True
+
+    async def test_mark_connected_sets_flag(self):
+        from aegisops.channel.gateway.manager import GatewayManager
+        plugin = _StubChannel()
+        plugin.reset_status("test")
+        with patch("aegisops.bus.bus.Bus.publish", new_callable=AsyncMock):
+            await GatewayManager._mark_connected(plugin, "test")
+        assert plugin.status.connected is True
+
+    def test_record_error_updates_status(self):
+        from aegisops.channel.gateway.manager import GatewayManager
+        plugin = _StubChannel()
+        plugin.reset_status("test")
+        plugin.mark_connected()
+        GatewayManager._record_error(plugin, "test", RuntimeError("fail"))
+        assert plugin.status.connected is False
+        assert plugin.status.last_error == "fail"
+        assert plugin.status.error_count == 1
+
+    async def test_run_with_reconnect_stops_on_non_retryable_error(self):
+        from aegisops.channel.gateway.manager import GatewayManager
+
+        manager = GatewayManager()
+        plugin = _StubChannel()
+        attempts = 0
+        abort_event = asyncio.Event()
+
+        async def _fail_start(config, on_message, abort_event=None):
+            nonlocal attempts
+            attempts += 1
+            raise NonRetryableChannelError("bad credentials")
+
+        plugin.start = _fail_start  # type: ignore[method-assign]
+
+        await manager._run_with_reconnect(
+            channel_id="stub",
+            plugin=plugin,
+            config={},
+            on_message=AsyncMock(),
+            abort_event=abort_event,
+        )
+
+        assert attempts == 1
+        assert plugin.status.connected is False
+        assert plugin.status.last_error == "bad credentials"
+        assert plugin.status.error_count == 1
+
+    async def test_run_with_reconnect_does_not_pre_mark_self_managed_connection(self):
+        from aegisops.channel.gateway.manager import GatewayManager
+
+        class _SelfManagedChannel(_StubChannel):
+            def capabilities(self) -> ChannelCapabilities:
+                return ChannelCapabilities(
+                    chat_types=[ChatType.DIRECT],
+                    self_managed_connection=True,
+                )
+
+        manager = GatewayManager()
+        plugin = _SelfManagedChannel()
+        started = asyncio.Event()
+        abort_event = asyncio.Event()
+
+        async def _start(config, on_message, abort_event=None):
+            started.set()
+            await asyncio.sleep(0.75)
+            abort_event.set()
+            raise RuntimeError("handshake failed")
+
+        plugin.start = _start  # type: ignore[method-assign]
+
+        await manager._run_with_reconnect(
+            channel_id="stub",
+            plugin=plugin,
+            config={},
+            on_message=AsyncMock(),
+            abort_event=abort_event,
+        )
+
+        assert started.is_set()
+        assert plugin.status.connected is False
+        assert plugin.status.last_error == "handshake failed"
+        assert plugin.status.error_count == 1
+
+    async def test_stop_all_drains_cancelled_tasks(self, monkeypatch):
+        from aegisops.channel.gateway.manager import GatewayManager
+        from aegisops.channel.registry import ChannelRegistry
+
+        registry = ChannelRegistry()
+        plugin = _StubChannel()
+        registry.register(plugin)
+        manager = GatewayManager(registry=registry)
+        cancelled = asyncio.Event()
+
+        async def _blocking() -> None:
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        task = asyncio.create_task(_blocking())
+        await asyncio.sleep(0)
+        manager._running["stub"] = task
+        manager._abort_events["stub"] = asyncio.Event()
+
+        async def _fake_wait(tasks, timeout):
+            return set(), set(tasks)
+
+        monkeypatch.setattr("aegisops.channel.gateway.manager.asyncio.wait", _fake_wait)
+
+        await manager.stop_all()
+
+        assert cancelled.is_set()
+        assert task.done()
+
+
+class TestMediaFilenameHelpers:
+    def test_sanitize_filename_preserves_unicode_names(self):
+        from aegisops.channel.media_filename import sanitize_filename
+
+        assert sanitize_filename("报告 2026.pdf") == "报告 2026.pdf"
+
+    def test_sanitize_filename_removes_path_separators(self):
+        from aegisops.channel.media_filename import sanitize_filename
+
+        assert sanitize_filename("../report.bin") == "report.bin"
+
+
+class TestChannelPolicySecurityConfig:
+    @pytest.mark.asyncio
+    async def test_get_channel_config_force_refresh_bypasses_fresh_cache(
+        self, monkeypatch
+    ):
+        from aegisops.channel.inbound.dispatcher import (
+            InboundDispatcher,
+            _CachedConfig,
+            _channel_config_cache,
+        )
+
+        _channel_config_cache.clear()
+        _channel_config_cache["weixin"] = _CachedConfig(
+            ChannelConfig(permission_mode="auto-allow-all")
+        )
+
+        fake_config = SimpleNamespace(
+            get_channel_config=lambda _channel_id: ChannelConfig(permission_mode="readonly")
+        )
+        monkeypatch.setattr(
+            "aegisops.config.config.Config.get",
+            AsyncMock(return_value=fake_config),
+        )
+
+        cached = await InboundDispatcher._get_channel_config("weixin")
+        refreshed = await InboundDispatcher._get_channel_config(
+            "weixin",
+            force_refresh=True,
+        )
+
+        assert cached.permission_mode == "auto-allow-all"
+        assert refreshed.permission_mode == "readonly"
+        assert _channel_config_cache["weixin"].config.permission_mode == "readonly"
+
+    @pytest.mark.asyncio
+    async def test_session_binding_enforces_visible_agents_for_existing_binding(
+        self, monkeypatch, tmp_path
+    ):
+        from aegisops.channel.inbound.session_binding import (
+            SessionBindingService,
+            close_binding_db,
+        )
+        from aegisops.storage.storage import Storage
+
+        await Storage.init(tmp_path / "channel-binding-visible-agent.db")
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.create",
+            AsyncMock(return_value=SimpleNamespace(id="session_1", status="active")),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(id="session_1", status="active")),
+        )
+        service = SessionBindingService()
+        msg = InboundMessage(
+            channel_id="feishu",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="ou_user",
+            chat_id="ou_user",
+            chat_type=ChatType.DIRECT,
+            text="hello",
+        )
+
+        try:
+            created = await service.resolve_or_create(
+                msg,
+                default_agent="legacy-agent",
+            )
+            assert created.agent_id == "legacy-agent"
+
+            rebound = await service.resolve_or_create(
+                msg,
+                default_agent="security-agent",
+                visible_agents=["security-agent", "assistant-agent"],
+            )
+            assert rebound.agent_id == "security-agent"
+        finally:
+            await close_binding_db()
+
+
+# ------------------------------------------------------------------
+# Per-channel inbound media downloader routing
+# ------------------------------------------------------------------
+
+class TestDownloadChannelMediaRouting:
+    """The dispatcher's per-channel media hook must resolve to the
+    correct downloader and propagate ``config`` through.
+    """
+
+    @pytest.mark.asyncio
+    async def test_dispatch_to_wecom_downloader(self, monkeypatch):
+        from aegisops.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_wecom(msg, config):
+            captured["msg"] = msg
+            captured["config"] = config
+            return SimpleNamespace(
+                filename="x.pdf", mime="application/pdf",
+                url="file:///tmp/x.pdf", source={"channel": "wecom"},
+            )
+
+        async def fail(msg, config):
+            raise AssertionError("wrong downloader invoked")
+
+        # The dispatcher uses dynamic lookup via __import__, so the
+        # test-level patch is on the inbound_media module attribute.
+        monkeypatch.setattr(
+            "aegisops.channel.builtin.wecom.inbound_media.download_inbound_media",
+            fake_wecom,
+        )
+        # In case the dynamic import resolves to a different attribute
+        # (e.g. cached), also patch the inner module binding.
+        import aegisops.channel.builtin.wecom.inbound_media as wecom_inb
+        monkeypatch.setattr(wecom_inb, "download_inbound_media", fake_wecom)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="wecom", account_id="a", message_id="m1",
+                sender_id="u", media_url="https://example.com/x",
+            ),
+            {"botId": "b"},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "wecom"
+        assert captured["config"] == {"botId": "b"}
+
+    @pytest.mark.asyncio
+    async def test_dispatch_to_dingtalk_downloader(self, monkeypatch):
+        from aegisops.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_dingtalk(msg, config):
+            captured["msg"] = msg
+            return SimpleNamespace(
+                filename="y.png", mime="image/png",
+                url="file:///tmp/y.png", source={"channel": "dingtalk"},
+            )
+
+        import aegisops.channel.builtin.dingtalk.inbound_media as dt_inb
+        monkeypatch.setattr(dt_inb, "download_inbound_media", fake_dingtalk)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="dingtalk", account_id="a", message_id="m",
+                sender_id="u", media_url="CODE",
+            ),
+            {},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "dingtalk"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_to_telegram_downloader(self, monkeypatch):
+        from aegisops.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_telegram(msg, config):
+            captured["msg"] = msg
+            return SimpleNamespace(
+                filename="z.jpg", mime="image/jpeg",
+                url="file:///tmp/z.jpg", source={"channel": "telegram"},
+            )
+
+        import aegisops.channel.builtin.telegram.inbound_media as tg_inb
+        monkeypatch.setattr(tg_inb, "download_inbound_media", fake_telegram)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="telegram", account_id="a", message_id="m",
+                sender_id="u", media_url="telegram://photo/ABC",
+            ),
+            {"botToken": "tok"},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "telegram"
+
+    @pytest.mark.asyncio
+    async def test_dispatch_to_slack_downloader(self, monkeypatch):
+        from aegisops.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_slack(msg, config):
+            captured["msg"] = msg
+            captured["config"] = config
+            return SimpleNamespace(
+                filename="slack.png", mime="image/png",
+                url="file:///tmp/slack.png", source={"channel": "slack"},
+            )
+
+        import aegisops.channel.builtin.slack.inbound_media as slack_inb
+        monkeypatch.setattr(slack_inb, "download_inbound_media", fake_slack)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="slack", account_id="T1", message_id="m",
+                sender_id="u", media_url="https://files.slack.com/x",
+            ),
+            {"botToken": "xoxb-test"},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "slack"
+        assert captured["config"] == {"botToken": "xoxb-test"}
+
+    @pytest.mark.asyncio
+    async def test_unknown_channel_returns_none(self):
+        from aegisops.channel.inbound import dispatcher as dispatch_mod
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="unknown", account_id="a", message_id="m",
+                sender_id="u", media_url="https://x/y",
+            ),
+            {},
+        )
+        assert result is None
+
+
+# ------------------------------------------------------------------
+# is_channel_media_placeholder
+# ------------------------------------------------------------------
+
+class TestIsChannelMediaPlaceholder:
+    def test_recognises_channel_placeholders(self):
+        from aegisops.channel.inbound.session_binding import is_channel_media_placeholder
+        assert is_channel_media_placeholder("[图片消息]") is True
+        assert is_channel_media_placeholder("[图片消息: screenshot.png]") is True
+        assert is_channel_media_placeholder("[文件消息]") is True
+        assert is_channel_media_placeholder("[文件消息: report.pdf]") is True
+        assert is_channel_media_placeholder("[Image]") is True
+        assert is_channel_media_placeholder("[Attachment]") is True
+        assert is_channel_media_placeholder("[图片]") is True
+        assert is_channel_media_placeholder("[文件]") is True
+
+    def test_does_not_match_normal_text(self):
+        from aegisops.channel.inbound.session_binding import is_channel_media_placeholder
+        assert is_channel_media_placeholder("hello") is False
+        assert is_channel_media_placeholder("看这个") is False
+        assert is_channel_media_placeholder("") is False
+        assert is_channel_media_placeholder("[文件消息: x] extra text") is False
+        assert is_channel_media_placeholder("[图片]\n请分析") is False
+        assert is_channel_media_placeholder("not a placeholder [文件消息: x]") is False
+
+
+# ------------------------------------------------------------------
+# Full pipeline: synthetic inbound → dispatcher → FilePart (per channel)
+# ------------------------------------------------------------------
+
+class TestAppendUserMessagePerChannel:
+    @pytest.mark.asyncio
+    async def test_captioned_media_text_is_not_replaced(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.session.message import TextPart
+
+        created_message = SimpleNamespace(id="m1")
+        caption = "[图片]: 请识别发票金额"
+        text_part = TextPart(
+            id="part_text",
+            sessionID="s1",
+            messageID="m1",
+            text=caption,
+        )
+        store_part = AsyncMock()
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.parts",
+            AsyncMock(return_value=[text_part]),
+        )
+
+        import aegisops.channel.builtin.telegram.inbound_media as tg_inb
+
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="invoice.jpg",
+                mime="image/jpeg",
+                url="file:///tmp/invoice.jpg",
+                source={"channel": "telegram"},
+            )
+
+        monkeypatch.setattr(tg_inb, "download_inbound_media", fake_download)
+
+        await InboundDispatcher._append_user_message_unchecked(
+            "s1",
+            caption,
+            InboundMessage(
+                channel_id="telegram",
+                account_id="a",
+                message_id="m1",
+                sender_id="u",
+                media_url="telegram://photo/ABC",
+            ),
+            None,
+        )
+
+        assert store_part.await_count == 1
+        assert store_part.await_args.args[2].type == "file"
+
+    @pytest.mark.asyncio
+    async def test_wecom_pipeline_stores_file_part(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+        from aegisops.config.config import ChannelConfig
+
+        created_message = SimpleNamespace(id="m1")
+        store_part = AsyncMock()
+
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.store_part",
+            store_part,
+        )
+
+        import aegisops.channel.builtin.wecom.inbound_media as wecom_inb
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="report.pdf", mime="application/pdf",
+                url="file:///tmp/report.pdf",
+                source={"channel": "wecom"},
+            )
+        monkeypatch.setattr(wecom_inb, "download_inbound_media", fake_download)
+
+        await _persist_inbound_session("s1")
+        await InboundDispatcher._append_user_message(
+            "s1",
+            "[文件消息: report.pdf]",
+            InboundMessage(
+                channel_id="wecom", account_id="a", message_id="m1",
+                sender_id="u", media_url="https://example.com/report.pdf",
+            ),
+            ChannelConfig(enabled=True, botId="b", secret="s"),
+        )
+
+        assert store_part.await_count >= 1
+        stored_part = store_part.await_args_list[0].args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "report.pdf"
+        assert stored_part.mime == "application/pdf"
+        assert stored_part.url == "file:///tmp/report.pdf"
+
+    @pytest.mark.asyncio
+    async def test_dingtalk_pipeline_stores_file_part(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+
+        created_message = SimpleNamespace(id="m1")
+        store_part = AsyncMock()
+
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.store_part",
+            store_part,
+        )
+
+        import aegisops.channel.builtin.dingtalk.inbound_media as dt_inb
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="image.png", mime="image/png",
+                url="file:///tmp/image.png",
+                source={"channel": "dingtalk"},
+            )
+        monkeypatch.setattr(dt_inb, "download_inbound_media", fake_download)
+
+        await _persist_inbound_session("s1")
+        await InboundDispatcher._append_user_message(
+            "s1",
+            "[图片消息]",
+            InboundMessage(
+                channel_id="dingtalk", account_id="a", message_id="m1",
+                sender_id="u", media_url="CODE_123",
+            ),
+            None,
+        )
+
+        assert store_part.await_count >= 1
+        stored_part = store_part.await_args_list[0].args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "image.png"
+
+    @pytest.mark.asyncio
+    async def test_telegram_pipeline_stores_file_part(self, monkeypatch):
+        from aegisops.channel.inbound.dispatcher import InboundDispatcher
+
+        created_message = SimpleNamespace(id="m1")
+        store_part = AsyncMock()
+
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "aegisops.session.message.Message.store_part",
+            store_part,
+        )
+
+        import aegisops.channel.builtin.telegram.inbound_media as tg_inb
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="photo.jpg", mime="image/jpeg",
+                url="file:///tmp/photo.jpg",
+                source={"channel": "telegram"},
+            )
+        monkeypatch.setattr(tg_inb, "download_inbound_media", fake_download)
+
+        await _persist_inbound_session("s1")
+        await InboundDispatcher._append_user_message(
+            "s1",
+            "[图片]",
+            InboundMessage(
+                channel_id="telegram", account_id="a", message_id="m1",
+                sender_id="u", media_url="telegram://photo/ABC",
+            ),
+            None,
+        )
+
+        assert store_part.await_count >= 1
+        stored_part = store_part.await_args_list[0].args[2]
+        assert stored_part.type == "file"
+        assert stored_part.filename == "photo.jpg"

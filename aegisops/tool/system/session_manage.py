@@ -1,0 +1,555 @@
+"""
+Session management tools — 查询、创建、更新、删除 AegisOps Session 的元数据。
+
+提供统一工具：
+- session_manage(action=...) : list/get/create/update/delete/archive
+"""
+
+from __future__ import annotations
+
+from typing import Any, Optional
+
+from aegisops.tool.registry import (
+    ParameterType,
+    ToolCategory,
+    ToolContext,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
+)
+from aegisops.utils.log import Log
+
+log = Log.create(service="tool.session_manage")
+
+
+SESSION_MANAGE_ACTIONS = ["list", "get", "create", "update", "delete", "archive"]
+
+SESSION_MANAGE_DESCRIPTION = """\
+Manage AegisOps Session metadata.
+
+Use this tool when the user wants to list, inspect, create, rename, update,
+delete, archive, or restore a AegisOps session. Also use it when the user asks to
+change/switch/update the model or provider used by a session.
+
+Use `action` to choose the operation:
+- list: list sessions; filter or paginate with project_id/status/category/limit/offset.
+  If the target session_id is unknown, call list first.
+- get: get one session; requires session_id.
+- create: create a session; supports title/project_id/directory/agent/parent_id.
+- update: update session metadata; requires session_id. Supports title, agent,
+  model, provider, and memory_enabled. For requests like "change this session to
+  gpt-5" or "update the session model", use action=update with model, and set
+  provider too when the user specifies one.
+- delete: permanently delete a session, its child sessions, messages, and
+  history; requires session_id and confirmation. This cannot be restored.
+- archive: archive or restore a session; requires session_id. Set archive=false
+  to restore an archived session to active.
+"""
+
+
+SESSION_MANAGE_PARAMETERS = [
+    ToolParameter(
+        name="action",
+        type=ParameterType.STRING,
+        required=True,
+        enum=SESSION_MANAGE_ACTIONS,
+        description=(
+            "Session operation: list/get/create/update/delete/archive. Use update "
+            "to change a session's title, agent, model, provider, or memory setting."
+        ),
+    ),
+    ToolParameter(
+        name="session_id",
+        type=ParameterType.STRING,
+        required=False,
+        description="Session ID；get/update/delete/archive 需要",
+    ),
+    ToolParameter(
+        name="project_id",
+        type=ParameterType.STRING,
+        required=False,
+        description="项目 ID；list 时用于过滤，create 时用于归属项目（默认 default）",
+    ),
+    ToolParameter(
+        name="status",
+        type=ParameterType.STRING,
+        required=False,
+        enum=["active", "archived"],
+        description="list 过滤状态：active 或 archived",
+    ),
+    ToolParameter(
+        name="category",
+        type=ParameterType.STRING,
+        required=False,
+        enum=["user", "task"],
+        description="list 过滤分类：user（人工会话）或 task（任务触发会话）",
+    ),
+    ToolParameter(
+        name="limit",
+        type=ParameterType.INTEGER,
+        required=False,
+        description="list 最多返回条数（默认 50）",
+    ),
+    ToolParameter(
+        name="offset",
+        type=ParameterType.INTEGER,
+        required=False,
+        description="list 跳过前 N 条（默认 0）",
+    ),
+    ToolParameter(
+        name="title",
+        type=ParameterType.STRING,
+        required=False,
+        description="create/update 的 session 标题",
+    ),
+    ToolParameter(
+        name="directory",
+        type=ParameterType.STRING,
+        required=False,
+        description="create 的工作目录路径（默认当前目录）",
+    ),
+    ToolParameter(
+        name="agent",
+        type=ParameterType.STRING,
+        required=False,
+        description="Agent type for create/update.",
+    ),
+    ToolParameter(
+        name="parent_id",
+        type=ParameterType.STRING,
+        required=False,
+        description="create 子 session 时使用的父 session ID",
+    ),
+    ToolParameter(
+        name="model",
+        type=ParameterType.STRING,
+        required=False,
+        description=(
+            "Model ID to set during update, for example when the user asks to "
+            "change/switch/update the model used by a session."
+        ),
+    ),
+    ToolParameter(
+        name="provider",
+        type=ParameterType.STRING,
+        required=False,
+        description=(
+            "Provider ID to set during update, for example openai/anthropic/local. "
+            "Use with model when the target model's provider is specified or known."
+        ),
+    ),
+    ToolParameter(
+        name="memory_enabled",
+        type=ParameterType.BOOLEAN,
+        required=False,
+        description="update 时是否启用 memory 系统",
+    ),
+    ToolParameter(
+        name="archive",
+        type=ParameterType.BOOLEAN,
+        required=False,
+        default=True,
+        description="archive action: true=归档（默认），false=取消归档",
+    ),
+]
+
+
+@ToolRegistry.register_function(
+    name="session_manage",
+    group="系统管理",
+    description=SESSION_MANAGE_DESCRIPTION,
+    category=ToolCategory.SYSTEM,
+    parameters=SESSION_MANAGE_PARAMETERS,
+    native=True,
+)
+async def session_manage(
+    ctx: ToolContext,
+    action: str,
+    session_id: Optional[str] = None,
+    project_id: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+    title: Optional[str] = None,
+    directory: Optional[str] = None,
+    agent: Optional[str] = None,
+    parent_id: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    memory_enabled: Optional[bool] = None,
+    archive: Optional[bool] = True,
+) -> ToolResult:
+    """Unified session management tool."""
+    if action == "list":
+        return await _session_list_impl(
+            ctx,
+            project_id=project_id,
+            status=status,
+            category=category,
+            limit=limit,
+            offset=offset,
+        )
+    if action == "get":
+        if not session_id:
+            return ToolResult(success=False, error="action=get 需要 session_id")
+        return await _session_get_impl(ctx, session_id=session_id)
+    if action == "create":
+        return await _session_create_impl(
+            ctx,
+            title=title,
+            project_id=project_id,
+            directory=directory,
+            agent=agent,
+            parent_id=parent_id,
+        )
+    if action == "update":
+        if not session_id:
+            return ToolResult(success=False, error="action=update 需要 session_id")
+        return await _session_update_impl(
+            ctx,
+            session_id=session_id,
+            title=title,
+            agent=agent,
+            model=model,
+            provider=provider,
+            memory_enabled=memory_enabled,
+        )
+    if action == "delete":
+        if not session_id:
+            return ToolResult(success=False, error="action=delete 需要 session_id")
+        if session_id == getattr(ctx, "session_id", None):
+            return ToolResult(
+                success=False,
+                error="不能在当前会话的工具调用尚未结束时删除自身，请从工作台删除该会话",
+            )
+        await ctx.ask(
+            permission="session_manage",
+            patterns=[f"delete:{session_id}"],
+            always=[],
+            metadata={
+                "action": "permanent_delete",
+                "session_id": session_id,
+                "destructive": True,
+            },
+        )
+        return await _session_delete_impl(ctx, session_id=session_id)
+    if action == "archive":
+        if not session_id:
+            return ToolResult(success=False, error="action=archive 需要 session_id")
+        return await _session_archive_impl(ctx, session_id=session_id, archive=archive)
+
+    return ToolResult(
+        success=False,
+        error=f"未知 action: {action!r}. 支持: {', '.join(SESSION_MANAGE_ACTIONS)}",
+    )
+
+
+def _session_to_dict(session, bindings: list | None = None) -> dict[str, Any]:
+    """Serialize SessionInfo to a readable dict.
+
+    If ``bindings`` is provided (list of SessionBinding for this session),
+    a ``channels`` field is appended with the IM platform details.
+    """
+    d: dict[str, Any] = {
+        "id": session.id,
+        "slug": session.slug,
+        "project_id": session.project_id,
+        "title": session.title,
+        "status": session.status,
+        "category": session.category,
+        "agent": session.agent,
+        "model": session.model,
+        "provider": session.provider,
+        "parent_id": session.parent_id,
+        "directory": session.directory,
+        "memory_enabled": session.memory_enabled,
+        "time": {
+            "created": session.time.created,
+            "updated": session.time.updated,
+            "archived": session.time.archived,
+        },
+        "summary": session.summary.model_dump() if session.summary else None,
+    }
+    if bindings is not None:
+        d["channels"] = [
+            {
+                "channel_id": b.channel_id,
+                "chat_type": b.chat_type.value if b.chat_type else None,
+                "chat_id": b.chat_id,
+                "account_id": b.account_id,
+            }
+            for b in bindings
+        ]
+    return d
+
+
+async def _enrich_with_channels(sessions_dict: list[dict]) -> list[dict]:
+    """Attach channel binding info to a list of serialized session dicts.
+
+    Best-effort: if the binding table is unavailable, sessions are returned as-is
+    with an empty ``channels`` list.
+    """
+    try:
+        from aegisops.channel.inbound.session_binding import SessionBindingService
+        svc = SessionBindingService()
+        all_bindings = await svc.list_bindings()
+        index: dict[str, list] = {}
+        for b in all_bindings:
+            index.setdefault(b.session_id, []).append(b)
+        for s in sessions_dict:
+            s["channels"] = [
+                {
+                    "channel_id": b.channel_id,
+                    "chat_type": b.chat_type.value if b.chat_type else None,
+                    "chat_id": b.chat_id,
+                    "account_id": b.account_id,
+                }
+                for b in index.get(s["id"], [])
+            ]
+    except Exception as e:
+        log.debug("session_manage.enrich_channels.error", {"error": str(e)})
+        for s in sessions_dict:
+            s.setdefault("channels", [])
+    return sessions_dict
+
+
+# ---------------------------------------------------------------------------
+# list
+# ---------------------------------------------------------------------------
+
+async def _session_list_impl(
+    ctx: ToolContext,
+    project_id: Optional[str] = None,
+    status: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+    offset: Optional[int] = None,
+) -> ToolResult:
+    from aegisops.session.policy import SessionPolicy
+    from aegisops.session.session import SessionInfo
+    from aegisops.storage.storage import Storage
+
+    off = offset or 0
+    lim = limit or 50
+    if off < 0 or lim <= 0:
+        return ToolResult(success=False, error="offset 必须 ≥ 0 且 limit 必须 > 0")
+
+    # 直接扫描 Storage，支持 active/archived 双状态，且 project_id 过滤始终生效；
+    # 可见性与 Session.get_by_id 一致（当前用户看不到别人的会话）
+    try:
+        prefix = f"session:{project_id}:" if project_id else "session:"
+        keys = await Storage.list_keys(prefix=prefix)
+        sessions = []
+        for key in keys:
+            try:
+                s = await Storage.get(key, SessionInfo)
+                if s and s.status != "deleted" and SessionPolicy.can_read(s):
+                    sessions.append(s)
+            except Exception:
+                continue
+        sessions.sort(key=lambda s: s.time.updated, reverse=True)
+    except Exception as e:
+        return ToolResult(success=False, error=f"查询 session 列表失败: {e}")
+
+    if status:
+        sessions = [s for s in sessions if s.status == status]
+
+    if category:
+        sessions = [s for s in sessions if s.category == category]
+
+    total = len(sessions)
+    page = sessions[off: off + lim]
+
+    sessions_dict = await _enrich_with_channels([_session_to_dict(s) for s in page])
+
+    return ToolResult(
+        success=True,
+        output={
+            "total": total,
+            "offset": off,
+            "limit": lim,
+            "sessions": sessions_dict,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# get
+# ---------------------------------------------------------------------------
+
+async def _session_get_impl(ctx: ToolContext, session_id: str) -> ToolResult:
+    from aegisops.session.session import Session
+
+    session = await Session.get_by_id(session_id)
+    if not session:
+        return ToolResult(success=False, error=f"未找到 session '{session_id}'")
+
+    result = _session_to_dict(session)
+    enriched = await _enrich_with_channels([result])
+    return ToolResult(success=True, output=enriched[0])
+
+
+# ---------------------------------------------------------------------------
+# create
+# ---------------------------------------------------------------------------
+
+async def _session_create_impl(
+    ctx: ToolContext,
+    title: Optional[str] = None,
+    project_id: Optional[str] = None,
+    directory: Optional[str] = None,
+    agent: Optional[str] = None,
+    parent_id: Optional[str] = None,
+) -> ToolResult:
+    import os
+    from aegisops.session.session import Session
+
+    try:
+        session = await Session.create(
+            project_id=project_id or "default",
+            directory=directory or os.getcwd(),
+            title=title,
+            parent_id=parent_id,
+            **({"agent": agent} if agent else {}),
+        )
+    except Exception as e:
+        return ToolResult(success=False, error=f"创建 session 失败: {e}")
+
+    return ToolResult(
+        success=True,
+        output={
+            "message": f"Session 已创建",
+            "session": _session_to_dict(session),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# update
+# ---------------------------------------------------------------------------
+
+async def _session_update_impl(
+    ctx: ToolContext,
+    session_id: str,
+    title: Optional[str] = None,
+    agent: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    memory_enabled: Optional[bool] = None,
+) -> ToolResult:
+    from aegisops.session.session import Session
+
+    session = await Session.get_by_id(session_id)
+    if not session:
+        return ToolResult(success=False, error=f"未找到 session '{session_id}'")
+
+    updates: dict[str, Any] = {}
+    if title is not None:
+        updates["title"] = title
+    if agent is not None:
+        updates["agent"] = agent
+    if model is not None:
+        updates["model"] = model
+    if provider is not None:
+        updates["provider"] = provider
+    if memory_enabled is not None:
+        updates["memory_enabled"] = memory_enabled
+
+    if not updates:
+        return ToolResult(success=False, error="未提供任何要更新的字段")
+
+    try:
+        updated = await Session.update(session.project_id, session_id, **updates)
+    except Exception as e:
+        return ToolResult(success=False, error=f"更新 session 失败: {e}")
+
+    if not updated:
+        return ToolResult(success=False, error="更新失败，session 可能已被删除")
+
+    return ToolResult(
+        success=True,
+        output={
+            "message": "Session 已更新",
+            "session": _session_to_dict(updated),
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# delete
+# ---------------------------------------------------------------------------
+
+async def _session_delete_impl(ctx: ToolContext, session_id: str) -> ToolResult:
+    from aegisops.session.session import Session
+
+    session = await Session.get_by_id(session_id)
+    if not session:
+        return ToolResult(success=False, error=f"未找到 session '{session_id}'")
+
+    try:
+        ok = await Session.delete(session.project_id, session_id)
+    except Exception as e:
+        return ToolResult(success=False, error=f"删除 session 失败: {e}")
+
+    if not ok:
+        return ToolResult(success=False, error="删除失败")
+
+    return ToolResult(
+        success=True,
+        output=f"Session '{session_id}'（{session.title}）已永久删除",
+    )
+
+
+# ---------------------------------------------------------------------------
+# archive
+# ---------------------------------------------------------------------------
+
+async def _session_archive_impl(
+    ctx: ToolContext,
+    session_id: str,
+    archive: Optional[bool] = True,
+) -> ToolResult:
+    from aegisops.session.session import Session
+
+    session = await Session.get_by_id_unfiltered(session_id)
+
+    if not session:
+        return ToolResult(success=False, error=f"未找到 session '{session_id}'")
+
+    if archive is not False and session_id == ctx.session_id:
+        return ToolResult(
+            success=False,
+            error="不能在当前会话的工具调用尚未结束时归档自身，请从工作台归档该会话",
+        )
+    if archive is False and getattr(session, "parent_id", None) is not None:
+        return ToolResult(
+            success=False,
+            error="只能从根任务恢复完整任务树",
+        )
+
+    try:
+        if archive is False:
+            owner_user_id = getattr(session, "owner_user_id", None)
+            ok = await Session.restore(
+                session.project_id,
+                session_id,
+                project_owner_id=owner_user_id,
+            )
+            action = "取消归档"
+        else:
+            ok = await Session.archive(session.project_id, session_id)
+            action = "归档"
+    except Exception as e:
+        return ToolResult(success=False, error=f"操作失败: {e}")
+
+    if not ok:
+        return ToolResult(
+            success=False,
+            error=f"操作失败，session 当前状态为 '{session.status}'，无法执行{action}",
+        )
+
+    return ToolResult(
+        success=True,
+        output=f"Session '{session_id}'（{session.title}）已{action}",
+    )

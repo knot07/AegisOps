@@ -1,0 +1,225 @@
+"""
+LSP Tool - Language Server Protocol operations
+
+Provides LSP operations for code intelligence:
+- Go to definition
+- Find references
+- Hover information
+- Document/workspace symbols
+- Call hierarchy
+"""
+
+import os
+import json
+from typing import Optional, List, Dict, Any
+
+from aegisops.tool.registry import (
+    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
+)
+from aegisops.tool.path_utils import resolve_tool_path
+from aegisops.utils.log import Log
+
+
+log = Log.create(service="tool.lsp")
+
+
+# Supported LSP operations
+LSP_OPERATIONS = [
+    "goToDefinition",
+    "findReferences",
+    "hover",
+    "documentSymbol",
+    "workspaceSymbol",
+    "goToImplementation",
+    "prepareCallHierarchy",
+    "incomingCalls",
+    "outgoingCalls",
+]
+
+
+DESCRIPTION = """Perform LSP (Language Server Protocol) operations for code intelligence.
+
+Supported operations:
+- goToDefinition: Jump to where a symbol is defined
+- findReferences: Find all usages of a symbol
+- hover: Get type/documentation info for a symbol
+- documentSymbol: List all symbols in a file
+- workspaceSymbol: Search symbols across workspace
+- goToImplementation: Find implementations of an interface
+- prepareCallHierarchy: Get call hierarchy item at position
+- incomingCalls: Find callers of a function
+- outgoingCalls: Find functions called by a function
+
+Parameters:
+- operation: The LSP operation to perform
+- filePath: Path to the file
+- line: Line number (1-based)
+- character: Character offset (1-based)"""
+
+
+@ToolRegistry.register_function(
+    name="lsp",
+    group="代码分析",
+    description=DESCRIPTION,
+    category=ToolCategory.CODE,
+    native=False,
+    parameters=[
+        ToolParameter(
+            name="operation",
+            type=ParameterType.STRING,
+            description="The LSP operation to perform",
+            required=True,
+            enum=LSP_OPERATIONS
+        ),
+        ToolParameter(
+            name="filePath",
+            type=ParameterType.STRING,
+            description="The absolute or relative path to the file",
+            required=True
+        ),
+        ToolParameter(
+            name="line",
+            type=ParameterType.INTEGER,
+            description="The line number (1-based, as shown in editors)",
+            required=True
+        ),
+        ToolParameter(
+            name="character",
+            type=ParameterType.INTEGER,
+            description="The character offset (1-based, as shown in editors)",
+            required=True
+        ),
+    ]
+)
+async def lsp_tool(
+    ctx: ToolContext,
+    operation: str,
+    filePath: str,
+    line: int,
+    character: int,
+) -> ToolResult:
+    """
+    Perform an LSP operation
+    
+    Args:
+        ctx: Tool context
+        operation: LSP operation to perform
+        filePath: Target file path
+        line: Line number (1-based)
+        character: Character offset (1-based)
+        
+    Returns:
+        ToolResult with LSP results
+    """
+    # Validate operation
+    if operation not in LSP_OPERATIONS:
+        return ToolResult(
+            success=False,
+            error=f"Invalid operation: {operation}. Supported: {', '.join(LSP_OPERATIONS)}"
+        )
+    
+    try:
+        resolution = await resolve_tool_path(ctx, filePath)
+    except ValueError as exc:
+        return ToolResult(success=False, error=str(exc))
+    filepath = resolution.resolved_path
+    
+    # Check file exists
+    if not os.path.exists(filepath):
+        return ToolResult(
+            success=False,
+            error=f"File not found: {filepath}"
+        )
+    
+    # Request permission
+    await ctx.ask(
+        permission="lsp",
+        patterns=[resolution.permission_pattern],
+        always=["*"],
+        metadata={}
+    )
+    
+    title = f"{operation} {resolution.display_path}:{line}:{character}"
+
+    # Positions are 1-based in the tool contract; refuse 0 instead of
+    # silently sending -1 to the language server.
+    if line < 1 or character < 1:
+        return ToolResult(
+            success=False,
+            error=f"line and character are 1-based and must be >= 1 (got line={line}, character={character})",
+            title=title,
+        )
+
+    # Convert to 0-based indices for LSP
+    position = {
+        "line": line - 1,
+        "character": character - 1
+    }
+
+    try:
+        # ``aegisops.lsp`` exposes module-level coroutines (init/hover/definition/...),
+        # not an ``LSP`` class; import the package itself.
+        from aegisops import lsp as lsp_module
+
+        await lsp_module.init()
+
+        # Check if LSP is available for this file
+        has_client = await lsp_module.has_clients(filepath)
+        if not has_client:
+            return ToolResult(
+                success=False,
+                error="No LSP server available for this file type.",
+                title=title,
+            )
+
+        # Touch file to ensure LSP has it open
+        await lsp_module.touch_file(filepath)
+
+        # Execute operation
+        result: Any = []
+
+        if operation == "goToDefinition":
+            result = await lsp_module.definition(filepath, position["line"], position["character"])
+        elif operation == "findReferences":
+            result = await lsp_module.references(filepath, position["line"], position["character"])
+        elif operation == "hover":
+            result = await lsp_module.hover(filepath, position["line"], position["character"])
+        elif operation == "documentSymbol":
+            result = await lsp_module.document_symbol(filepath)
+        elif operation == "workspaceSymbol":
+            result = await lsp_module.workspace_symbol("")
+        else:
+            # goToImplementation / call hierarchy are not offered by aegisops.lsp yet
+            return ToolResult(
+                success=False,
+                error=f"Operation {operation} is not supported by the LSP subsystem yet.",
+                title=title,
+            )
+
+        # Format output
+        if not result:
+            output = f"No results found for {operation}"
+        else:
+            output = json.dumps(result, indent=2)
+
+        return ToolResult(
+            success=True,
+            output=output,
+            title=title,
+            metadata={"result": result}
+        )
+
+    except ImportError:
+        # LSP module not available, return placeholder
+        return ToolResult(
+            success=False,
+            error="LSP module not initialized. Start the LSP subsystem first.",
+            title=title
+        )
+    except Exception as e:
+        log.error("lsp.error", {"operation": operation, "error": str(e)})
+        return ToolResult(
+            success=False,
+            error=f"LSP operation failed: {str(e)}",
+            title=title
+        )

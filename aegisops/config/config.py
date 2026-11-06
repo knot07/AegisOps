@@ -1,0 +1,2068 @@
+"""
+Configuration management
+
+Provides complete configuration system with TypeScript implementation compatibility.
+Ensures compatibility between Python and TypeScript services.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import json
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union, Literal
+from enum import Enum
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
+from pydantic_settings import BaseSettings
+
+# ==================== Permission System ====================
+
+class PermissionAction(str, Enum):
+    """Permission action types"""
+    ASK = "ask"
+    ALLOW = "allow"
+    DENY = "deny"
+
+
+# Permission can be either a simple action or a nested dict of rules
+PermissionRule = Union[PermissionAction, Dict[str, Union[PermissionAction, Dict[str, PermissionAction]]]]
+
+
+_LEGACY_TODO_TOOL_NAMES = ("todowrite", "todoread")
+_LEGACY_PERMISSION_TOOL_NAMES = {
+    **{name: "todo" for name in _LEGACY_TODO_TOOL_NAMES},
+    "task": "delegate_task",
+}
+
+
+def _canonical_permission_tool_name(tool: str) -> str:
+    return _LEGACY_PERMISSION_TOOL_NAMES.get(tool, tool)
+
+
+def _merge_permission_action(existing: Any, incoming: Any) -> Any:
+    """Merge duplicate legacy permission names conservatively."""
+    if isinstance(existing, dict) and not isinstance(incoming, dict):
+        incoming = {"*": incoming}
+    elif not isinstance(existing, dict) and isinstance(incoming, dict):
+        existing = {"*": existing}
+
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        merged = dict(existing)
+        for pattern, action in incoming.items():
+            if pattern in merged:
+                merged[pattern] = _merge_permission_action(
+                    merged[pattern], action,
+                )
+            else:
+                merged[pattern] = action
+        return merged
+
+    priority = {"allow": 0, "ask": 1, "deny": 2}
+    existing_value = getattr(existing, "value", existing)
+    incoming_value = getattr(incoming, "value", incoming)
+    if priority.get(incoming_value, -1) > priority.get(existing_value, -1):
+        return incoming
+    return existing
+
+
+def _assign_permission(permission_dict: Dict[str, Any], tool: str, action: Any) -> None:
+    canonical_tool = _canonical_permission_tool_name(tool)
+    if canonical_tool in permission_dict:
+        permission_dict[canonical_tool] = _merge_permission_action(
+            permission_dict[canonical_tool],
+            action,
+        )
+        return
+    permission_dict[canonical_tool] = action
+
+
+def _canonicalize_permission_dict(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize legacy permission aliases within one config layer."""
+    canonical: Dict[str, Any] = {}
+    for tool, action in config.items():
+        _assign_permission(canonical, tool, action)
+    return canonical
+
+
+def _merge_permission_layers(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge normalized permission layers while preserving source priority."""
+    merged = dict(target)
+    for tool, source_action in source.items():
+        if tool not in merged:
+            merged[tool] = source_action
+            continue
+        target_action = merged[tool]
+        if isinstance(target_action, dict) and isinstance(source_action, dict):
+            merged[tool] = {**target_action, **source_action}
+        elif not isinstance(target_action, dict) and isinstance(source_action, dict):
+            merged[tool] = {"*": target_action, **source_action}
+        else:
+            merged[tool] = source_action
+    return merged
+
+
+class PermissionConfig(BaseModel):
+    """Permission configuration (simplified for Phase 1-3)"""
+    model_config = {"extra": "allow"}  # Allow additional fields
+    
+    read: Optional[PermissionRule] = None
+    edit: Optional[PermissionRule] = None
+    glob: Optional[PermissionRule] = None
+    grep: Optional[PermissionRule] = None
+    bash: Optional[PermissionRule] = None
+    task: Optional[PermissionRule] = None
+    external_directory: Optional[PermissionRule] = None
+    todo: Optional[PermissionAction] = None
+    question: Optional[PermissionAction] = None
+    webfetch: Optional[PermissionAction] = None
+    websearch: Optional[PermissionAction] = None
+    lsp: Optional[PermissionRule] = None
+    doom_loop: Optional[PermissionAction] = None
+    delegate_task: Optional[PermissionRule] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_permissions(cls, data):
+        if not isinstance(data, dict):
+            return data
+        migrated = dict(data)
+        for legacy_name in _LEGACY_PERMISSION_TOOL_NAMES:
+            if legacy_name in migrated:
+                _assign_permission(migrated, legacy_name, migrated.pop(legacy_name))
+        return migrated
+
+
+def _preserve_group_clear(value: Any) -> Any:
+    """An explicit null group must survive exclude-none config serialization."""
+    return "" if value is None else value
+
+
+# ==================== Agent Configuration ====================
+
+class AgentConfig(BaseModel):
+    """
+    Agent configuration
+    
+    Matches TypeScript Agent schema exactly.
+    """
+    model_config = {"extra": "allow", "populate_by_name": True}  # Allow unknown fields and populate by alias
+    
+    name: Optional[str] = None
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
+    model: Optional[str] = None
+    temperature: Optional[float] = None
+    top_p: Optional[float] = None
+    prompt: Optional[str] = None
+    prompt_append: Optional[str] = Field(None, alias="promptAppend")
+    description: Optional[str] = Field(None, description="Description of when to use the agent")
+    description_cn: Optional[str] = Field(
+        None,
+        description="Chinese UI description; English description is used for delegation",
+    )
+    mode: Optional[Literal["subagent", "primary", "all"]] = None
+    hidden: Optional[bool] = Field(None, description="Hide from autocomplete (subagent only)")
+    color: Optional[str] = Field(None, pattern=r"^#[0-9a-fA-F]{6}$")
+    steps: Optional[int] = Field(None, gt=0, description="Max agentic iterations")
+    max_steps: Optional[int] = Field(None, gt=0, description="@deprecated Use 'steps'", alias="maxSteps")
+    options: Dict[str, Any] = Field(default_factory=dict)
+    permission: Optional[Union[PermissionConfig, Dict[str, Any]]] = None
+    disable: Optional[bool] = None
+    delegatable: Optional[bool] = Field(None, description="Whether this agent can be called via delegate_task")
+    strategy: Optional[Literal["react", "plan_and_execute", "read_only", "explore"]] = None
+    tools: Optional[Dict[str, bool]] = Field(None, description="@deprecated Use 'permission'")
+    skills: Optional[List[str]] = Field(None, description="Trusted skills loaded for this agent")
+    prompt_profile: Optional[Literal["standard", "isolated"]] = Field(
+        None,
+        alias="promptProfile",
+    )
+
+    @field_validator("permission", mode="before")
+    @classmethod
+    def normalize_permission_aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _canonicalize_permission_dict(value)
+        return value
+    
+    @model_validator(mode='after')
+    def process_agent(self):
+        """Post-processing like TypeScript transform"""
+        # Convert legacy maxSteps to steps
+        if self.steps is None and self.max_steps is not None:
+            self.steps = self.max_steps
+        
+        # Convert legacy tools to permission
+        if self.tools:
+            if self.permission is None:
+                self.permission = {}
+            
+            permission_dict = self.permission if isinstance(self.permission, dict) else {}
+            
+            for tool, enabled in self.tools.items():
+                action = PermissionAction.ALLOW if enabled else PermissionAction.DENY
+                # Map write/edit/patch to edit
+                if tool in ["write", "edit", "patch"]:
+                    _assign_permission(permission_dict, "edit", action)
+                else:
+                    _assign_permission(permission_dict, tool, action)
+            
+            self.permission = permission_dict
+        
+        return self
+
+
+# ==================== Command Configuration ====================
+
+class CommandConfig(BaseModel):
+    """Command configuration"""
+    name: Optional[str] = None
+    template: str
+    description: Optional[str] = None
+    agent: Optional[str] = None
+    model: Optional[str] = None
+
+
+# ==================== Provider Configuration ====================
+
+class ProviderOptionsConfig(BaseModel):
+    """Provider options"""
+    model_config = {"extra": "allow", "populate_by_name": True}
+    
+    api_key: Optional[str] = Field(None, alias="apiKey")
+    base_url: Optional[str] = Field(None, alias="baseURL")
+    enterprise_url: Optional[str] = Field(None, alias="enterpriseUrl")
+    set_cache_key: Optional[bool] = Field(None, alias="setCacheKey")
+    timeout: Optional[Union[int, Literal[False]]] = None
+    max_concurrent_requests: Optional[int] = Field(
+        None,
+        alias="maxConcurrentRequests",
+        ge=0,
+        description=(
+            "Cap on concurrent model requests to this provider across the "
+            "whole process (sessions, subagents, tasks and workflow llm nodes "
+            "share it). A response that only fans out to subagents stays "
+            "inside it; once it runs an inline tool it gives its slot up for "
+            "the rest of that response, so generating requests can exceed the "
+            "cap until that stream ends. Title, compaction, goal and memory "
+            "calls bypass it entirely. 0 disables the cap. Overrides "
+            "concurrency.maxConcurrentRequests."
+        ),
+    )
+
+
+class ModelVariantConfig(BaseModel):
+    """Model variant configuration"""
+    model_config = {"extra": "allow"}
+    
+    disabled: Optional[bool] = None
+
+
+class ModelConfig(BaseModel):
+    """Model configuration"""
+    model_config = {"extra": "allow"}
+    
+    variants: Optional[Dict[str, ModelVariantConfig]] = None
+
+
+class ProviderConfig(BaseModel):
+    """Provider configuration"""
+    model_config = {"extra": "allow"}
+    
+    whitelist: Optional[List[str]] = None
+    blacklist: Optional[List[str]] = None
+    models: Optional[Dict[str, ModelConfig]] = None
+    options: Optional[ProviderOptionsConfig] = None
+
+
+# ==================== MCP Configuration ====================
+
+class McpOAuthConfig(BaseModel):
+    """MCP OAuth configuration"""
+    model_config = {"populate_by_name": True}
+    
+    client_id: Optional[str] = Field(None, alias="clientId")
+    client_secret: Optional[str] = Field(None, alias="clientSecret")
+    scope: Optional[str] = None
+
+
+class McpLocalConfig(BaseModel):
+    """MCP local server configuration"""
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
+    type: Literal["local"]
+    command: List[str]
+    environment: Optional[Dict[str, str]] = Field(
+        None,
+        validation_alias=AliasChoices("environment", "env"),
+    )
+    enabled: Optional[bool] = None
+    timeout: Optional[int] = Field(None, gt=0)
+
+
+class McpRemoteConfig(BaseModel):
+    """MCP remote server configuration"""
+    model_config = {"extra": "allow"}
+
+    group: Optional[str] = None
+    _normalize_group_clear = field_validator("group", mode="before")(_preserve_group_clear)
+    type: Literal["remote", "sse"]
+    url: str
+    enabled: Optional[bool] = None
+    transport: Optional[Literal["auto", "sse", "http"]] = "auto"
+    headers: Optional[Dict[str, str]] = None
+    oauth: Optional[Union[McpOAuthConfig, Literal[False]]] = None
+    timeout: Optional[int] = Field(None, gt=0)
+
+
+McpConfig = Union[McpLocalConfig, McpRemoteConfig]
+
+
+# ==================== Keybinds Configuration ====================
+
+class KeybindsConfig(BaseModel):
+    """Keybinds configuration"""
+    model_config = {"extra": "allow"}
+    
+    leader: str = "ctrl+x"
+    app_exit: str = "ctrl+c,ctrl+d,<leader>q"
+    editor_open: str = "<leader>e"
+    theme_list: str = "<leader>t"
+    sidebar_toggle: str = "<leader>b"
+    scrollbar_toggle: str = "none"
+    username_toggle: str = "none"
+    status_view: str = "<leader>s"
+    session_export: str = "<leader>x"
+    session_new: str = "<leader>n"
+    session_list: str = "<leader>l"
+    session_timeline: str = "<leader>g"
+    session_fork: str = "none"
+    session_rename: str = "ctrl+r"
+    session_delete: str = "ctrl+d"
+    # ... Add more as needed
+
+
+# ==================== Other Configuration ====================
+
+class TuiConfig(BaseModel):
+    """TUI configuration"""
+    scroll_speed: Optional[float] = Field(None, ge=0.001)
+    scroll_acceleration: Optional[Dict[str, Any]] = None
+    diff_style: Optional[Literal["auto", "stacked"]] = None
+
+
+class ServerConfig(BaseModel):
+    """Server configuration"""
+    port: Optional[int] = Field(None, gt=0)
+    hostname: Optional[str] = None
+    mdns: Optional[bool] = None
+    cors: Optional[List[str]] = None
+
+
+class WatcherConfig(BaseModel):
+    """File watcher configuration"""
+    ignore: Optional[List[str]] = None
+
+
+class CompactionConfig(BaseModel):
+    """Compaction configuration"""
+    auto: Optional[bool] = Field(None, description="Enable auto compaction")
+    prune: Optional[bool] = Field(None, description="Enable pruning")
+
+
+class ToolOutputConfig(BaseModel):
+    """Tool output size limits.
+
+    Controls how much content individual tool calls may return before
+    being truncated.  All values are configurable so power users can
+    tune them without patching source code.
+
+    Defaults mirror the hard-coded constants that were previously spread
+    across ``aegisops/tool/file/read.py`` and ``aegisops/tool/truncation.py``.
+
+    Both camelCase (``readMaxLines``) and snake_case (``read_max_lines``)
+    keys are accepted in ``aegisops.json``.
+    """
+
+    model_config = {"populate_by_name": True}
+
+    read_max_lines: Optional[int] = Field(
+        None,
+        alias="readMaxLines",
+        gt=0,
+        description=(
+            "Max lines returned by the read tool per call (default 2000). "
+            "For files longer than this, use offset + limit to page."
+        ),
+    )
+    read_max_bytes: Optional[int] = Field(
+        None,
+        alias="readMaxBytes",
+        gt=0,
+        description=(
+            "Byte cap for a single read tool call (default 51200 = 50 KB). "
+            "Truncation fires whichever limit is hit first."
+        ),
+    )
+    read_max_line_length: Optional[int] = Field(
+        None,
+        alias="readMaxLineLength",
+        gt=0,
+        description=(
+            "Characters per line before the remainder is replaced with '...' "
+            "(default 2000).  Keeps very wide log lines from bloating context."
+        ),
+    )
+
+
+class ToolFailureConfig(BaseModel):
+    """Repeated tool-failure handling."""
+
+    model_config = {"populate_by_name": True}
+
+    disable_on_repeated_failure: bool = Field(
+        True,
+        alias="disableOnRepeatedFailure",
+        description=(
+            "Disable a standalone custom tool after repeated identical failures."
+        ),
+    )
+
+
+class DataRetentionConfig(BaseModel):
+    """How long logs, messages and sessions are kept (days; 0 keeps them forever).
+
+    A key left out of aegisops.json falls back to the built-in default: logs use
+    AEGISOPS_LOG_RETENTION_DAYS (30 days unset), messages and sessions are kept.
+    """
+
+    # A hand-edited bad value must not break loading the whole config: values
+    # that are not whole numbers read as "not set", and aegisops.retention.policy
+    # treats negative numbers the same way.
+    model_config = {"populate_by_name": True}
+
+    log_days: Optional[int] = Field(None, alias="logDays")
+    message_days: Optional[int] = Field(None, alias="messageDays")
+    session_days: Optional[int] = Field(None, alias="sessionDays")
+
+    @field_validator("log_days", "message_days", "session_days", mode="before")
+    @classmethod
+    def _ignore_unreadable_days(cls, value: Any) -> Optional[int]:
+        if value is None or isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value) if value.is_integer() else None
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return None
+            sign = ""
+            if text[0] in "+-":
+                sign, text = text[0], text[1:]
+            # Non-empty ASCII digits only: ``str.isdigit`` also accepts
+            # superscripts etc., and "" / "+" / "-" must not reach ``int``.
+            if text and text.isascii() and text.isdigit():
+                try:
+                    return int(f"{sign}{text}")
+                except ValueError:
+                    return None
+        return None
+
+
+class EnterpriseConfig(BaseModel):
+    """Enterprise configuration"""
+
+
+class UIConfig(BaseModel):
+    """WebUI display preferences."""
+
+    model_config = {"populate_by_name": True}
+
+    display_name: Optional[str] = Field(
+        None,
+        alias="displayName",
+        max_length=48,
+        description="Custom product display name used by visible WebUI branding.",
+    )
+    favicon_path: Optional[str] = Field(
+        None,
+        alias="faviconPath",
+        max_length=256,
+        description="Relative path to a custom WebUI favicon stored in the user config directory.",
+    )
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("displayName must be a string")
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+            raise ValueError("displayName must not contain control characters")
+        return normalized
+
+    @field_validator("favicon_path", mode="before")
+    @classmethod
+    def normalize_favicon_path(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("faviconPath must be a string")
+        normalized = value.strip().replace("\\", "/")
+        if not normalized:
+            return None
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            raise ValueError("faviconPath must be a safe relative path")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+            raise ValueError("faviconPath must not contain control characters")
+        return normalized
+
+
+class ConcurrencyConfig(BaseModel):
+    """Process-wide limits on model requests and subagent fan-out."""
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    max_concurrent_requests: Optional[int] = Field(
+        None,
+        alias="maxConcurrentRequests",
+        ge=0,
+        description=(
+            "Default cap on generating model requests per provider. Every caller "
+            "in the process (interactive sessions, foreground subagents, "
+            "scheduled/background tasks, workflow llm nodes) shares it; requests "
+            "beyond the cap queue in-process instead of hitting the provider's "
+            "own limit and failing with HTTP 429. A response that only fans out "
+            "to subagents stays inside the cap; once it runs an inline tool it "
+            "gives its slot up for the rest of that response, so generating "
+            "requests can exceed the cap until the stream ends. Title, "
+            "compaction, goal and memory calls bypass it entirely. 0 disables "
+            "the cap. Falls back to AEGISOPS_LLM_MAX_CONCURRENT_REQUESTS, then 8."
+        ),
+    )
+    max_parallel_subagents: Optional[int] = Field(
+        None,
+        alias="maxParallelSubagents",
+        ge=0,
+        description=(
+            "How many sibling delegate_task calls from one model response run at "
+            "the same time; the rest start as earlier ones finish. 0 disables "
+            "the cap. Falls back to AEGISOPS_SUBAGENT_MAX_PARALLEL, then 4."
+        ),
+    )
+
+
+class ExperimentalConfig(BaseModel):
+    """Experimental features configuration"""
+    model_config = {"extra": "allow", "populate_by_name": True}
+    
+    chat_max_retries: Optional[int] = Field(None, alias="chatMaxRetries")
+    disable_paste_summary: Optional[bool] = None
+    open_telemetry: Optional[bool] = Field(None, alias="openTelemetry")
+    primary_tools: Optional[List[str]] = None
+    continue_loop_on_deny: Optional[bool] = None
+    mcp_timeout: Optional[int] = Field(None, gt=0)
+
+
+# ==================== Updater Configuration ====================
+
+class UpdaterConfig(BaseModel):
+    """Self-update configuration"""
+    model_config = {"extra": "allow"}
+
+    enabled: bool = Field(
+        True,
+        description="Set to false to disable update checks entirely.",
+    )
+    repo: str = Field(
+        "AgentAegisOps/AegisOps",
+        description="Repository path in 'owner/repo' format (used for GitHub / GitLab).",
+    )
+    gitee_repo: Optional[str] = Field(
+        "aegisops/aegisops",
+        description="Repository path on Gitee if different from 'repo'. Falls back to 'repo' if unset.",
+    )
+    sources: List[str] = Field(
+        ["github", "gitee"],
+        description=(
+            "Ordered list of download sources to try. "
+            "Supported values: 'github', 'gitee', 'gitlab'. "
+            "The updater tries each in order; on failure it falls back to the next."
+        ),
+    )
+    token: Optional[str] = Field(
+        None,
+        description=(
+            "Personal access token for GitHub / GitLab. "
+            "Supports {secret:name} syntax, e.g. '{secret:github_token}'."
+        ),
+    )
+    gitee_token: Optional[str] = Field(
+        None,
+        description=(
+            "Personal access token for Gitee (if the repo is private on Gitee). "
+            "Supports {secret:name} syntax."
+        ),
+    )
+    archive_format: Literal["auto", "zip", "tar.gz"] = Field(
+        "auto",
+        description="Source archive format to download. 'auto' picks zip on Windows, tar.gz elsewhere.",
+    )
+    backup_retain_count: int = Field(
+        1,
+        description="Number of old version backups to retain under ~/.aegisops/version/. Oldest are purged first.",
+    )
+    provider: Literal["github", "gitlab"] = Field(
+        "github",
+        description="(Deprecated) Use 'sources' instead. Kept for backward compatibility.",
+    )
+    base_url: Optional[str] = Field(
+        None,
+        description=(
+            "Base URL override for self-hosted instances (e.g. GitLab Enterprise). "
+            "Leave unset for github.com / gitee.com."
+        ),
+    )
+    remote: str = Field(
+        "origin",
+        description="Git remote name (used only as last-resort fallback).",
+    )
+
+
+# ==================== Channel Configuration ====================
+
+class ChannelAccountConfig(BaseModel):
+    """Configuration for a single channel account (multi-account support)."""
+    model_config = {"extra": "allow"}
+
+    enabled: bool = True
+    name: Optional[str] = None
+
+
+class FeishuGroupConfig(BaseModel):
+    """Per-group configuration for Feishu channel.
+
+    All fields are Optional; missing fields inherit from top-level channel config.
+
+    Example aegisops.json::
+
+        "channels": {
+          "feishu": {
+            "groups": {
+              "oc_security_team": {
+                "requireMention": false,
+                "systemPrompt": "你是安全团队专属助手。",
+                "groupSessionScope": "group_sender"
+              },
+              "oc_readonly": { "enabled": false },
+              "*": { "requireMention": true }
+            }
+          }
+        }
+    """
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    enabled: Optional[bool] = None
+    require_mention: Optional[bool] = Field(None, alias="requireMention")
+    allow_from: Optional[List[str]] = Field(None, alias="allowFrom")
+    system_prompt: Optional[str] = Field(None, alias="systemPrompt")
+    default_agent: Optional[str] = Field(None, alias="defaultAgent")
+    group_session_scope: Optional[Literal[
+        "group",
+        "group_sender",
+        "group_topic",
+    ]] = Field(None, alias="groupSessionScope")
+    mention_context_messages: Optional[int] = Field(None, alias="mentionContextMessages")
+
+
+class ChannelConfig(BaseModel):
+    """Per-channel configuration block in aegisops.json.
+
+    Platform-specific fields (appId, appSecret, …) are captured via
+    ``extra = "allow"`` and can be accessed with ``get_extra()``.
+
+    Feishu-specific fields:
+    - ``inboundDebounceMs``: inbound debounce window in milliseconds; 0 disables, default 800
+    - ``dedupTtlSeconds``: deduplication TTL in seconds, default 86400 (24h)
+    - ``reactionNotifications``: emoji reaction policy off/own/all, default off
+    - ``streaming``: whether to enable streaming card output, default False
+    - ``streamingCoalesceMs``: streaming throttle window in milliseconds, default 200
+    - ``groups``: per-chat_id fine-grained group configuration
+    - ``mentionContextMessages``: number of recent un-mentioned messages cached for group chats; 0 disables
+    """
+    model_config = {"extra": "allow", "populate_by_name": True}
+
+    @model_validator(mode="before")
+    @classmethod
+    def discard_removed_role_field(cls, data: Any) -> Any:
+        """Ignore removed legacy role data while loading existing config files.
+
+        New API writes reject the field explicitly. Dropping it here allows an
+        existing on-disk config to boot once and removes it on the next save
+        without interpreting it as authorization.
+        """
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        normalized.pop("role", None)
+        normalized.pop("permissionMode", None)
+        return normalized
+
+    enabled: bool = False
+    default_agent: Optional[str] = Field(None, alias="defaultAgent")
+    visible_agents: Optional[List[str]] = Field(None, alias="visibleAgents")
+    dm_policy: Optional[str] = Field(None, alias="dmPolicy")
+    group_trigger: Optional[str] = Field("mention", alias="groupTrigger")
+    allow_from: Optional[List[str]] = Field(None, alias="allowFrom")
+    accounts: Optional[Dict[str, ChannelAccountConfig]] = None
+    workspace_dir: Optional[str] = Field(
+        None,
+        alias="workspaceDir",
+        description=(
+            "Working directory used when this channel auto-creates a AegisOps session. "
+            "Channel inbound runs in a background asyncio task that is NOT wrapped "
+            "by the HTTP Instance middleware, so the project Instance ContextVar is "
+            "typically empty for channel dispatch and the resolver falls back to "
+            "the server process cwd. To make channel-originated sessions inject the "
+            "same <env>, AGENTS.md / CLAUDE.md / CONTEXT.md and sandbox prompts as "
+            "WebUI sessions, set this explicitly to the same directory the WebUI "
+            "server was launched against (the value normally passed via the "
+            "x-aegisops-directory request header)."
+        ),
+    )
+
+    # ── Feishu-specific fields ──────────────────────────────────────────
+    inbound_debounce_ms: Optional[int] = Field(
+        800, alias="inboundDebounceMs", ge=0,
+        description="Inbound debounce window in milliseconds; 0 disables.",
+    )
+    dedup_ttl_seconds: Optional[int] = Field(
+        86400, alias="dedupTtlSeconds", ge=60,
+        description="Deduplication TTL in seconds, default 86400 (24h).",
+    )
+    reaction_notifications: Optional[Literal["off", "own", "all"]] = Field(
+        "off", alias="reactionNotifications",
+        description="Emoji reaction notification policy.",
+    )
+    streaming: Optional[bool] = Field(
+        False,
+        description=(
+            "Whether to enable streaming card output "
+            "(requires the cardkit:card:write permission)."
+        ),
+    )
+    streaming_coalesce_ms: Optional[int] = Field(
+        200, alias="streamingCoalesceMs", ge=0,
+        description="Streaming card append throttle window in milliseconds.",
+    )
+    groups: Optional[Dict[str, Optional[FeishuGroupConfig]]] = Field(
+        None,
+        description="Per-chat_id fine-grained group configuration; supports the '*' wildcard.",
+    )
+    mention_context_messages: Optional[int] = Field(
+        0,
+        alias="mentionContextMessages",
+        ge=0,
+        description="Number of recent un-mentioned messages cached for group chats; 0 disables.",
+    )
+
+    def get_extra(self, key: str, default: Any = None) -> Any:
+        """Safely read a platform-specific extra field."""
+        if hasattr(self, key):
+            val = getattr(self, key)
+            return val if val is not None else default
+        return default
+
+
+# ==================== Main Configuration ====================
+
+class FallbackProviderConfig(BaseModel):
+    """Ordered model identity used for runtime provider fallback."""
+
+    model_config = {"extra": "forbid"}
+
+    provider_id: str
+    model_id: str
+
+
+def normalize_fallback_provider_entries(value: Any) -> List[Dict[str, str]]:
+    """Return ordered, trimmed, structurally valid fallback identities."""
+    from aegisops.utils.log import Log
+
+    config_log = Log.create(service="config")
+    if not isinstance(value, list):
+        config_log.warning("config.fallback_providers_invalid", {
+            "reason": "not_a_list",
+        })
+        return []
+
+    normalized: List[Dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, dict):
+            config_log.warning("config.fallback_provider_invalid", {
+                "index": index,
+                "reason": "not_an_object",
+            })
+            continue
+
+        provider_id = raw.get("provider_id")
+        model_id = raw.get("model_id")
+        if not isinstance(provider_id, str) or not isinstance(model_id, str):
+            config_log.warning("config.fallback_provider_invalid", {
+                "index": index,
+                "reason": "invalid_identity",
+            })
+            continue
+
+        provider_id = provider_id.strip()
+        model_id = model_id.strip()
+        if not provider_id or not model_id:
+            config_log.warning("config.fallback_provider_invalid", {
+                "index": index,
+                "reason": "empty_identity",
+            })
+            continue
+
+        identity = (provider_id, model_id)
+        if identity in seen:
+            config_log.warning("config.fallback_provider_duplicate", {
+                "index": index,
+                "provider_id": provider_id,
+                "model_id": model_id,
+            })
+            continue
+
+        seen.add(identity)
+        normalized.append({
+            "provider_id": provider_id,
+            "model_id": model_id,
+        })
+
+    return normalized
+
+
+class TokenPolicyNoticeConfig(BaseModel):
+    """Enable or disable the built-in, one-month token policy notice."""
+
+    model_config = {"extra": "forbid"}
+    enabled: bool = True
+
+
+class ConfigInfo(BaseModel):
+    """
+    Main configuration schema
+    
+    Matches TypeScript Config.Info exactly.
+    """
+    model_config = {"extra": "allow", "populate_by_name": True}  # Allow extra fields for flexibility
+    
+    schema_: Optional[str] = Field(None, alias="$schema")
+    token_policy_notice: TokenPolicyNoticeConfig | None = Field(
+        default=None, alias="tokenPolicyNotice"
+    )
+    theme: Optional[str] = None
+    keybinds: Optional[KeybindsConfig] = None
+    log_level: Optional[str] = Field(None, alias="logLevel")
+    tui: Optional[TuiConfig] = None
+    server: Optional[ServerConfig] = None
+    command: Optional[Dict[str, CommandConfig]] = None
+    watcher: Optional[WatcherConfig] = None
+    plugin: Optional[List[str]] = Field(
+        None,
+        description=(
+            "Extra plugin module sources (file paths or package names). "
+            "Loaded by PluginLoader and dispatched to all registered extension "
+            "points (agents, tools, hooks, etc.)."
+        ),
+    )
+    snapshot: Optional[bool] = None
+    share: Optional[Literal["manual", "auto", "disabled"]] = None
+    autoshare: Optional[bool] = Field(None, description="@deprecated Use 'share'")
+    autoupdate: Optional[Union[bool, Literal["notify"]]] = None
+    disabled_providers: Optional[List[str]] = None
+    enabled_providers: Optional[List[str]] = None
+    model: Optional[str] = None
+    default_models: Optional[Dict[str, Any]] = None
+    api_services: Optional[Dict[str, Any]] = None
+    small_model: Optional[str] = Field(None, alias="smallModel")
+    fallback_providers: Optional[List[FallbackProviderConfig]] = None
+    default_agent: Optional[str] = Field(None, alias="defaultAgent")
+    username: Optional[str] = None
+    mode: Optional[Dict[str, AgentConfig]] = Field(None, description="@deprecated Use 'agent'")
+    agent: Optional[Dict[str, AgentConfig]] = None
+    provider: Optional[Dict[str, ProviderConfig]] = None
+    mcp: Optional[Dict[str, Union[McpConfig, Dict[str, Any]]]] = None
+    formatter: Optional[Union[Literal[False], Dict[str, Any]]] = None
+    lsp: Optional[Union[Literal[False], Dict[str, Any]]] = None
+    instructions: Optional[List[str]] = None
+    layout: Optional[Literal["auto", "stretch"]] = Field(None, description="@deprecated")
+    permission: Optional[Union[PermissionConfig, Dict[str, Any]]] = None
+    tools: Optional[Dict[str, bool]] = Field(None, description="@deprecated Use 'permission'")
+    enabled_agents: Optional[List[str]] = Field(
+        None, alias="enabledAgents",
+        description=(
+            "Whitelist of agent names to load. When set, only listed agents "
+            "enter the registry. Unset means all built-in agents are active."
+        ),
+    )
+
+    @field_validator("permission", mode="before")
+    @classmethod
+    def normalize_permission_aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _canonicalize_permission_dict(value)
+        return value
+    agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
+    ui: Optional[UIConfig] = None
+    compaction: Optional[CompactionConfig] = None
+    tool_output: Optional[ToolOutputConfig] = Field(
+        None,
+        alias="toolOutput",
+        description="Tool output size limits (read, truncation caps).",
+    )
+    tool_failure: Optional[ToolFailureConfig] = Field(
+        None,
+        alias="toolFailure",
+        description="Repeated tool-failure handling.",
+    )
+    data_retention: Optional[DataRetentionConfig] = Field(
+        None,
+        alias="dataRetention",
+        description="Retention days for logs, messages and sessions (0 keeps forever).",
+    )
+
+    @field_validator("data_retention", mode="before")
+    @classmethod
+    def _ignore_non_mapping_data_retention(cls, value: Any) -> Any:
+        # A hand-edited ``dataRetention: "soon"`` or ``[]`` must not break loading
+        # the whole config; drop it and fall back to the defaults.
+        if value is None or isinstance(value, (dict, DataRetentionConfig)):
+            return value
+        return None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _single_data_retention_spelling(cls, data: Any) -> Any:
+        """Collapse ``dataRetention`` / ``data_retention`` into the one canonical key.
+
+        Both spellings fill the same field. Left alone, a payload carrying both
+        keeps one as the field and the other as an *extra*; the config merge
+        (validate -> dump -> re-validate) can then turn that extra back into the
+        field, so a single validation and the value actually written disagree,
+        and the extra is written to disk and echoed by GET. Choosing one value
+        here, deterministically, makes every path agree: a real mapping under the
+        camelCase key wins; a null or non-mapping camelCase value means "not set
+        here" and yields to the snake_case one.
+        """
+        if not isinstance(data, dict) or "dataRetention" not in data or "data_retention" not in data:
+            return data
+        normalized = dict(data)
+        snake = normalized.pop("data_retention")
+        if not isinstance(normalized.get("dataRetention"), (dict, DataRetentionConfig)):
+            normalized["dataRetention"] = snake
+        return normalized
+
+    experimental: Optional[ExperimentalConfig] = None
+    concurrency: Optional[ConcurrencyConfig] = Field(
+        None,
+        description="Process-wide model request / subagent concurrency limits.",
+    )
+    # Workflow engine settings, read raw by aegisops.workflow.runner
+    workflow: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Workflow engine settings. Keys: llm.max_concurrency (concurrent LLM "
+            "calls on the workflow loop; default 8, 0 = unlimited)."
+        ),
+    )
+
+    # Memory system configuration (added for memory system integration)
+    memory: Optional[Any] = Field(
+        None,
+        description="Memory system configuration"
+    )
+    
+    # Sandbox configuration (aligned with OpenClaw agents.defaults.sandbox)
+    sandbox: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Sandbox configuration. Controls Docker container isolation for tool execution. "
+            "Keys: mode (off/on), scope (session/agent/shared), "
+            "workspace_access (none/ro/rw), workspace_root, docker, tools, prune."
+        ),
+    )
+
+    @field_validator("fallback_providers", mode="before")
+    @classmethod
+    def normalize_fallback_providers(cls, value: Any) -> Any:
+        """Normalize ordered fallback identities without rewriting user config."""
+        if value is None:
+            return None
+        return normalize_fallback_provider_entries(value)
+    allow_read_paths: Optional[List[str]] = Field(
+        None,
+        alias="allowReadPaths",
+        description=(
+            "Extra absolute paths (directories or prefixes) allowed for HTTP "
+            "/api/file/content and /api/file/list. Does not replace project root, data, or "
+            "workspace; the AegisOps config directory and ~/.ssh are never allowed."
+        ),
+    )
+
+    # Channel configuration (IM platform integrations)
+    channels: Optional[Dict[str, ChannelConfig]] = Field(
+        None,
+        description=(
+            "Channel configuration. key is channel id (feishu, wecom, discord, …). "
+            "Each value is a ChannelConfig with enabled, defaultAgent, "
+            "dmPolicy, groupTrigger, allowFrom, plus platform-specific fields."
+        ),
+    )
+
+    # Updater configuration
+    updater: Optional[UpdaterConfig] = Field(
+        None,
+        description="Self-update configuration (GitHub repo, git remote, etc.)",
+    )
+    portal_base_url: Optional[str] = Field(
+        None,
+        alias="portalBaseUrl",
+        description="Console portal base URL used by OSS console account login redirect.",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def preserve_explicit_plugin_group_clears(cls, data: Any) -> Any:
+        """Keep explicit null groups through the exclude-none config merge/save.
+
+        An omitted group inherits, but null is a clear, represented on disk by
+        the empty string. Only native plugin metadata is affected; connection
+        fields and unrelated config retain their existing None semantics.
+        """
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        for section in ("agent", "mode", "mcp", "api_services", "tool_settings"):
+            entries = data.get(section)
+            if not isinstance(entries, dict):
+                continue
+            entries = dict(entries)
+            for name, entry in entries.items():
+                if isinstance(entry, dict) and "group" in entry and entry["group"] is None:
+                    entries[name] = {**entry, "group": ""}
+            normalized[section] = entries
+        return normalized
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_legacy_delegate_categories(cls, data):
+        """Drop the removed categories config instead of preserving it as an extra."""
+        if not isinstance(data, dict) or "categories" not in data:
+            return data
+
+        cleaned = dict(data)
+        cleaned.pop("categories", None)
+        from aegisops.utils.log import Log
+
+        Log.create(service="config").warn(
+            "config.categories_removed",
+            {
+                "message": (
+                    "The categories configuration is no longer supported; "
+                    "select a delegatable agent with subagent_type."
+                )
+            },
+        )
+        return cleaned
+
+    @model_validator(mode='after')
+    def post_process(self):
+        """Post-processing like TypeScript"""
+        # Initialize defaults
+        if self.agent is None:
+            self.agent = {}
+        if self.plugin is None:
+            self.plugin = []
+        
+        # Parse memory configuration
+        if self.memory is not None and isinstance(self.memory, dict):
+            try:
+                from aegisops.memory.config import MemoryConfig
+                self.memory = MemoryConfig(**self.memory)
+            except Exception as e:
+                from aegisops.utils.log import Log
+                log = Log.create(service="config")
+                log.error("config.memory.parse_failed", {"error": str(e)})
+                self.memory = None
+        
+        # Pydantic auto-parses channels dicts → ChannelConfig; no manual step needed.
+        
+        # Migrate mode to agent (deprecated field)
+        if self.mode:
+            for name, mode_config in self.mode.items():
+                if name not in self.agent:
+                    mode_config.mode = "primary"
+                    self.agent[name] = mode_config
+        
+        # Handle autoshare -> share migration
+        if self.autoshare is True and self.share is None:
+            self.share = "auto"
+        
+        # Convert legacy tools to permission
+        if self.tools:
+            if self.permission is None:
+                self.permission = {}
+            
+            permission_dict = self.permission if isinstance(self.permission, dict) else {}
+            
+            for tool, enabled in self.tools.items():
+                action = PermissionAction.ALLOW if enabled else PermissionAction.DENY
+                if tool in ["write", "edit", "patch"]:
+                    _assign_permission(permission_dict, "edit", action)
+                else:
+                    _assign_permission(permission_dict, tool, action)
+            
+            self.permission = permission_dict
+        
+        # Set default username
+        if self.username is None:
+            import getpass
+            self.username = getpass.getuser()
+        
+        # Initialize keybinds with defaults
+        if self.keybinds is None:
+            self.keybinds = KeybindsConfig()
+        
+        return self
+
+    def get_channel_configs(self) -> Dict[str, ChannelConfig]:
+        """Return the channels dict, empty dict if unset."""
+        return self.channels or {}
+
+    def get_channel_config(self, channel_id: str) -> ChannelConfig:
+        """Return the ChannelConfig for *channel_id*, or a default instance."""
+        return (self.channels or {}).get(channel_id, ChannelConfig())
+
+
+# ==================== Global Configuration ====================
+
+def _get_aegisops_root() -> Path:
+    """
+    Get aegisops root directory
+    
+    Priority:
+    1. AEGISOPS_ROOT environment variable
+    2. ~/.aegisops
+
+    Returns the root without /config suffix.
+    """
+    from aegisops.db_backend import runtime_root
+
+    return runtime_root()
+
+
+def get_aegisops_root() -> Path:
+    """Public alias of the runtime root resolver (``AEGISOPS_ROOT`` → ``~/.aegisops``).
+
+    Every runtime directory (config/data/logs/plugins) hangs off this root;
+    modules must not rebuild ``Path.home() / ".aegisops"`` themselves, or an
+    instance started with ``AEGISOPS_ROOT`` would write into the default one.
+    """
+    return _get_aegisops_root()
+
+
+def get_user_plugins_root() -> Path:
+    """User-level plugin root: ``<aegisops root>/plugins`` (agents/skills/tools/workflows/...)."""
+    return _get_aegisops_root() / "plugins"
+
+
+def _get_config_dir() -> Path:
+    """
+    Get config directory
+    
+    Priority:
+    1. AEGISOPS_CONFIG_DIR environment variable
+    2. Use aegisops root/config
+    """
+    from aegisops.db_backend import config_dir
+
+    return config_dir()
+
+
+def _get_data_dir() -> Path:
+    """
+    Get data directory (under aegisops root)
+    
+    Priority:
+    1. AEGISOPS_DATA_DIR environment variable
+    2. XDG_DATA_HOME/aegisops (if XDG_DATA_HOME is set)
+    3. aegisops_root/data (default)
+    
+    Can be overridden by AEGISOPS_DATA_DIR environment variable.
+    """
+    from aegisops.db_backend import data_dir
+
+    return data_dir()
+
+
+def _get_log_dir() -> Path:
+    """
+    Get log directory (under aegisops root)
+    
+    Priority:
+    1. AEGISOPS_LOG_DIR environment variable
+    2. XDG_STATE_HOME/aegisops/logs (if XDG_STATE_HOME is set)
+    3. aegisops_root/logs (default)
+    
+    Can be overridden by AEGISOPS_LOG_DIR environment variable.
+    """
+    log_dir = os.getenv("AEGISOPS_LOG_DIR")
+    if log_dir:
+        return Path(log_dir)
+    
+    # Check XDG_STATE_HOME for log directory
+    xdg_state = os.getenv("XDG_STATE_HOME")
+    if xdg_state:
+        return Path(xdg_state) / "aegisops" / "logs"
+    
+    return _get_aegisops_root() / "logs"
+
+
+class GlobalConfig(BaseSettings):
+    """
+    Global configuration from environment variables
+    
+    Similar to TypeScript Flag namespace.
+    All data unified under ~/.aegisops directory.
+    """
+    model_config = {"env_prefix": "AEGISOPS_", "case_sensitive": False}
+    
+    # Paths - now using ~/.aegisops by default
+    config_dir: Path = Field(default_factory=_get_config_dir)
+    data_dir: Path = Field(default_factory=_get_data_dir)
+    log_dir: Path = Field(default_factory=_get_log_dir)
+    
+    # Server settings
+    server_host: str = "127.0.0.1"
+    server_port: int = 8000
+    server_username: Optional[str] = None
+    server_password: Optional[str] = None
+    
+    # Config overrides
+    config_path: Optional[str] = None  # AEGISOPS_CONFIG
+    config_content: Optional[str] = None  # AEGISOPS_CONFIG_CONTENT
+    config_dir_override: Optional[str] = None  # AEGISOPS_CONFIG_DIR
+    
+    # Permission overrides
+    permission: Optional[str] = None  # AEGISOPS_PERMISSION (JSON)
+    
+    # Compaction overrides
+    disable_autocompact: bool = False
+    disable_prune: bool = False
+    
+    # Development
+    dev_mode: bool = False
+    log_level: str = "INFO"
+
+    @field_validator("config_dir", "data_dir", mode="before")
+    @classmethod
+    def validate_runtime_directory(cls, value):
+        # BaseSettings supplies environment values directly, bypassing the
+        # default factories above. They must follow the same early guard.
+        from aegisops.db_backend import directory_path
+
+        return directory_path(value, "runtime")
+
+
+# ==================== Configuration Manager ====================
+
+class Config:
+    """
+    Configuration manager
+    
+    Provides static methods for loading and managing configuration,
+    matching TypeScript's Config namespace.
+    """
+    
+    _global_config: Optional[GlobalConfig] = None
+    _cached_config: Optional[ConfigInfo] = None
+    # Where the files behind the cached config store references (built from the same reads).
+    _cached_reference_places: Optional["ReferencePlaces"] = None
+    
+    @classmethod
+    def get_global(cls) -> GlobalConfig:
+        """Get global configuration from environment"""
+        if cls._global_config is None:
+            cls._global_config = GlobalConfig()
+            cls._ensure_dirs()
+        return cls._global_config
+    
+    @classmethod
+    def _ensure_dirs(cls) -> None:
+        """Ensure required directories exist"""
+        config = cls.get_global()
+        config.config_dir.mkdir(parents=True, exist_ok=True)
+        config.data_dir.mkdir(parents=True, exist_ok=True)
+        config.log_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create memory directory structure
+        memory_dir = config.data_dir / "memory"
+        memory_dir.mkdir(parents=True, exist_ok=True)
+        
+        # Create daily memory directory
+        daily_dir = memory_dir / "daily"
+        daily_dir.mkdir(parents=True, exist_ok=True)
+    
+    @classmethod
+    def merge_deep(cls, target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Deep merge two dictionaries
+        
+        Matches TypeScript's mergeDeep from remeda library.
+        
+        Args:
+            target: Target dictionary
+            source: Source dictionary to merge
+            
+        Returns:
+            Merged dictionary
+        """
+        result = target.copy()
+        
+        for key, value in source.items():
+            if key in result:
+                # If both are dicts, merge recursively
+                if isinstance(result[key], dict) and isinstance(value, dict):
+                    result[key] = cls.merge_deep(result[key], value)
+                else:
+                    # Otherwise, source wins
+                    result[key] = value
+            else:
+                result[key] = value
+        
+        return result
+    
+    @classmethod
+    def merge_config_concat_arrays(cls, target: ConfigInfo, source: ConfigInfo) -> ConfigInfo:
+        """
+        Merge two configs with array concatenation
+        
+        Matches TypeScript's mergeConfigConcatArrays function.
+        Arrays (plugin, instructions) are concatenated instead of replaced.
+        
+        Args:
+            target: Target config
+            source: Source config to merge
+            
+        Returns:
+            Merged config
+        """
+        # Convert to dicts
+        target_dict = target.model_dump(by_alias=True, exclude_none=True)
+        source_dict = source.model_dump(by_alias=True, exclude_none=True)
+        
+        # Convert back to ConfigInfo
+        return ConfigInfo.model_validate(cls.merge_config_dicts(target_dict, source_dict))
+
+    @classmethod
+    def merge_config_dicts(cls, target_dict: Dict[str, Any], source_dict: Dict[str, Any]) -> Dict[str, Any]:
+        """``merge_config_concat_arrays`` on config dumps: deep merge, permission layers, array concatenation."""
+        merged = cls.merge_deep(target_dict, source_dict)
+
+        target_permission = target_dict.get("permission")
+        source_permission = source_dict.get("permission")
+        if isinstance(target_permission, dict) and isinstance(source_permission, dict):
+            merged["permission"] = _merge_permission_layers(
+                _canonicalize_permission_dict(target_permission),
+                _canonicalize_permission_dict(source_permission),
+            )
+        
+        # Special handling for arrays - concatenate instead of replace
+        for key in ("plugin", "instructions"):
+            target_items, source_items = target_dict.get(key), source_dict.get(key)
+            if target_items and source_items:
+                merged[key] = list(set(target_items + source_items))
+        return merged
+    
+    @staticmethod
+    def _json_string_escape(value: str) -> str:
+        """JSON-escape a value so it is safe to splice into a JSON string literal.
+
+        Strips the surrounding quotes that ``json.dumps`` adds, leaving just the
+        escaped body. This guarantees backslashes, quotes and control characters
+        in the substituted value cannot break the surrounding JSON document
+        (e.g. a Windows-style path or a token containing ``\\u`` would otherwise
+        produce an "Invalid \\escape" error when the file is parsed).
+        """
+        return json.dumps(value, ensure_ascii=False)[1:-1]
+
+    @classmethod
+    def replace_env_vars(cls, text: str) -> str:
+        """
+        Replace environment variable references {env:VAR}
+        
+        Matches TypeScript implementation.
+        
+        Args:
+            text: Text with {env:VAR} placeholders
+            
+        Returns:
+            Text with environment variables substituted
+        """
+        def replacer(match):
+            var_name = match.group(1)
+            value = os.getenv(var_name, "")
+            return cls._json_string_escape(value)
+        
+        return re.sub(r'\{env:([^}]+)\}', replacer, text)
+    
+    @classmethod
+    def replace_secret_refs(cls, text: str) -> str:
+        """
+        Replace secret references {secret:SECRET_ID} with values from .secret.json
+        
+        Works alongside replace_env_vars(). Uses the security module's SecretManager.
+        
+        Args:
+            text: Text with {secret:SECRET_ID} placeholders
+            
+        Returns:
+            Text with secrets substituted
+        """
+        if '{secret:' not in text:
+            return text
+        
+        try:
+            from aegisops.security import resolve_secret_value, get_secret_manager
+
+            secrets = get_secret_manager()
+
+            def replacer(match: "re.Match") -> str:
+                secret_id = match.group(1)
+                value = resolve_secret_value(secret_id, secrets)
+                if value is None:
+                    return ""
+                return cls._json_string_escape(value)
+
+            return re.sub(r'\{secret:([^}]+)\}', replacer, text)
+        except Exception as e:
+            from aegisops.utils.log import Log
+            log = Log.create(service="config")
+            log.warning("config.replace_secret_refs_failed", {"error": str(e)})
+            return text
+    
+    @classmethod
+    async def replace_file_refs(cls, text: str, config_dir: Path) -> str:
+        """
+        Replace file references {file:path}
+        
+        Matches TypeScript implementation.
+        
+        Args:
+            text: Text with {file:path} placeholders
+            config_dir: Directory containing the config file
+            
+        Returns:
+            Text with file contents substituted
+        """
+        import asyncio
+        
+        # Find all {file:...} references
+        file_matches = re.findall(r'\{file:[^}]+\}', text)
+        
+        if not file_matches:
+            return text
+        
+        # Check for commented lines
+        lines = text.split('\n')
+        
+        for match in file_matches:
+            # Skip if in a comment
+            for line in lines:
+                if match in line and line.strip().startswith(('//','#')):
+                    continue
+            
+            # Extract path
+            file_path_str = match.replace('{file:', '').replace('}', '')
+            
+            # Handle ~ expansion
+            if file_path_str.startswith('~/'):
+                file_path = Path.home() / file_path_str[2:]
+            elif Path(file_path_str).is_absolute():
+                file_path = Path(file_path_str)
+            else:
+                file_path = config_dir / file_path_str
+            
+            # Read file content
+            try:
+                file_content = file_path.read_text(encoding="utf-8").strip()
+                # Escape for JSON (remove outer quotes from json.dumps)
+                json_escaped = json.dumps(file_content)[1:-1]
+                text = text.replace(match, json_escaped)
+            except FileNotFoundError:
+                raise ValueError(f"File reference {match} not found: {file_path}")
+            except Exception as e:
+                raise ValueError(f"Error reading file reference {match}: {e}")
+        
+        return text
+    
+    @classmethod
+    async def load_file(
+        cls,
+        filepath: Path,
+        stored_layers: Optional[List[Any]] = None,
+        *,
+        resolve_refs: bool = True,
+    ) -> ConfigInfo:
+        """
+        Load configuration from a file
+        
+        Supports JSON and JSONC (JSON with comments).
+        Matches TypeScript's loadFile function.
+        
+        Args:
+            filepath: Path to config file
+            stored_layers: When given, receives the file as stored, references
+                unexpanded (see ``load_text``).
+            resolve_refs: substitute {env:}/{secret:}/{file:} references.
+                ``False`` keeps the references verbatim (used when the config
+                is shown to clients).
+            
+        Returns:
+            ConfigInfo instance
+        """
+        from aegisops.utils.log import Log
+        log = Log.create(service="config")
+        
+        log.info("loading", {"path": str(filepath)})
+        
+        try:
+            text = filepath.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return ConfigInfo()
+        except Exception as e:
+            raise ValueError(f"Failed to read config file {filepath}: {e}")
+        
+        return await cls.load_text(text, filepath, stored_layers=stored_layers, resolve_refs=resolve_refs)
+
+    @staticmethod
+    def parse_jsonc(text: str, filepath: Path) -> Dict[str, Any]:
+        """Parse JSONC text without resolving environment or secret references.
+
+        JSONC here means JSON plus ``//`` / ``/* */`` comments and trailing
+        commas before ``}`` / ``]`` (what editors such as VS Code accept).
+        """
+        output: List[str] = []
+        index = 0
+        in_string = False
+        escaped = False
+        # Position in ``output`` of a comma that may turn out to be trailing.
+        pending_comma: Optional[int] = None
+
+        while index < len(text):
+            char = text[index]
+            next_char = text[index + 1] if index + 1 < len(text) else ""
+
+            if in_string:
+                output.append(char)
+                if escaped:
+                    escaped = False
+                elif char == '\\':
+                    escaped = True
+                elif char == '"':
+                    in_string = False
+                index += 1
+                continue
+
+            if char == '"':
+                in_string = True
+                pending_comma = None
+                output.append(char)
+                index += 1
+                continue
+
+            if char == "/" and next_char == "/":
+                index += 2
+                while index < len(text) and text[index] not in "\r\n":
+                    index += 1
+                continue
+
+            if char == "/" and next_char == "*":
+                index += 2
+                while index + 1 < len(text) and text[index:index + 2] != "*/":
+                    if text[index] in "\r\n":
+                        output.append(text[index])
+                    index += 1
+                if index + 1 >= len(text):
+                    raise ValueError(
+                        f"Invalid JSON in {filepath}: unterminated block comment"
+                    )
+                index += 2
+                continue
+
+            if char == ",":
+                pending_comma = len(output)
+            elif char in "}]":
+                if pending_comma is not None:
+                    output[pending_comma] = ""  # trailing comma: drop it
+                pending_comma = None
+            elif not char.isspace():
+                pending_comma = None
+            output.append(char)
+            index += 1
+
+        try:
+            data = json.loads("".join(output))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in {filepath}: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Invalid configuration in {filepath}: expected an object"
+            )
+        return data
+    
+    @classmethod
+    async def load_text(
+        cls,
+        text: str,
+        filepath: Path,
+        stored_layers: Optional[List[Any]] = None,
+        *,
+        resolve_refs: bool = True,
+    ) -> ConfigInfo:
+        """
+        Load configuration from text
+        
+        Args:
+            text: Config text (JSON/JSONC)
+            filepath: Source file path (for error messages and relative paths)
+            stored_layers: When given, receives the same text parsed without
+                expanding references, keys spelled as in a config dump; ``None``
+                when it cannot be read that way.
+            resolve_refs: substitute {env:}/{secret:}/{file:} references
+            
+        Returns:
+            ConfigInfo instance
+        """
+        stored_text = text
+
+        if resolve_refs:
+            # Replace environment variables
+            text = cls.replace_env_vars(text)
+            
+            # Replace secret references {secret:SECRET_ID}
+            text = cls.replace_secret_refs(text)
+            
+            # Replace file references
+            text = await cls.replace_file_refs(text, filepath.parent)
+        else:
+            from aegisops.config.references import quote_bare_references
+
+            # A template written outside a string (``"port": {env:PORT}``) only
+            # parses quoted; kept verbatim it reads as the reference text.
+            text = quote_bare_references(text)
+        
+        data = cls.parse_jsonc(text, filepath)
+        if stored_layers is not None:
+            stored_layers.append(
+                await cls._stored_layer(stored_text, filepath, parsed=data if stored_text == text else None)
+            )
+        
+        # Validate and parse with Pydantic
+        try:
+            config = ConfigInfo.model_validate(data)
+        except Exception as e:
+            raise ValueError(f"Invalid configuration in {filepath}: {e}")
+        
+        # Schema field is optional and not required
+        
+        return config
+    
+    @classmethod
+    async def load_global_config(
+        cls,
+        stored_layers: Optional[List[Any]] = None,
+        *,
+        resolve_refs: bool = True,
+    ) -> ConfigInfo:
+        """
+        Load global user configuration
+        
+        Load configuration from the unified user config directory.
+        
+        Returns:
+            ConfigInfo with global settings
+        """
+        global_cfg = cls.get_global()
+        result = ConfigInfo()
+        
+        # Try multiple file names in the unified config directory.
+        for filename in ["aegisops.json", "aegisops.jsonc", "config.json"]:
+            filepath = global_cfg.config_dir / filename
+            if filepath.exists():
+                loaded = await cls.load_file(filepath, stored_layers=stored_layers, resolve_refs=resolve_refs)
+                result = cls.merge_config_concat_arrays(result, loaded)
+        
+        return result
+    
+    @classmethod
+    async def get(cls) -> ConfigInfo:
+        """
+        Get complete configuration with all layers merged
+        
+        Matches TypeScript's Config.get() and state() functions.
+        
+        Merge order (low to high priority):
+        1. User config (~/.aegisops/config)
+        2. Custom config path (AEGISOPS_CONFIG env var)
+        3. Inline config (AEGISOPS_CONFIG_CONTENT env var)
+        
+        Returns:
+            Complete merged configuration
+        """
+        from aegisops.config.runtime import runtime_config
+
+        override = runtime_config.get()
+        if override is not None:
+            return override
+
+        if cls._cached_config is not None:
+            return cls._cached_config
+        
+        from aegisops.config.references import ReferencePlaces
+
+        stored_layers: List[Any] = []
+        result = await cls._load_merged(resolve_refs=True, stored_layers=stored_layers)
+        # One snapshot: the places always describe the cached config they came with.
+        cls._cached_config, cls._cached_reference_places = result, ReferencePlaces(stored_layers)
+        return result
+
+    @classmethod
+    async def load_fresh(cls) -> ConfigInfo:
+        """The merged configuration read from its sources now, without using or filling the cache."""
+        return await cls._load_merged(resolve_refs=True)
+
+    @classmethod
+    async def get_unresolved(cls) -> ConfigInfo:
+        """Merged configuration with {secret:}/{env:}/{file:} references kept verbatim.
+
+        This is what config APIs hand to clients: it never contains resolved
+        secret values, and a client that round-trips it through ``update``
+        keeps the references intact. Not cached.
+        """
+        return await cls._load_merged(resolve_refs=False)
+
+    @classmethod
+    async def _load_merged(
+        cls,
+        *,
+        resolve_refs: bool,
+        stored_layers: Optional[List[Any]] = None,
+    ) -> ConfigInfo:
+        global_cfg = cls.get_global()
+        result = ConfigInfo()
+        
+        # 1. Global user config
+        result = cls.merge_config_concat_arrays(
+            result,
+            await cls.load_global_config(stored_layers=stored_layers, resolve_refs=resolve_refs),
+        )
+        
+        # 2. Custom config path
+        if global_cfg.config_path:
+            custom_path = Path(global_cfg.config_path)
+            if custom_path.exists():
+                result = cls.merge_config_concat_arrays(
+                    result,
+                    await cls.load_file(custom_path, stored_layers=stored_layers, resolve_refs=resolve_refs)
+                )
+        
+        # 3. Inline config content
+        if global_cfg.config_content:
+            try:
+                inline_data = json.loads(global_cfg.config_content)
+                inline_config = ConfigInfo.model_validate(inline_data)
+                result = cls.merge_config_concat_arrays(result, inline_config)
+            except Exception as e:
+                from aegisops.utils.log import Log
+                log = Log.create(service="config")
+                log.error("Failed to parse AEGISOPS_CONFIG_CONTENT", {"error": str(e)})
+        
+        # Apply flag overrides
+        if global_cfg.disable_autocompact:
+            if result.compaction is None:
+                result.compaction = CompactionConfig()
+            result.compaction.auto = False
+        
+        if global_cfg.disable_prune:
+            if result.compaction is None:
+                result.compaction = CompactionConfig()
+            result.compaction.prune = False
+        
+        if global_cfg.permission:
+            try:
+                permission_data = json.loads(global_cfg.permission)
+                if result.permission is None:
+                    result.permission = {}
+                if isinstance(result.permission, dict):
+                    result.permission = _merge_permission_layers(
+                        _canonicalize_permission_dict(result.permission),
+                        _canonicalize_permission_dict(permission_data),
+                    )
+            except Exception:
+                pass
+        
+        return result
+
+    @classmethod
+    async def get_with_reference_places(cls) -> "tuple[ConfigInfo, ReferencePlaces]":
+        """The merged config and where its files store references, from the same load."""
+        from aegisops.config.references import ReferencePlaces
+
+        config = await cls.get()
+        cached_config, places = cls._cached_config, cls._cached_reference_places
+        if cached_config is config and places is not None:
+            return config, places
+        # A runtime override: no stored files to tell apart.
+        return config, ReferencePlaces()
+
+    @classmethod
+    async def _stored_layer(
+        cls, text: str, filepath: Path, parsed: Optional[Dict[str, Any]] = None
+    ) -> "StoredLayer":
+        """Config text as stored: parsed without expanding references, keys as a config dump spells them.
+
+        ``parsed`` is the text already parsed, when it holds nothing to expand.
+        """
+        from aegisops.config.references import StoredLayer, quote_bare_references, schema_normalize
+
+        if parsed is not None:
+            return StoredLayer(filepath, schema_normalize(parsed), {})
+        try:
+            data = schema_normalize(cls.parse_jsonc(quote_bare_references(text), filepath))
+        except Exception:
+            data = None
+        return StoredLayer(filepath, data, await cls._reference_values(text, filepath))
+
+    @classmethod
+    async def _reference_values(cls, text: str, filepath: Path) -> Dict[str, str]:
+        """What each reference written in ``text`` expands to, the way ``load_text`` expands it."""
+        from aegisops.config.references import CONFIG_REFERENCE
+
+        values: Dict[str, str] = {}
+        for token in set(CONFIG_REFERENCE.findall(text)):
+            try:
+                expanded = cls.replace_secret_refs(cls.replace_env_vars(token))
+                expanded = await cls.replace_file_refs(expanded, filepath.parent)
+                # The replacements are escaped for splicing into a JSON string.
+                values[token] = json.loads(f'"{expanded}"')
+            except Exception:
+                continue
+        return values
+
+    @classmethod
+    def _read_unexpanded(cls, text: str, filepath: Path) -> "tuple[Dict[str, Any], Dict[Any, str]]":
+        """Config text parsed with its references as written, and where they stand outside strings."""
+        from aegisops.config.references import quote_bare_references, strip_bare_marks
+
+        return strip_bare_marks(cls.parse_jsonc(quote_bare_references(text, mark=True), filepath))
+    
+    @classmethod
+    async def resolve_default_llm(cls) -> Optional[Dict[str, str]]:
+        """
+        Resolve the default LLM model from configuration.
+        
+        Priority:
+        1. default_models.llm in aegisops.json (structured, preferred)
+        2. config.model in aegisops.json (legacy "provider/model" string, fallback)
+        
+        Returns:
+            Dict with "provider_id" and "model_id", or None if not configured.
+        """
+        # Priority 1: default_models.llm (structured config)
+        try:
+            from aegisops.config.config_writer import ConfigWriter
+            default_llm = ConfigWriter.get_default_model("llm")
+            if default_llm and default_llm.get("provider_id") and default_llm.get("model_id"):
+                return {
+                    "provider_id": default_llm["provider_id"],
+                    "model_id": default_llm["model_id"],
+                }
+        except Exception:
+            pass
+        
+        # Priority 2: config.model (legacy string "provider/model")
+        try:
+            cfg = await cls.get()
+            if cfg.model:
+                model_str = cfg.model
+                if "/" in model_str:
+                    provider_id, model_id = model_str.split("/", 1)
+                    provider_id = provider_id.strip()
+                    model_id = model_id.strip()
+                    if provider_id and model_id:
+                        return {
+                            "provider_id": provider_id,
+                            "model_id": model_id,
+                        }
+        except Exception:
+            pass
+        
+        return None
+
+    @classmethod
+    async def update(
+        cls,
+        config: ConfigInfo,
+        project_dir: Optional[Path] = None,
+        *,
+        channel_allow_from_deletions: Optional[set[str]] = None,
+    ) -> None:
+        """
+        Update configuration
+        
+        Args:
+            config: New configuration
+            project_dir: Deprecated and ignored. Config is always written to
+                the unified user config directory.
+            channel_allow_from_deletions: Channel IDs whose persisted
+                allowFrom field should be removed after a successful full
+                config validation and merge.
+        """
+        _ = project_dir
+
+        config_file = cls.get_config_file()
+        
+        # Ensure parent directory exists
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        
+        from aegisops.config.references import (
+            ChangeRefused,
+            apply_changes,
+            contains_reference,
+            drop_unchanged,
+            write_unexpanded,
+        )
+
+        # Load existing: expanded, and as stored with its references unexpanded.
+        text = config_file.read_text(encoding="utf-8") if config_file.exists() else ""
+        existing = await cls.load_text(text, config_file) if config_file.exists() else ConfigInfo()
+        try:
+            stored, bare = cls._read_unexpanded(text, config_file) if config_file.exists() else ({}, {})
+        except ValueError as exc:
+            # Without the unexpanded file the save cannot keep its references,
+            # and would write secrets in plaintext.
+            raise ValueError(f"{config_file} cannot be read without expanding its references; not saving") from exc
+        existing_data = existing.model_dump(by_alias=True, exclude_none=True, mode="json")
+
+        # Write only what the caller changed against the config in force, the one
+        # it was shown, into aegisops.json as stored. Everything else stays as the
+        # file has it, so stored references stay references and other config
+        # layers are not copied in.
+        current, places = await cls.get_with_reference_places()
+        seen = current.model_dump(by_alias=True, exclude_none=True, mode="json")
+        changes = drop_unchanged(config.model_dump(by_alias=True, exclude_none=True, mode="json"), seen)
+        config_data = apply_changes(
+            stored,
+            changes,
+            seen,
+            existing_data,
+            own_values=await cls._reference_values(text, config_file),
+            others=lambda path: places.values_at(path, exclude=config_file),
+        )
+        if isinstance(changes.get("permission"), dict) and isinstance(stored.get("permission"), dict):
+            # Permission layers merge by their own rules (a rule string under a
+            # pattern map becomes its "*" entry), as merge_config_dicts does.
+            if contains_reference(stored["permission"]):
+                raise ChangeRefused(("permission",))
+            config_data["permission"] = _merge_permission_layers(
+                _canonicalize_permission_dict(stored["permission"]),
+                _canonicalize_permission_dict(changes["permission"]),
+            )
+        if channel_allow_from_deletions:
+            channels = config_data.get("channels")
+            if isinstance(channels, dict):
+                for channel_id in channel_allow_from_deletions:
+                    channel_cfg = channels.get(channel_id)
+                    if isinstance(channel_cfg, dict):
+                        channel_cfg.pop("allowFrom", None)
+                        channel_cfg.pop("allow_from", None)
+        new_text = write_unexpanded(config_data, bare)
+        # Validate the file as it will load (references expanded).
+        await cls.load_text(new_text, config_file)
+        from aegisops.config.runtime import runtime_config
+        if runtime_config.get() is not None:
+            raise RuntimeError("Configuration writes are disabled during a runtime override")
+        config_file.write_text(new_text, encoding="utf-8")
+        
+        # Clear cache
+        cls._cached_config = None
+    
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Clear cached configuration"""
+        cls._cached_config = None
+        cls._cached_reference_places = None
+    
+    @classmethod
+    def get_data_path(cls) -> Path:
+        """
+        Get data directory path
+        
+        Returns:
+            Path to data directory
+        """
+        global_cfg = cls.get_global()
+        return global_cfg.data_dir
+    
+    @classmethod
+    def get_config_path(cls) -> Path:
+        """
+        Get config directory path
+        
+        Returns:
+            Path to config directory
+        """
+        global_cfg = cls.get_global()
+        return global_cfg.config_dir
+
+    @classmethod
+    def get_config_file(cls) -> Path:
+        """Get the primary aegisops.json file path."""
+        return cls.get_config_path() / "aegisops.json"
+
+    @classmethod
+    def get_secret_file(cls) -> Path:
+        """Get the primary .secret.json file path."""
+        return cls.get_config_path() / ".secret.json"
+
+    @classmethod
+    def get_mcp_catalog_file(cls) -> Path:
+        """Get the primary mcp_list.json file path."""
+        return cls.get_config_path() / "mcp_list.json"
+    
+    @classmethod
+    def get_log_path(cls) -> Path:
+        """
+        Get log directory path
+        
+        Returns:
+            Path to log directory
+        """
+        global_cfg = cls.get_global()
+        return global_cfg.log_dir
+    
+    @classmethod
+    def get_project_config_path(cls) -> Path:
+        """
+        Compatibility wrapper for callers that still expect a config file path.
+        """
+        return cls.get_config_file()

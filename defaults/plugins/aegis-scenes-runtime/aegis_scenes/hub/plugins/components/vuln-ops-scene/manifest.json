@@ -1,0 +1,69 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "vuln-ops-scene",
+  "type": "component",
+  "name": "漏洞运营",
+  "nameCn": "漏洞运营",
+  "description": "漏洞台账、资产目录、整改复测、成员权限与操作审计。",
+  "descriptionCn": "漏洞台账、资产目录、整改复测、成员权限与操作审计。",
+  "version": "1.0.0",
+  "author": "AegisOps",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem",
+    "ndr",
+    "integration"
+  ],
+  "useCases": [
+    "alert-triage",
+    "log-analysis",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/components/vuln-ops-scene"
+  },
+  "compatibility": {
+    "aegisops": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": []
+  },
+  "entrypoints": [
+    "component.json"
+  ],
+  "components": [
+    {
+      "type": "webui",
+      "id": "vuln_ops"
+    }
+  ],
+  "checksums": {}
+}

@@ -1,0 +1,33 @@
+secrets:
+  - tdp_host
+  - tdp_api_key
+  - tdp_secret
+routes:
+  - method: GET
+    path: /health
+    handler: handlers.health
+    timeoutMs: 5000
+  - method: GET
+    path: /dashboard
+    handler: handlers.dashboard
+    timeoutMs: 30000
+  - method: POST
+    path: /judgement/prepare
+    handler: handlers.judgement_prepare
+    timeoutMs: 5000
+  - method: POST
+    path: /judgement/register
+    handler: handlers.judgement_register
+    timeoutMs: 5000
+  - method: GET
+    path: /judgement/status
+    handler: handlers.judgement_status
+    timeoutMs: 5000
+  - method: POST
+    path: /judgement/complete
+    handler: handlers.judgement_complete
+    timeoutMs: 5000
+  - method: POST
+    path: /judgement/fail
+    handler: handlers.judgement_fail
+    timeoutMs: 5000

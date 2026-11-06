@@ -1,0 +1,72 @@
+import { act, renderHook } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { usePluginViewMode } from './usePluginViewMode';
+
+beforeEach(() => { vi.restoreAllMocks(); window.localStorage.clear(); });
+
+describe('usePluginViewMode', () => {
+  it('defaults to the page native layout and stores only a user-requested view change', () => {
+    const { result } = renderHook(() => usePluginViewMode('agent', 'cards'));
+    expect(result.current[0]).toBe('cards');
+    expect(window.localStorage.length).toBe(0);
+    act(() => result.current[1]('list'));
+    expect(result.current[0]).toBe('list');
+    expect(window.localStorage.getItem('aegisops:plugin-view:agent')).toBe('list');
+    expect(window.localStorage.length).toBe(1);
+  });
+
+  it('restores valid view preferences and ignores untrusted stored values', () => {
+    window.localStorage.setItem('aegisops:plugin-view:skill', 'cards');
+    const { result, rerender } = renderHook(({ key }) => usePluginViewMode(key, 'list'), { initialProps: { key: 'skill' } });
+    expect(result.current[0]).toBe('cards');
+    window.localStorage.setItem('aegisops:plugin-view:tool-all', '{"groups": ["not-a-view"]}');
+    rerender({ key: 'tool-all' });
+    expect(result.current[0]).toBe('list');
+  });
+
+  it('never writes an old tab mode into a new key on key changes', () => {
+    window.localStorage.setItem('aegisops:plugin-view:tool-all', 'cards');
+    window.localStorage.setItem('aegisops:plugin-view:tool-mcp', 'list');
+    const { result, rerender } = renderHook(({ key }) => usePluginViewMode(key, 'list'), { initialProps: { key: 'tool-all' } });
+    expect(result.current[0]).toBe('cards');
+    rerender({ key: 'tool-mcp' });
+    expect(result.current[0]).toBe('list');
+    expect(window.localStorage.getItem('aegisops:plugin-view:tool-mcp')).toBe('list');
+    act(() => result.current[1]('cards'));
+    expect(window.localStorage.getItem('aegisops:plugin-view:tool-mcp')).toBe('cards');
+    rerender({ key: 'tool-all' });
+    expect(result.current[0]).toBe('cards');
+    rerender({ key: 'tool-api' });
+    expect(result.current[0]).toBe('list');
+    expect(window.localStorage.getItem('aegisops:plugin-view:tool-api')).toBeNull();
+  });
+
+  it('starts phones on cards unless the user chose a view, and leaves desktop defaults alone', () => {
+    const matchMedia = vi.fn((query: string) => ({ matches: query === '(max-width: 767px)' }));
+    vi.stubGlobal('matchMedia', matchMedia);
+    try {
+      const phone = renderHook(() => usePluginViewMode('tools.all', 'list'));
+      expect(phone.result.current[0]).toBe('cards');
+      expect(window.localStorage.length).toBe(0);
+
+      window.localStorage.setItem('aegisops:plugin-view:skill', 'list');
+      const chosen = renderHook(() => usePluginViewMode('skill', 'list'));
+      expect(chosen.result.current[0]).toBe('list');
+
+      matchMedia.mockImplementation(() => ({ matches: false }));
+      const desktop = renderHook(() => usePluginViewMode('tools.mcp', 'list'));
+      expect(desktop.result.current[0]).toBe('list');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('continues in memory when reading or writing browser storage fails', () => {
+    vi.spyOn(window.localStorage, 'getItem').mockImplementation(() => { throw new Error('blocked'); });
+    vi.spyOn(window.localStorage, 'setItem').mockImplementation(() => { throw new Error('quota'); });
+    const { result } = renderHook(() => usePluginViewMode('device', 'cards'));
+    expect(result.current[0]).toBe('cards');
+    act(() => result.current[1]('list'));
+    expect(result.current[0]).toBe('list');
+  });
+});

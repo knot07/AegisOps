@@ -1,0 +1,18 @@
+name: multimodal-looker
+group: 系统辅助
+name_cn: 多模态分析智能体
+description: >-
+  Analyze media files (PDFs, images, diagrams) that require interpretation
+  beyond raw text. Extracts specific information or summaries from documents,
+  describes visual content.
+mode: subagent
+hidden: false
+tags: [system]
+delegatable: true
+tools:
+  - read
+prompt_metadata:
+  category: utility
+  cost: CHEAP
+  prompt_alias: Multimodal Looker
+  triggers: []

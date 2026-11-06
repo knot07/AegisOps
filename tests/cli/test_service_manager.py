@@ -1,0 +1,3068 @@
+import json
+import os
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from pathlib import Path
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+from aegisops.cli import service_manager
+from aegisops.cli import service_supervisor
+from aegisops.cli import service_control
+from aegisops.cli import service_process
+from tests.helpers.service_supervisor import (
+    SleeperProcessAdapter,
+    make_short_runtime_root,
+)
+
+_REAL_ENSURE_WEBUI_DIST = service_manager._ensure_webui_dist
+
+
+class DummyConsole:
+    def __init__(self) -> None:
+        self.messages: list[str] = []
+
+    def print(self, *args, **kwargs) -> None:
+        self.messages.append(" ".join(str(arg) for arg in args))
+
+
+@pytest.fixture(autouse=True)
+def _skip_backend_webui_dist_check(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager, "_ensure_webui_dist", lambda *_args, **_kwargs: None)
+
+
+def _make_runtime_paths(tmp_path: Path) -> service_manager.RuntimePaths:
+    return service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+
+
+def _write_legacy_runtime_record(pid_file: Path, record: service_manager.RuntimeRecord) -> None:
+    payload: dict[str, object] = {"pid": record.pid}
+    if record.pgid is not None:
+        payload["pgid"] = record.pgid
+    if record.host is not None:
+        payload["host"] = record.host
+    if record.port is not None:
+        payload["port"] = record.port
+    if record.command:
+        payload["command"] = list(record.command)
+    if record.started_at is not None:
+        payload["started_at"] = record.started_at
+    pid_file.write_text(json.dumps(payload, ensure_ascii=True, sort_keys=True), encoding="utf-8")
+
+
+def test_supervisor_uses_tcp_control_when_af_unix_is_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(service_control.sys, "platform", "linux")
+    monkeypatch.delattr(service_control.socket, "AF_UNIX", raising=False)
+
+    assert service_control.supervisor_uses_tcp_control() is True
+
+
+def test_service_supervisor_imports_when_af_unix_is_unavailable() -> None:
+    code = "\n".join(
+        [
+            "import socket",
+            "if hasattr(socket, 'AF_UNIX'):",
+            "    delattr(socket, 'AF_UNIX')",
+            "import aegisops.cli.service_supervisor",
+        ]
+    )
+
+    completed = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=False)
+
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_runtime_paths_follow_aegisops_root_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path))
+
+    paths = service_manager.runtime_paths()
+
+    assert paths.run_dir == tmp_path / "run"
+    assert paths.log_dir == tmp_path / "logs"
+    assert paths.backend_pid == tmp_path / "run" / "backend.pid"
+    assert paths.frontend_log == tmp_path / "logs" / "webui.log"
+
+
+def test_resolve_node_executable_prefers_aegisops_node_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AEGISOPS_INSTALL_ROOT", raising=False)
+    home = tmp_path / "nh"
+    home.mkdir()
+    if sys.platform == "win32":
+        (home / "node.exe").write_bytes(b"")
+    else:
+        (home / "bin").mkdir()
+        (home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("AEGISOPS_NODE_HOME", str(home))
+
+    resolved = service_manager.resolve_node_executable()
+    assert resolved is not None
+    assert Path(resolved).name in ("node", "node.exe")
+
+
+def test_resolve_node_executable_prefers_aegisops_install_root_tools_node(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AEGISOPS_NODE_HOME", raising=False)
+    root = tmp_path / "inst"
+    node_home = root / "tools" / "node"
+    node_home.mkdir(parents=True)
+    if sys.platform == "win32":
+        (node_home / "node.exe").write_bytes(b"")
+    else:
+        (node_home / "bin").mkdir(parents=True)
+        (node_home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("AEGISOPS_INSTALL_ROOT", str(root))
+
+    resolved = service_manager.resolve_node_executable()
+    assert resolved is not None
+    assert Path(resolved).name in ("node", "node.exe")
+
+
+def test_resolve_node_executable_falls_back_to_which_when_env_absent(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AEGISOPS_NODE_HOME", raising=False)
+    monkeypatch.delenv("AEGISOPS_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+
+    assert service_manager.resolve_node_executable() == "/usr/bin/node"
+
+
+def test_resolve_node_executable_falls_back_to_which_when_path_missing(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AEGISOPS_INSTALL_ROOT", raising=False)
+    monkeypatch.setenv("AEGISOPS_NODE_HOME", str(tmp_path / "nonexistent"))
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/node" if name == "node" else None)
+
+    assert service_manager.resolve_node_executable() == "/usr/bin/node"
+
+
+def test_resolve_npm_executable_prefers_aegisops_node_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AEGISOPS_INSTALL_ROOT", raising=False)
+    home = tmp_path / "nh"
+    home.mkdir()
+    if sys.platform == "win32":
+        (home / "node.exe").write_bytes(b"")
+        bundled_npm = home / "npm.cmd"
+    else:
+        (home / "bin").mkdir()
+        (home / "bin" / "node").write_bytes(b"")
+        bundled_npm = home / "bin" / "npm"
+    bundled_npm.write_bytes(b"")
+    monkeypatch.setenv("AEGISOPS_NODE_HOME", str(home))
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/bin/npm")
+
+    resolved = service_manager.resolve_npm_executable()
+
+    assert resolved == str(bundled_npm)
+
+
+def test_resolve_npm_executable_falls_back_to_which(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("AEGISOPS_NODE_HOME", raising=False)
+    monkeypatch.delenv("AEGISOPS_INSTALL_ROOT", raising=False)
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+
+    def fake_which(name: str) -> str | None:
+        if name == "npm.cmd":
+            return r"C:\Program Files\nodejs\npm.cmd"
+        return None
+
+    monkeypatch.setattr(service_manager, "which", fake_which)
+
+    assert service_manager.resolve_npm_executable() == r"C:\Program Files\nodejs\npm.cmd"
+
+
+def test_build_frontend_env_prepends_bundled_node_to_path(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AEGISOPS_INSTALL_ROOT", raising=False)
+    node_home = tmp_path / "tools" / "node"
+    if sys.platform == "win32":
+        node_home.mkdir(parents=True)
+        (node_home / "node.exe").write_bytes(b"")
+    else:
+        (node_home / "bin").mkdir(parents=True)
+        (node_home / "bin" / "node").write_bytes(b"")
+    monkeypatch.setenv("AEGISOPS_NODE_HOME", str(node_home))
+
+    config = service_manager.ServiceConfig(backend_host="127.0.0.1", backend_port=8000)
+    env = service_manager.build_frontend_env(config)
+
+    path_entries = env["PATH"].split(service_manager.os.pathsep)
+    if sys.platform == "win32":
+        assert path_entries[0] == str(node_home)
+    else:
+        assert path_entries[0] == str(node_home / "bin")
+
+
+def test_build_frontend_env_no_path_injection_without_bundled_node(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("AEGISOPS_NODE_HOME", raising=False)
+    monkeypatch.delenv("AEGISOPS_INSTALL_ROOT", raising=False)
+
+    import os as _os
+    original_path = _os.environ.get("PATH", "")
+    config = service_manager.ServiceConfig(backend_host="127.0.0.1", backend_port=8000)
+    env = service_manager.build_frontend_env(config)
+
+    assert env["PATH"] == original_path
+
+
+def test_cleanup_stale_pid_file_removes_dead_pid(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    pid_file.write_text("999999", encoding="utf-8")
+
+    service_manager.cleanup_stale_pid_file(pid_file)
+
+    assert not pid_file.exists()
+
+
+def test_pid_is_running_uses_windows_probe(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "_windows_pid_is_running", lambda pid: pid == 123)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("os.kill should not be used on Windows")
+
+    monkeypatch.setattr(service_manager.os, "kill", fail_if_called)
+
+    assert service_manager.pid_is_running(123) is True
+    assert service_manager.pid_is_running(456) is False
+
+
+def test_windows_process_snapshot_handles_empty_stdout(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "which", lambda name: "powershell.exe" if name == "powershell" else None)
+
+    def fake_run(*_args, **kwargs):
+        assert kwargs["encoding"] == "utf-8"
+        assert kwargs["errors"] == "replace"
+        return SimpleNamespace(returncode=0, stdout=None)
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._windows_process_snapshot(123) == {
+        "name": "",
+        "command_line": "",
+        "executable_path": "",
+    }
+
+
+def test_process_group_is_running_ignores_permission_error_without_live_members(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service_manager.os,
+        "killpg",
+        lambda _pgid, _sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+    )
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda _pgid: [])
+
+    assert service_manager.process_group_is_running(222) is False
+
+
+def test_process_group_is_running_checks_members_after_permission_error(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        service_manager.os,
+        "killpg",
+        lambda _pgid, _sig: (_ for _ in ()).throw(PermissionError(1, "Operation not permitted")),
+    )
+    monkeypatch.setattr(service_manager, "_process_group_member_pids", lambda _pgid: [333, 444])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 444)
+
+    assert service_manager.process_group_is_running(222) is True
+
+
+def test_read_runtime_record_supports_legacy_pid_file(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    pid_file.write_text("12345\n", encoding="utf-8")
+
+    record = service_manager.read_runtime_record(pid_file)
+
+    assert record == service_manager.RuntimeRecord(pid=12345)
+
+
+def test_runtime_record_round_trip_preserves_metadata(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    record = service_manager.RuntimeRecord(
+        pid=4321,
+        pgid=4321,
+        port=8000,
+        command=("python", "-m", "uvicorn"),
+        started_at=1234.5,
+    )
+
+    _write_legacy_runtime_record(pid_file, record)
+
+    assert json.loads(pid_file.read_text(encoding="utf-8")) == {
+        "command": ["python", "-m", "uvicorn"],
+        "pgid": 4321,
+        "pid": 4321,
+        "port": 8000,
+        "started_at": 1234.5,
+    }
+    assert service_manager.read_runtime_record(pid_file) == record
+
+
+def test_runtime_record_round_trip_preserves_host(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    record = service_manager.RuntimeRecord(
+        pid=4321,
+        pgid=4321,
+        host="0.0.0.0",
+        port=8000,
+        command=("python", "-m", "uvicorn"),
+        started_at=1234.5,
+    )
+
+    _write_legacy_runtime_record(pid_file, record)
+
+    assert json.loads(pid_file.read_text(encoding="utf-8")) == {
+        "command": ["python", "-m", "uvicorn"],
+        "host": "0.0.0.0",
+        "pgid": 4321,
+        "pid": 4321,
+        "port": 8000,
+        "started_at": 1234.5,
+    }
+    assert service_manager.read_runtime_record(pid_file) == record
+
+
+def test_read_runtime_record_rejects_invalid_content(tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    pid_file.write_text("{not-json", encoding="utf-8")
+
+    assert service_manager.read_runtime_record(pid_file) is None
+
+
+def test_cleanup_stale_pid_file_keeps_live_process_group(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    _write_legacy_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(pid=1001, pgid=2002, port=8000),
+    )
+
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda pgid: pgid == 2002)
+
+    service_manager.cleanup_stale_pid_file(pid_file)
+
+    assert pid_file.exists()
+
+
+def test_cleanup_stale_pid_file_removes_reused_windows_pid(monkeypatch, tmp_path: Path) -> None:
+    pid_file = tmp_path / "backend.pid"
+    _write_legacy_runtime_record(
+        pid_file,
+        service_manager.RuntimeRecord(
+            pid=1232,
+            host="127.0.0.1",
+            port=8000,
+            command=("python.exe", "-m", "aegisops.cli.main", "serve"),
+        ),
+    )
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 1232)
+    monkeypatch.setattr(
+        service_manager,
+        "_windows_process_snapshot",
+        lambda _pid: {
+            "name": "svchost.exe",
+            "command_line": r"C:\Windows\System32\svchost.exe -k netsvcs",
+            "executable_path": r"C:\Windows\System32\svchost.exe",
+        },
+    )
+
+    service_manager.cleanup_stale_pid_file(pid_file)
+
+    assert not pid_file.exists()
+
+
+def test_selected_log_paths_support_specific_targets(tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+
+    assert service_manager.selected_log_paths(paths, backend=True) == [paths.backend_log]
+    assert service_manager.selected_log_paths(paths, webui=True) == [paths.backend_log]
+    assert service_manager.selected_log_paths(paths) == [paths.backend_log]
+
+
+def test_show_logs_falls_back_to_local_files_when_daemon_unavailable(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.log_dir.mkdir(parents=True)
+    paths.backend_log.write_text("backend-one\nbackend-two\n", encoding="utf-8")
+    paths.frontend_log.write_text("webui-one\n", encoding="utf-8")
+    (paths.log_dir / "daemon.log").write_text("daemon-one\n", encoding="utf-8")
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(
+        service_manager,
+        "read_logs",
+        lambda **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("down")),
+    )
+
+    service_manager.show_logs(console, follow=False, lines=1)
+
+    assert any("改为读取本地日志文件" in message for message in console.messages)
+    assert "[aegisops] backend-two" in console.messages
+    assert "[daemon] daemon-one" in console.messages
+
+
+def test_daemon_log_service_name_uses_daemon_only(tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    daemon.paths = paths
+
+    assert daemon._log_paths_for_service("daemon") == [("daemon", paths.log_dir / "daemon.log")]
+    assert daemon._log_paths_for_service("supervisor") == []
+
+
+def test_daemon_log_event_prefix_uses_daemon(capsys) -> None:
+    service_supervisor._daemon_log("stopped")
+
+    assert "daemon.stopped" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("disconnect_error", [BrokenPipeError, ConnectionResetError, ConnectionAbortedError])
+def test_supervisor_control_send_json_ignores_disconnected_client(disconnect_error: type[Exception]) -> None:
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    handler_class = daemon._handler_class()
+    handler = handler_class.__new__(handler_class)
+    calls: list[tuple[str, object]] = []
+
+    handler.send_response = lambda status: calls.append(("status", status))
+    handler.send_header = lambda name, value: calls.append((name, value))
+    handler.end_headers = lambda: calls.append(("end_headers", None))
+    handler.wfile = SimpleNamespace(write=lambda _body: (_ for _ in ()).throw(disconnect_error()))
+
+    handler._send_json({"ok": True})
+
+    assert calls[0] == ("status", 200)
+
+
+def test_supervisor_control_get_ignores_logs_client_disconnect() -> None:
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    handler_class = daemon._handler_class()
+    handler = handler_class.__new__(handler_class)
+    sent: list[dict[str, object]] = []
+
+    daemon.handle_logs_request = lambda *_args, **_kwargs: (_ for _ in ()).throw(BrokenPipeError())
+    handler.path = "/logs?service=daemon"
+    handler._send_json = lambda payload, **_kwargs: sent.append(payload)
+
+    handler.do_GET()
+
+    assert sent == []
+
+
+def test_open_default_browser_uses_windows_startfile(monkeypatch) -> None:
+    opened: list[str] = []
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager.os, "startfile", lambda url: opened.append(url), raising=False)
+    monkeypatch.setattr(
+        service_manager.webbrowser,
+        "open",
+        lambda _url: (_ for _ in ()).throw(AssertionError("webbrowser should not be used on Windows when startfile exists")),
+    )
+
+    service_manager.open_default_browser("http://127.0.0.1:5173", console)
+
+    assert opened == ["http://127.0.0.1:5173"]
+    assert console.messages == ["[aegisops] 浏览器已打开: http://127.0.0.1:5173"]
+
+
+def test_tail_lines_returns_recent_content(tmp_path: Path) -> None:
+    log_file = tmp_path / "backend.log"
+    log_file.write_text("a\nb\nc\n", encoding="utf-8")
+
+    assert service_manager.tail_lines(log_file, 2) == ["b", "c"]
+
+
+def test_parse_windows_netstat_output_extracts_unique_pids() -> None:
+    output = """
+  TCP    127.0.0.1:8000       0.0.0.0:0              LISTENING       1234
+  TCP    127.0.0.1:8000       0.0.0.0:0              LISTENING       1234
+  TCP    127.0.0.1:5173       0.0.0.0:0              LISTENING       5678
+"""
+
+    assert service_manager._parse_windows_netstat_output(output) == [1234, 5678]
+
+
+def test_run_windows_netstat_handles_missing_stdout(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=None),
+    )
+
+    assert service_manager._run_windows_netstat(5173) == ""
+
+
+def test_run_windows_netstat_decodes_with_replacement(monkeypatch) -> None:
+    """netstat output is decoded as utf-8/replace so GBK console output on
+    Chinese Windows never raises UnicodeDecodeError in the reader thread."""
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="  TCP 127.0.0.1:5173 0.0.0.0:0 LISTENING 42\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert "42" in service_manager._run_windows_netstat(5173)
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_windows_tasklist_process_name_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout='"python.exe","9436"\n')
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._windows_tasklist_process_name(9436) == "python.exe"
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_process_list_pids_windows_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="9436\n36056\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._process_list_pids() == [9436, 36056]
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_get_node_major_version_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager, "resolve_node_executable", lambda: "node")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="v20.11.1\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager.get_node_major_version() == 20
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_windows_process_probes_survive_gbk_bytes(monkeypatch) -> None:
+    """End-to-end: real GBK-encoded bytes flowing through the decode path
+    must not raise UnicodeDecodeError (the restart-time reader-thread crash)."""
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    # 0xbb is the byte that crashed utf-8 decode in the original bug report.
+    gbk_stdout = "映像名称: python.exe 拒绝访问".encode("gbk").decode("utf-8", errors="replace")
+
+    def fake_run(*_args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
+        return SimpleNamespace(returncode=0, stdout=gbk_stdout)
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    # None of these should raise, even with mojibake stdout.
+    service_manager._windows_tasklist_process_name(123)
+    service_manager._run_windows_netstat(5173)
+    service_manager._process_list_pids()
+
+
+def test_port_owner_pids_warns_when_no_tool_found(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+
+    with pytest.warns(RuntimeWarning, match="apt/yum install lsof -y"):
+        assert service_manager.port_owner_pids(5173) == []
+
+
+def test_port_is_in_use_falls_back_to_bind_when_pid_lookup_unavailable(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+    monkeypatch.setattr(service_manager, "_bind_port_available", lambda _port: False)
+
+    with pytest.warns(RuntimeWarning, match="退回到 bind 检查"):
+        assert service_manager.port_is_in_use(5173) is True
+
+
+@pytest.mark.parametrize(("port_available", "expected"), [(True, False), (False, True)])
+def test_windows_port_is_in_use_confirms_empty_pid_lookup_with_bind(
+    monkeypatch,
+    port_available: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "_bind_port_available", lambda _port: port_available)
+
+    assert service_manager.port_is_in_use(5173, listeners=[]) is expected
+
+
+@pytest.mark.parametrize(
+    ("platform", "reuse_expected"),
+    [("linux", True), ("darwin", False), ("win32", False)],
+)
+def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch, platform: str, reuse_expected: bool) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", platform)
+    binds: list[tuple[str, int]] = []
+    sockopts: list[tuple[object, ...]] = []
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def setsockopt(self, *args) -> None:
+            sockopts.append(args)
+
+        def bind(self, address: tuple[str, int]) -> None:
+            binds.append(address)
+
+    monkeypatch.setattr(service_manager.socket, "socket", lambda *_args, **_kwargs: FakeSocket())
+
+    assert service_manager._bind_port_available(8000) is True
+    assert binds == [("0.0.0.0", 8000)]
+    # Linux probes like uvicorn binds (SO_REUSEADDR, still refused by any listener);
+    # elsewhere SO_REUSEADDR could bind over a live listener, so the probe stays plain
+    expected = [(service_manager.socket.SOL_SOCKET, service_manager.socket.SO_REUSEADDR, 1)] if reuse_expected else []
+    assert sockopts == expected
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux TIME_WAIT / SO_REUSEADDR semantics")
+def test_bind_port_available_ignores_time_wait_but_not_a_listener() -> None:
+    import socket
+
+    def listener(host: str) -> socket.socket:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)  # what uvicorn does
+        sock.bind((host, 0))
+        sock.listen()
+        return sock
+
+    # a live listener on a specific address still blocks the wildcard probe (#394)
+    with listener("127.0.0.1") as other:
+        assert service_manager._bind_port_available(other.getsockname()[1]) is False
+
+    server = listener("0.0.0.0")
+    port = server.getsockname()[1]
+    assert service_manager._bind_port_available(port) is False
+    # a browser tab's open event stream when the backend stops: the server closes first,
+    # its side of the connection lingers in TIME_WAIT after the listener is gone
+    client = socket.create_connection(("127.0.0.1", port))
+    conn, _ = server.accept()
+    conn.close()
+    assert client.recv(1) == b""
+    client.close()
+    server.close()
+    plain = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    with pytest.raises(OSError):
+        plain.bind(("0.0.0.0", port))  # the old probe called this port busy for a minute
+    plain.close()
+    assert service_manager._bind_port_available(port) is True
+
+
+def test_wait_for_http_rejects_unreachable_responses(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(503, json={"detail": "not found"}),
+        httpx.Response(500, json={"status": "starting"}),
+        httpx.Response(502, text="bad gateway"),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(service_manager.ServiceError, match="启动超时"):
+        service_manager.wait_for_http(
+            ["http://127.0.0.1:8000/api/health"],
+            "后端服务",
+            attempts=3,
+            delay=0.0,
+        )
+
+
+def test_wait_for_http_accepts_reachable_json_response(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(503, json={"detail": "warming"}),
+        httpx.Response(200, json={"name": "AegisOps API", "status": "running"}),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    service_manager.wait_for_http(
+        ["http://127.0.0.1:8000/api/health"],
+        "后端服务",
+        attempts=2,
+        delay=0.0,
+    )
+
+
+def test_wait_for_http_accepts_running_status_response(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(200, json={"name": "AegisOps API", "status": "starting"}),
+        httpx.Response(200, json={"name": "AegisOps API", "status": "running"}),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    service_manager.wait_for_http(
+        ["http://127.0.0.1:8000"],
+        "后端服务",
+        attempts=2,
+        delay=0.0,
+        validator=service_manager._is_running_status_response,
+    )
+
+
+def test_wait_for_http_rejects_missing_running_status_response(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(200, json={"name": "AegisOps API", "status": "starting"}),
+        httpx.Response(200, text="<html>ok</html>"),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    with pytest.raises(service_manager.ServiceError, match="启动超时"):
+        service_manager.wait_for_http(
+            ["http://127.0.0.1:8000"],
+            "后端服务",
+            attempts=2,
+            delay=0.0,
+            validator=service_manager._is_running_status_response,
+        )
+
+
+def test_wait_for_http_accepts_reachable_html_by_default(monkeypatch) -> None:
+    responses = iter([
+        httpx.Response(503, text="warming"),
+        httpx.Response(200, text="<html>ok</html>"),
+    ])
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return next(responses)
+
+    monkeypatch.setattr(
+        service_manager.httpx,
+        "Client",
+        lambda *, timeout, trust_env: _FakeClient(),
+    )
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _delay: None)
+
+    service_manager.wait_for_http(["http://127.0.0.1:5173"], "WebUI", attempts=2, delay=0.0)
+
+
+def test_wait_for_http_ignores_proxy_environment(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeClient:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def get(self, _url):
+            return httpx.Response(200, json={"status": "healthy", "version": "v1"})
+
+    def _client_factory(*, timeout, trust_env):
+        captured["timeout"] = timeout
+        captured["trust_env"] = trust_env
+        return _FakeClient()
+
+    monkeypatch.setattr(service_manager.httpx, "Client", _client_factory)
+
+    service_manager.wait_for_http(
+        ["http://127.0.0.1:8000/api/health"],
+        "后端服务",
+        attempts=1,
+        delay=0.0,
+    )
+
+    assert captured == {"timeout": 2.0, "trust_env": False}
+
+
+def test_resolve_python_subprocess_command_prefers_venv(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    venv_python = tmp_path / ".venv" / "bin" / "python"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    tool_env = tmp_path / "tool-env"
+    tool_python = tool_env / "bin" / "python"
+    tool_python.parent.mkdir(parents=True)
+    tool_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service_manager,
+        "_python_env_root_from_module",
+        lambda module_name: tool_env if module_name == "uvicorn" else None,
+    )
+
+    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(venv_python)]
+
+
+def test_resolve_python_subprocess_command_falls_back_to_module_env(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    tool_env = tmp_path / "tool-env"
+    python_exe = tool_env / "bin" / "python"
+    python_exe.parent.mkdir(parents=True)
+    python_exe.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        service_manager,
+        "_python_env_root_from_module",
+        lambda module_name: tool_env if module_name == "uvicorn" else None,
+    )
+
+    assert service_manager.resolve_python_subprocess_command(tmp_path) == [str(python_exe)]
+
+
+def test_resolve_aegisops_cli_command_prefers_venv_entry_point_unix(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    venv_aegisops = tmp_path / ".venv" / "bin" / "aegisops"
+    venv_aegisops.parent.mkdir(parents=True)
+    venv_aegisops.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/aegisops" if name == "aegisops" else None)
+
+    assert service_manager.resolve_aegisops_cli_command(tmp_path) == [str(venv_aegisops.resolve())]
+
+
+def test_resolve_aegisops_cli_command_uses_python_module_on_windows(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    venv_python = tmp_path / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(service_manager, "which", lambda name: r"C:\tools\aegisops.exe" if name == "aegisops" else None)
+
+    assert service_manager.resolve_aegisops_cli_command(tmp_path) == [
+        str(venv_python),
+        "-m",
+        "aegisops.cli.main",
+    ]
+
+
+def test_resolve_aegisops_cli_command_falls_back_to_which(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager, "which", lambda name: "/usr/local/bin/aegisops" if name == "aegisops" else None)
+
+    assert service_manager.resolve_aegisops_cli_command(tmp_path) == ["/usr/local/bin/aegisops"]
+
+
+def test_resolve_aegisops_cli_command_falls_back_to_python_module(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(service_manager, "_aegisops_executable_from_venv", lambda _venv_root: None)
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+    monkeypatch.setattr(service_manager.sys, "argv", ["python"])
+    monkeypatch.setattr(service_manager, "resolve_python_subprocess_command", lambda root=None: ["/env/bin/python"])
+
+    assert service_manager.resolve_aegisops_cli_command(tmp_path) == [
+        "/env/bin/python",
+        "-m",
+        "aegisops.cli.main",
+    ]
+
+
+def _supervisor_status_payload() -> dict[str, object]:
+    return {
+        "daemon": {
+            "pid": 100,
+            "state": "running",
+            "log_path": "/tmp/logs/daemon.log",
+        },
+        "backend": {
+            "pid": 111,
+            "host": "0.0.0.0",
+            "port": 9000,
+            "state": "healthy",
+            "last_error": None,
+            "log_path": "/tmp/logs/backend.log",
+        },
+        "webui": {
+            "host": "0.0.0.0",
+            "port": 9000,
+            "state": "static",
+            "last_error": None,
+            "log_path": "/tmp/logs/backend.log",
+        },
+    }
+
+
+def _supervisor_status(payload: dict[str, object] | None = None) -> service_control.SupervisorStatus:
+    return service_control.parse_supervisor_status(payload or _supervisor_status_payload())
+
+
+def test_build_status_lines_reports_supervisor_control_status(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status())
+
+    lines = service_manager.build_status_lines(paths)
+
+    assert lines[0] == "[aegisops] 服务"
+    assert lines[1] == "[aegisops]   daemon: state=running PID=100"
+    assert "http://127.0.0.1:9000" in lines[2]
+    assert lines[5] == "[aegisops]   daemon: /tmp/logs/daemon.log"
+    assert lines[6] == "[aegisops]   aegisops: /tmp/logs/backend.log"
+
+
+def test_startup_status_lines_use_progress_summary() -> None:
+    lines = service_manager._startup_status_lines_from_payload(_supervisor_status_payload())
+
+    assert lines[:2] == [
+        "[aegisops] AegisOps daemon 已启动。",
+        "[aegisops] AegisOps service 已启动。",
+    ]
+    assert lines[4] == "[aegisops]   daemon: state=running PID=100"
+    assert lines[5] == "[aegisops]   aegisops: state=healthy PID=111 URL=http://127.0.0.1:9000"
+    assert lines[8] == "[aegisops]   daemon: /tmp/logs/daemon.log"
+    assert lines[9] == "[aegisops]   aegisops: /tmp/logs/backend.log"
+
+
+def test_startup_status_lines_mark_unhealthy_steps() -> None:
+    payload = _supervisor_status_payload()
+    payload["backend"]["state"] = "degraded"
+    payload["backend"]["last_error"] = "port occupied"
+
+    lines = service_manager._startup_status_lines_from_payload(payload)
+
+    assert lines[1] == "[aegisops] AegisOps service 启动异常。"
+    assert lines[5] == "[aegisops]   aegisops: state=degraded PID=111 URL=http://127.0.0.1:9000 last_error=port occupied"
+
+
+def test_startup_status_lines_can_skip_daemon_step() -> None:
+    lines = service_manager._startup_status_lines_from_payload(
+        _supervisor_status_payload(),
+        include_daemon_step=False,
+    )
+
+    assert lines[:1] == ["[aegisops] AegisOps service 已启动。"]
+
+
+def test_build_status_lines_reports_daemon_down_without_port_scans(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        service_manager,
+        "read_supervisor_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("down")),
+    )
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: calls.append("port_owner") or [])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda *_args, **_kwargs: calls.append("port_in_use") or False)
+    monkeypatch.setattr(service_manager, "trusted_daemon_process_pids", lambda **_kwargs: [])
+
+    lines = service_manager.build_status_lines(paths)
+
+    assert lines[0] == "[aegisops] AegisOps daemon 未运行"
+    assert calls == []
+
+
+def test_build_status_lines_reports_residual_daemon_when_control_api_is_down(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+
+    monkeypatch.setattr(
+        service_manager,
+        "read_supervisor_status",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("down")),
+    )
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "trusted_daemon_process_pids", lambda **_kwargs: [52058])
+
+    lines = service_manager.build_status_lines(paths)
+
+    assert lines == [
+        "[aegisops] AegisOps daemon control API 未运行",
+        "[aegisops] 检测到残留 daemon 进程: PID=52058",
+        f"[aegisops] 日志: {paths.log_dir / 'daemon.log'}",
+        "[aegisops] 可执行 `aegisops stop` 清理残留进程。",
+    ]
+
+
+def test_start_all_starts_supervisor_when_control_api_is_down(monkeypatch) -> None:
+    call_order: list[str] = []
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: (call_order.append("ensure_runtime_dirs"), paths)[1])
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: call_order.append("_start_all_without_stop"))
+
+    service_manager.start_all(service_manager.ServiceConfig(), console=None)
+
+    assert call_order == ["ensure_runtime_dirs", "_start_all_without_stop"]
+
+
+def test_start_all_checks_supervisor_before_starting(monkeypatch) -> None:
+    events: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+
+    def supervisor_running(_paths) -> bool:
+        events.append("supervisor")
+        return False
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", supervisor_running)
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: events.append("start"))
+
+    service_manager.start_all(service_manager.ServiceConfig(frontend_port=5173), console)
+
+    assert events == ["supervisor", "start"]
+
+
+def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: _make_runtime_paths(Path("/tmp/aegisops-test")))
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "show_status", lambda _console: calls.append("status"))
+    monkeypatch.setattr(service_manager, "open_default_browser", lambda _url, _console: calls.append("browser"))
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda *_args: calls.append("start"))
+
+    service_manager.start_all(service_manager.ServiceConfig(no_browser=True), console=console)
+
+    assert calls == ["status"]
+    assert "[aegisops] AegisOps daemon 已在运行。" in console.messages
+
+
+def test_start_all_restarts_paused_supervisor(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+    paused_payload = _supervisor_status_payload()
+    paused_payload["backend"].update({
+        "pid": None,
+        "state": "paused",
+        "health": "paused",
+        "paused": True,
+        "last_error": "control upgrade prepare",
+    })
+    paused_payload["webui"].update({
+        "state": "paused",
+        "health": "paused",
+        "paused": True,
+        "last_error": "control upgrade prepare",
+    })
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(paused_payload))
+    monkeypatch.setattr(service_manager, "_stop_all_unlocked", lambda _console, **_kwargs: calls.append("stop"))
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: calls.append("start"))
+
+    service_manager.start_all(service_manager.ServiceConfig(), console)
+
+    assert calls == ["stop", "start"]
+    assert "[aegisops] AegisOps daemon 已在运行，但 AegisOps service 处于暂停状态，正在重新启动..." in console.messages
+
+
+def test_start_all_does_not_open_browser_when_restarted_service_remains_unhealthy(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+    degraded_payload = _supervisor_status_payload()
+    degraded_payload["backend"].update({
+        "state": "degraded",
+        "health": "degraded",
+        "last_error": "port unavailable",
+    })
+    degraded_status = _supervisor_status(degraded_payload)
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: degraded_status)
+    monkeypatch.setattr(
+        service_manager,
+        "request_restart",
+        lambda _config, **_kwargs: calls.append("restart") or degraded_status,
+    )
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda *_args, **_kwargs: calls.append("status"))
+    monkeypatch.setattr(service_manager, "open_default_browser", lambda *_args, **_kwargs: calls.append("browser"))
+
+    with pytest.raises(service_manager.ServiceError, match="AegisOps service 启动失败"):
+        service_manager.start_all(service_manager.ServiceConfig(), console)
+
+    assert calls == ["restart", "status"]
+    assert "[aegisops] AegisOps daemon 已在运行，但 AegisOps service 不可用，正在重启..." in console.messages
+
+
+def test_start_all_restarts_running_daemon_when_config_changes(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+    payload = _supervisor_status_payload()
+    payload["config"] = {
+        "backend_host": "127.0.0.1",
+        "backend_port": 8000,
+        "frontend_host": "127.0.0.1",
+        "frontend_port": 5173,
+    }
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
+    monkeypatch.setattr(service_manager, "_stop_all_unlocked", lambda _console, **_kwargs: calls.append("stop"))
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: calls.append("start"))
+
+    service_manager.start_all(
+        service_manager.ServiceConfig(
+            backend_host="0.0.0.0",
+            backend_port=9000,
+            frontend_host="0.0.0.0",
+            frontend_port=5273,
+            no_browser=True,
+        ),
+        console,
+    )
+
+    assert calls == ["stop", "start"]
+    assert "[aegisops] AegisOps daemon 已在运行，但配置已变化，正在按新配置重启..." in console.messages
+
+
+def test_restart_all_stops_then_starts_daemon(monkeypatch) -> None:
+    call_order: list[str] = []
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "_stop_all_unlocked", lambda _console, **_kwargs: call_order.append("stop"))
+    monkeypatch.setattr(service_manager, "_start_all_unlocked", lambda _config, _console, **_kwargs: call_order.append("start"))
+
+    service_manager.restart_all(service_manager.ServiceConfig(), console=None)
+
+    assert call_order == ["stop", "start"]
+
+
+def test_restart_server_requests_backend_restart(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+    status = _supervisor_status(_supervisor_status_payload())
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(
+        service_manager,
+        "request_restart_backend",
+        lambda **_kwargs: calls.append("backend") or status,
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_print_status_payload",
+        lambda *_args, **_kwargs: calls.append("status"),
+    )
+
+    service_manager.restart_server(console)
+
+    assert calls == ["backend", "status"]
+
+
+def test_restart_server_requires_running_supervisor(monkeypatch) -> None:
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+
+    with pytest.raises(service_manager.ServiceError, match="请执行 `aegisops restart` 进行全量重启"):
+        service_manager.restart_server(DummyConsole())
+
+
+def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "_start_supervisor_process", lambda _config, _paths, _console: calls.append("daemon") or SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(service_manager, "_wait_for_supervisor_ready", lambda _paths, **_kwargs: calls.append("ready") or _supervisor_status_payload())
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console, **_kwargs: calls.append("status"))
+    monkeypatch.setattr(
+        service_manager,
+        "open_default_browser",
+        lambda _url, _console: calls.append("browser"),
+    )
+
+    service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), console)
+
+    assert calls == ["daemon", "ready", "status"]
+    assert console.messages == [
+        "[aegisops] AegisOps daemon 启动中...",
+        "[aegisops] AegisOps daemon 已启动。",
+    ]
+
+
+def test_start_all_without_stop_raises_when_service_starts_degraded(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    console = DummyConsole()
+    degraded_payload = _supervisor_status_payload()
+    degraded_payload["backend"].update({
+        "state": "degraded",
+        "health": "degraded",
+        "last_error": "port unavailable",
+    })
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        service_manager,
+        "_start_supervisor_process",
+        lambda _config, _paths, _console: calls.append("daemon") or SimpleNamespace(poll=lambda: None),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_wait_for_supervisor_ready",
+        lambda _paths, **_kwargs: calls.append("ready") or degraded_payload,
+    )
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda _payload, _console, **_kwargs: calls.append("status"))
+    monkeypatch.setattr(service_manager, "open_default_browser", lambda *_args, **_kwargs: calls.append("browser"))
+
+    with pytest.raises(service_manager.ServiceError, match="AegisOps service 启动失败"):
+        service_manager._start_all_without_stop(service_manager.ServiceConfig(), console)
+
+    assert calls == ["daemon", "ready", "status"]
+
+
+def test_start_all_without_stop_prints_before_cleanup(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    events: list[str] = []
+    console = DummyConsole()
+
+    def record_print(message: str) -> None:
+        events.append(f"print:{message}")
+        console.messages.append(message)
+
+    console.print = record_print
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args, **_kwargs: events.append("legacy"))
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: events.append("orphan"))
+    monkeypatch.setattr(service_manager, "_ensure_webui_dist", lambda *_args, **_kwargs: events.append("dist"))
+    monkeypatch.setattr(
+        service_manager,
+        "_start_supervisor_process",
+        lambda _config, _paths, _console: events.append("daemon") or SimpleNamespace(poll=lambda: None),
+    )
+    monkeypatch.setattr(service_manager, "_wait_for_supervisor_ready", lambda _paths, **_kwargs: _supervisor_status_payload())
+    monkeypatch.setattr(service_manager, "_print_status_payload", lambda *_args, **_kwargs: None)
+
+    service_manager._start_all_without_stop(service_manager.ServiceConfig(no_browser=True), console)
+
+    assert events[:5] == ["print:[aegisops] AegisOps daemon 启动中...", "legacy", "orphan", "dist", "daemon"]
+
+
+def test_start_all_propagates_supervisor_start_failure(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: _make_runtime_paths(Path("/tmp/aegisops-test")))
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(
+        service_manager,
+        "_start_all_without_stop",
+        lambda *_args: (_ for _ in ()).throw(service_manager.ServiceError("daemon failed")),
+    )
+
+    with pytest.raises(service_manager.ServiceError, match="daemon failed"):
+        service_manager.start_all(service_manager.ServiceConfig(), console=None)
+
+
+def test_start_backend_process_does_not_write_runtime_metadata(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    probe_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda urls, name, attempts=30, delay=1.0, validator=None: probe_calls.append({
+            "urls": list(urls),
+            "name": name,
+            "attempts": attempts,
+            "delay": delay,
+            "validator": validator,
+        }),
+    )
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "resolve_aegisops_cli_command",
+        lambda root=None: ["python", "-m", "aegisops.cli.main"],
+    )
+    spawn_env: dict[str, str] | None = None
+
+    def _capture_spawn(*_args, **kwargs) -> SimpleNamespace:
+        nonlocal spawn_env
+        spawn_env = kwargs.get("env")
+        return SimpleNamespace(pid=2468)
+
+    monkeypatch.setattr(service_manager, "_spawn_process", _capture_spawn)
+
+    process = service_manager._start_backend_process(service_manager.ServiceConfig(), console)
+
+    assert process.pid == 2468
+    assert not paths.backend_pid.exists()
+    assert probe_calls == [{
+        "urls": ["http://127.0.0.1:5173"],
+        "name": "后端服务",
+        "attempts": 30,
+        "delay": 3.0,
+        "validator": service_manager._is_running_status_response,
+    }]
+    assert spawn_env is not None
+    assert spawn_env.get("PYTHONUNBUFFERED") == "1"
+    assert "[aegisops] 启动 AegisOps service..." not in console.messages
+
+
+def test_start_backend_rolls_back_when_probe_fails(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    paths.backend_log.write_text("line1\nline2\nboot failed here\n", encoding="utf-8")
+    console = DummyConsole()
+    stop_calls: list[str] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "resolve_aegisops_cli_command",
+        lambda root=None: ["python", "-m", "aegisops.cli.main"],
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *_args, **_kwargs: SimpleNamespace(pid=2468, poll=lambda: None),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(service_manager.ServiceError("后端服务 启动超时，请检查日志。")),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_terminate_process",
+        lambda _process, name, _console: stop_calls.append(name),
+    )
+
+    with pytest.raises(service_manager.ServiceError, match="启动超时"):
+        service_manager._start_backend_process(service_manager.ServiceConfig(), console)
+
+    assert stop_calls == ["后端"]
+    joined = "\n".join(console.messages)
+    assert "近期日志" in joined
+    assert "boot failed here" in joined
+
+
+def test_start_backend_reports_started_after_probe_succeeds(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+    spawn_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "resolve_aegisops_cli_command",
+        lambda root=None: ["python", "-m", "aegisops.cli.main"],
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *args, **kwargs: spawn_calls.append({"args": args, "kwargs": kwargs}) or SimpleNamespace(pid=2468),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda *_args, **_kwargs: None,
+    )
+
+    service_manager._start_backend_process(service_manager.ServiceConfig(), console)
+
+    backend_env = spawn_calls[0]["kwargs"]["env"]
+    assert backend_env["_AEGISOPS_WEBUI_HOST"] == "127.0.0.1"
+    assert backend_env["_AEGISOPS_WEBUI_PORT"] == "5173"
+    assert not paths.backend_pid.exists()
+    assert backend_env["AEGISOPS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_AEGISOPS_CONSOLE_BASE_URL
+
+
+def test_start_backend_allows_overriding_console_base_url(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    console = DummyConsole()
+    spawn_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(
+        service_manager,
+        "resolve_aegisops_cli_command",
+        lambda root=None: ["python", "-m", "aegisops.cli.main"],
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_spawn_process",
+        lambda *args, **kwargs: spawn_calls.append({"args": args, "kwargs": kwargs}) or SimpleNamespace(pid=2468),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "wait_for_http",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setenv("AEGISOPS_CONSOLE_BASE_URL", "https://custom-console.example.com")
+
+    service_manager._start_backend_process(service_manager.ServiceConfig(), console)
+
+    backend_env = spawn_calls[0]["kwargs"]["env"]
+    assert backend_env["AEGISOPS_CONSOLE_BASE_URL"] == "https://custom-console.example.com"
+
+
+def test_build_frontend_env_uses_backend_host_and_port() -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="10.0.0.8",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["AEGISOPS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert "VITE_API_BASE_URL" not in env
+    assert "VITE_WS_BASE_URL" not in env
+
+
+def test_build_frontend_env_brackets_ipv6_backend_host() -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="2001:db8::1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["AEGISOPS_API_PROXY_TARGET"] == "http://[2001:db8::1]:9000"
+    assert "VITE_API_BASE_URL" not in env
+    assert "VITE_WS_BASE_URL" not in env
+
+
+def test_build_frontend_env_uses_loopback_for_wildcard_backend_host() -> None:
+    config = service_manager.ServiceConfig(
+        backend_host="0.0.0.0",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["AEGISOPS_API_PROXY_TARGET"] == "http://127.0.0.1:9000"
+    assert "VITE_API_BASE_URL" not in env
+    assert "VITE_WS_BASE_URL" not in env
+
+
+def test_build_frontend_env_keeps_proxy_mode_for_loopback_backend_host(monkeypatch) -> None:
+    monkeypatch.setenv("VITE_API_BASE_URL", "http://stale.example:9000")
+    monkeypatch.setenv("VITE_WS_BASE_URL", "ws://stale.example:9000")
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["AEGISOPS_API_PROXY_TARGET"] == "http://127.0.0.1:9000"
+    assert "VITE_API_BASE_URL" not in env
+    assert "VITE_WS_BASE_URL" not in env
+
+
+def test_build_frontend_env_sets_portal_defaults_when_env_missing(monkeypatch) -> None:
+    monkeypatch.delenv("AEGISOPS_CONSOLE_BASE_URL", raising=False)
+    monkeypatch.delenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", raising=False)
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["AEGISOPS_CONSOLE_BASE_URL"] == service_manager.DEFAULT_AEGISOPS_CONSOLE_BASE_URL
+    assert (
+        env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"]
+        == service_manager.DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
+    )
+    allowed_hosts = env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"].split(",")
+    assert "127.0.0.1" in allowed_hosts
+    assert "localhost" in allowed_hosts
+    assert "portalaegisops.threatbook.cn" in allowed_hosts
+
+
+def test_build_frontend_env_allows_overriding_portal_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("AEGISOPS_CONSOLE_BASE_URL", "https://custom.example.com")
+    monkeypatch.setenv("__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS", "custom.example.com")
+    config = service_manager.ServiceConfig(
+        backend_host="127.0.0.1",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["AEGISOPS_CONSOLE_BASE_URL"] == "https://custom.example.com"
+    assert env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"] == "custom.example.com"
+
+
+def test_build_frontend_env_allows_direct_backend_urls_when_opted_in(monkeypatch) -> None:
+    monkeypatch.setenv(service_manager.WEBUI_DIRECT_BACKEND_URLS_ENV, "true")
+    config = service_manager.ServiceConfig(
+        backend_host="10.0.0.8",
+        backend_port=9000,
+    )
+
+    env = service_manager.build_frontend_env(config)
+
+    assert env["AEGISOPS_API_PROXY_TARGET"] == "http://10.0.0.8:9000"
+    assert env["VITE_API_BASE_URL"] == "http://10.0.0.8:9000"
+    assert env["VITE_WS_BASE_URL"] == "ws://10.0.0.8:9000"
+
+
+def _fake_process(pid: int, args: list[str] | None = None, returncode: int | None = None):
+    return SimpleNamespace(pid=pid, args=args or [str(pid)], returncode=returncode, poll=lambda: returncode)
+
+
+def test_supervisor_restarts_backend_after_tenth_consecutive_port_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995, frontend_port=9996))
+    daemon.paths = paths
+    daemon.backend.log_path = paths.backend_log
+    daemon.backend.process = _fake_process(111, ["backend"])
+
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda _host, port: port != 9995)
+    monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
+    monkeypatch.setattr(
+        service_manager,
+        "_start_backend_process",
+        lambda *_args, **_kwargs: calls.append("start:backend") or _fake_process(333, ["backend-new"]),
+    )
+
+    assert daemon.interval == 30.0
+    assert daemon.failure_threshold == 10
+
+    for expected_failure_count in range(1, 10):
+        daemon.tick()
+        assert calls == []
+        assert daemon.backend.state == "degraded"
+        assert daemon.backend.health_failure_count == expected_failure_count
+
+    daemon.tick()
+    assert calls == ["stop:后端", "start:backend"]
+    assert daemon.backend.pid == 333
+
+
+def test_supervisor_resets_backend_port_failures_after_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    port_states = iter([False] * 9 + [True] + [False] * 9)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995))
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"])
+
+    monkeypatch.setattr(
+        service_process,
+        "tcp_port_accepts_connections",
+        lambda *_args: next(port_states),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_terminate_process",
+        lambda *_args, **_kwargs: calls.append("stop"),
+    )
+
+    for _ in range(9):
+        daemon.tick()
+
+    assert calls == []
+    assert daemon.backend.health_failure_count == 9
+
+    daemon.tick()
+
+    assert daemon.backend.state == "healthy"
+    assert daemon.backend.health_failure_count == 0
+
+    for _ in range(9):
+        daemon.tick()
+
+    assert calls == []
+    assert daemon.backend.state == "degraded"
+    assert daemon.backend.health_failure_count == 9
+
+
+def test_supervisor_restarts_backend_on_first_probe_after_process_exits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995))
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"], returncode=7)
+
+    monkeypatch.setattr(
+        service_manager,
+        "_terminate_process",
+        lambda *_args, **_kwargs: calls.append("stop"),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_start_backend_process",
+        lambda *_args, **_kwargs: calls.append("start") or _fake_process(333, ["backend-new"]),
+    )
+
+    daemon.tick()
+
+    assert calls == ["stop", "start"]
+    assert daemon.backend.pid == 333
+
+
+def test_supervisor_liveness_probe_keeps_backend_healthy(monkeypatch, tmp_path: Path) -> None:
+    """Liveness-only probe: process alive + TCP port open = healthy, no HTTP check needed."""
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(
+        service_manager.ServiceConfig(backend_port=9995, frontend_port=9996),
+    )
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"])
+
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
+    monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
+
+    daemon.tick()
+    assert calls == []
+    assert daemon.backend.state == "healthy"
+
+    daemon.tick()
+    assert calls == []
+    assert daemon.backend.state == "healthy"
+
+
+def test_backend_probe_liveness_only_accepts_alive_process(monkeypatch) -> None:
+    """Liveness-only probe: process alive + TCP port open = healthy regardless of HTTP response."""
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
+
+    result = service_process.BackendProcessAdapter().probe(_fake_process(111, ["backend"]), "127.0.0.1", 5173)
+
+    assert result.healthy is True
+    assert result.reason == "liveness check passed"
+
+
+def test_supervisor_reports_webui_as_static_endpoint(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    # 探活会真的连 9995 端口；不打桩就取决于本机有没有东西在听，结果不稳定
+    monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995, frontend_port=9996))
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"])
+
+    daemon.tick()
+
+    assert calls == []
+    assert daemon.webui.pid is None
+    assert daemon.webui.state == "static"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_supervisor_rejects_static_webui_stop_control_api(monkeypatch, tmp_path: Path) -> None:
+    del tmp_path
+    short_root = make_short_runtime_root("aegisops-supervisor-")
+    paths = _make_runtime_paths(short_root)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig())
+    daemon._start_control_server()
+
+    try:
+        with pytest.raises(httpx.HTTPStatusError) as exc_info:
+            service_control.control_api_request("POST", "/stop/webui", paths=paths)
+    finally:
+        daemon._stop_control_server()
+        shutil.rmtree(short_root, ignore_errors=True)
+
+    assert exc_info.value.response.status_code == 409
+
+
+def test_build_webui_dist_tolerates_windows_node_assertion_after_build(monkeypatch, tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dist = webui_dir / "dist"
+    webui_dist.mkdir(parents=True)
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    console = DummyConsole()
+
+    def fake_run(_command, **_kwargs):
+        (webui_dist / "index.html").write_text("<html></html>", encoding="utf-8")
+        return SimpleNamespace(
+            returncode=3221226505,
+            stdout="built in 6.83s",
+            stderr="Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file src\\win\\async.c, line 76",
+        )
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: "npm.cmd")
+    monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    service_manager._build_webui_dist(tmp_path, service_manager.ServiceConfig(), console)
+
+    assert "[aegisops] WebUI 构建产物已生成，忽略 Windows Node.js 退出断言。" in console.messages
+
+
+def test_build_webui_dist_prefers_bundled_npm_over_path_lookup(monkeypatch, tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    webui_dir.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    console = DummyConsole()
+    build_calls: list[list[str]] = []
+
+    def fake_run(command, **_kwargs):
+        build_calls.append(command)
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(service_manager, "resolve_npm_executable", lambda: r"C:\Users\aegisops\AppData\Local\Programs\AegisOps\tools\node\npm.cmd")
+    monkeypatch.setattr(service_manager, "node_version_satisfies_requirement", lambda: True)
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    service_manager._build_webui_dist(tmp_path, service_manager.ServiceConfig(), console)
+
+    assert build_calls[0][0] == r"C:\Users\aegisops\AppData\Local\Programs\AegisOps\tools\node\npm.cmd"
+
+
+def test_webui_needs_build_when_source_is_newer_than_dist(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is True
+
+
+def test_webui_needs_build_ignores_generated_directories(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    generated_path = webui_dir / "node_modules" / "package" / "index.js"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    generated_path.parent.mkdir(parents=True)
+    source_path.write_text("source", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    generated_path.write_text("generated", encoding="utf-8")
+    built_at = max(path.stat().st_mtime_ns for path in (webui_dir, source_path.parent, source_path))
+    os.utime(index_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    os.utime(generated_path, ns=(built_at + 2_000_000_000, built_at + 2_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is False
+
+
+def test_webui_needs_build_when_source_is_deleted(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_dir = webui_dir / "src"
+    source_path = source_dir / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_dir.mkdir(parents=True)
+    index_path.parent.mkdir()
+    source_path.write_text("source", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = max(path.stat().st_mtime_ns for path in (webui_dir, source_dir, source_path))
+    os.utime(index_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    source_path.unlink()
+    os.utime(source_dir, ns=(built_at + 2_000_000_000, built_at + 2_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is True
+
+
+def test_ensure_webui_dist_rebuilds_when_source_is_newer(monkeypatch, tmp_path: Path) -> None:
+    from aegisops.server import static_webui
+
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    builds: list[Path] = []
+    monkeypatch.setattr(static_webui, "ensure_webui_dist_dir", lambda: index_path.parent.resolve())
+    monkeypatch.setattr(
+        service_manager,
+        "_build_webui_dist",
+        lambda root, _config, _console: builds.append(root),
+    )
+
+    _REAL_ENSURE_WEBUI_DIST(tmp_path, service_manager.ServiceConfig(), DummyConsole())
+
+    assert builds == [tmp_path]
+
+
+def test_ensure_webui_dist_skips_stale_source_when_requested(monkeypatch, tmp_path: Path) -> None:
+    from aegisops.server import static_webui
+
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    builds: list[Path] = []
+    monkeypatch.setattr(static_webui, "ensure_webui_dist_dir", lambda: index_path.parent.resolve())
+    monkeypatch.setattr(
+        service_manager,
+        "_build_webui_dist",
+        lambda root, _config, _console: builds.append(root),
+    )
+
+    config = service_manager.ServiceConfig(skip_frontend_build=True)
+    _REAL_ENSURE_WEBUI_DIST(tmp_path, config, DummyConsole())
+
+    assert builds == []
+
+
+def test_start_backend_raises_when_port_has_listener(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    _write_legacy_runtime_record(paths.backend_pid, service_manager.RuntimeRecord(pid=1111, port=8000))
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [9999])
+
+    with pytest.raises(service_manager.ServiceError, match="端口 5173 已被占用"):
+        service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole())
+
+
+def test_start_backend_cleans_trusted_orphan_port_owner(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    owners = iter([[9999], [9999], [], [], []])
+    cleaned: list[int] = []
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(owners))
+    monkeypatch.setattr(service_manager, "_process_command_line", lambda _pid: f"{tmp_path}/.venv/bin/python -m aegisops.cli.main serve")
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(service_manager, "resolve_aegisops_cli_command", lambda _root: ["/env/bin/python", "-m", "aegisops.cli.main"])
+    monkeypatch.setattr(service_manager, "_spawn_process", lambda command, **_kwargs: SimpleNamespace(pid=1234, args=command))
+    monkeypatch.setattr(service_manager, "process_runtime_record", lambda *_args, **_kwargs: service_manager.RuntimeRecord(pid=1234))
+    monkeypatch.setattr(service_manager, "_log_startup_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+
+    process = service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole(), paths=paths)
+
+    assert process.pid == 1234
+    assert cleaned == [9999]
+
+
+def test_backend_cleanup_trusts_cross_worktree_aegisops_uvicorn_owner(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+    owners = iter([[18787], []])
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(owners))
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: (
+            "/Users/zgy/.codex/worktrees/6be0/aegisops/.venv/bin/python "
+            "/Users/zgy/.codex/worktrees/6be0/aegisops/.venv/bin/uvicorn "
+            "aegisops.server.app:app --host 127.0.0.1 --port 8000 --reload --reload-dir aegisops"
+        ),
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+
+    result = service_manager.cleanup_trusted_port_owners(
+        8000,
+        service="backend",
+        label="后端",
+        console=DummyConsole(),
+        root=tmp_path,
+    )
+
+    assert result == [18787]
+    assert cleaned == [18787]
+
+
+def test_start_backend_raises_when_port_in_use_without_pid_lookup(monkeypatch, tmp_path: Path) -> None:
+    paths = service_manager.RuntimePaths(
+        root=tmp_path,
+        run_dir=tmp_path / "run",
+        log_dir=tmp_path / "logs",
+        backend_pid=tmp_path / "run" / "backend.pid",
+        frontend_pid=tmp_path / "run" / "webui.pid",
+        backend_log=tmp_path / "logs" / "backend.log",
+        frontend_log=tmp_path / "logs" / "webui.log",
+    )
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_stale_pid_file", lambda _path: None)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda _port, listeners=None: True)
+
+    with pytest.raises(service_manager.ServiceError, match="无法识别占用 PID"):
+        service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole())
+
+
+def test_webui_cleanup_trusts_cross_worktree_aegisops_vite_owner(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+    owners = iter([[18962], []])
+
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: next(owners))
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: (
+            "node /Users/zgy/.codex/worktrees/6be0/aegisops/webui/node_modules/.bin/vite --host 127.0.0.1 --port 5173"
+        ),
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+
+    result = service_manager.cleanup_trusted_port_owners(
+        5173,
+        service="webui",
+        label="WebUI",
+        console=DummyConsole(),
+        root=tmp_path,
+    )
+
+    assert result == [18962]
+    assert cleaned == [18962]
+
+
+def test_cleanup_trusted_daemon_processes_cleans_current_install_only(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+
+    monkeypatch.setattr(service_manager, "_process_list_pids", lambda: [111, 222, 333])
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda pid: {
+            111: f"{tmp_path}/.venv/bin/python -m aegisops.cli.main service-daemon --server-port 8000",
+            222: "/other/aegisops/.venv/bin/python -m aegisops.cli.main service-daemon --server-port 8000",
+            333: f"{tmp_path}/.venv/bin/python -m aegisops.cli.main serve --port 8000",
+        }[pid],
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+    # Daemons of this install are only claimed when they run with this runtime root.
+    current_root = str(service_manager.runtime_paths().root)
+    monkeypatch.setattr(
+        service_manager,
+        "_process_environment",
+        lambda pid: {111: {"AEGISOPS_ROOT": current_root}, 222: {"AEGISOPS_ROOT": current_root}, 333: {}}[pid],
+    )
+
+    result = service_manager.cleanup_trusted_daemon_processes(console=DummyConsole(), root=tmp_path)
+
+    assert result == [111]
+    assert cleaned == [111]
+
+
+def test_windows_cleanup_trusted_daemon_processes_uses_single_query(monkeypatch, tmp_path: Path) -> None:
+    cleaned: list[int] = []
+    commands: list[list[str]] = []
+
+    def fail_per_pid_lookup(_pid: int) -> str:
+        raise AssertionError("Windows daemon cleanup should not query each pid separately")
+
+    def fake_run(command, **kwargs):
+        commands.append(command)
+        assert command[:2] == ["powershell.exe", "-NoProfile"]
+        assert kwargs["env"]["AEGISOPS_DAEMON_ROOT_MATCH"] == str(tmp_path).lower()
+        # this root's daemon, another root's, and two from before the root marker
+        return SimpleNamespace(returncode=0, stdout="111 own\n222 other\n333 legacy\n444 legacy\n111 own\n")
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "which", lambda name: "powershell.exe" if name == "powershell" else None)
+    monkeypatch.setattr(service_manager, "_process_list_pids", lambda: [111, 222, 333])
+    monkeypatch.setattr(service_manager, "_process_command_line", fail_per_pid_lookup)
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+    # Of the old daemons, only the one the shared legacy control port vouches for is this root's.
+    monkeypatch.setattr(service_manager, "_legacy_control_port_daemon_pid", lambda _paths: 333)
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: cleaned.append(pid))
+
+    result = service_manager.cleanup_trusted_daemon_processes(console=DummyConsole(), root=tmp_path)
+
+    assert result == [111, 333]
+    assert cleaned == [111, 333]
+    assert len(commands) == 1
+
+
+def test_spawn_process_uses_hidden_window_flags_on_windows(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+    log_path = tmp_path / "logs" / "backend.log"
+
+    class FakeStartupInfo:
+        def __init__(self) -> None:
+            self.dwFlags = 0
+            self.wShowWindow = 1
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=4321)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(service_manager.subprocess, "CREATE_NEW_PROCESS_GROUP", 0x200, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "DETACHED_PROCESS", 0x8, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "STARTUPINFO", FakeStartupInfo, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "STARTF_USESHOWWINDOW", 0x1, raising=False)
+    monkeypatch.setattr(service_manager.subprocess, "SW_HIDE", 0, raising=False)
+
+    process = service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert process.pid == 4321
+    assert captured["args"] == (["python", "-m", "uvicorn"],)
+    assert captured["kwargs"]["cwd"] == tmp_path
+    assert captured["kwargs"]["creationflags"] == 0x200 | 0x08000000
+    assert captured["kwargs"]["creationflags"] & 0x8 == 0
+    assert "start_new_session" not in captured["kwargs"]
+    assert captured["kwargs"]["stdin"] == service_manager.subprocess.DEVNULL
+    assert captured["kwargs"]["stderr"] == service_manager.subprocess.STDOUT
+    assert captured["kwargs"]["startupinfo"].dwFlags == 0x1
+    assert captured["kwargs"]["startupinfo"].wShowWindow == 0
+
+
+def test_spawn_process_uses_new_session_on_non_windows(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+    log_path = tmp_path / "logs" / "backend.log"
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: 4321 if pid == 9876 else pid)
+
+    process = service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert process.pid == 9876
+    assert process._aegisops_pgid == 4321
+    assert captured["args"] == (["python", "-m", "uvicorn"],)
+    assert captured["kwargs"]["cwd"] == tmp_path
+    assert captured["kwargs"]["creationflags"] == 0
+    assert captured["kwargs"]["start_new_session"] is True
+    assert "startupinfo" not in captured["kwargs"]
+
+
+def test_terminate_process_stops_cached_process_group_after_root_exits(monkeypatch) -> None:
+    signals: list[tuple[str, int]] = []
+    group_running = iter([True, False])
+    process = SimpleNamespace(pid=9876, returncode=0, poll=lambda: 0, _aegisops_pgid=4321)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda _pgid: next(group_running))
+    monkeypatch.setattr(
+        service_manager,
+        "signal_process_group",
+        lambda sig, pgid: signals.append((sig.name, pgid)),
+    )
+    monkeypatch.setattr(service_manager, "signal_pid_list", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [])
+
+    service_manager._terminate_process(process, "WebUI", DummyConsole(), timeout=0.1)
+
+    assert signals == [("SIGTERM", 4321)]
+
+
+def test_terminate_orphan_pid_stops_process_group(monkeypatch) -> None:
+    signals: list[tuple[str, int | tuple[int, ...] | None]] = []
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.os, "getpgid", lambda pid: 18745 if pid == 18787 else pid)
+    monkeypatch.setattr(service_manager.os, "getpgrp", lambda: 99999)
+    monkeypatch.setattr(service_manager, "collect_process_tree_pids", lambda _pid: [18787, 18873])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "process_group_is_running", lambda _pgid: False)
+    monkeypatch.setattr(
+        service_manager,
+        "signal_process_group",
+        lambda sig, pgid: signals.append((sig.name, pgid)),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "signal_pid_list",
+        lambda sig, pids: signals.append((sig.name, tuple(pids))),
+    )
+
+    service_manager._terminate_orphan_pid(18787, "后端", DummyConsole(), timeout=0.1)
+
+    assert signals == [
+        ("SIGTERM", 18745),
+        ("SIGTERM", (18787, 18873)),
+    ]
+
+
+def test_spawn_process_appends_without_rotated_suffix(monkeypatch, tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "backend.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_text("x" * 20, encoding="utf-8")
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].write("new\n")
+        kwargs["stdout"].flush()
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert log_path.read_text(encoding="utf-8") == "x" * 20 + "new\n"
+    assert not (tmp_path / "logs" / "backend.log.1").exists()
+
+
+def test_cap_service_log_file_keeps_recent_bytes_without_rename(tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "backend.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_bytes(b"0123456789")
+
+    trimmed = service_manager._cap_service_log_file(log_path, max_bytes=4)
+
+    assert trimmed is True
+    assert log_path.read_bytes() == b"6789"
+    assert not (tmp_path / "logs" / "backend.log.1").exists()
+
+
+def test_spawn_process_caps_log_before_appending(monkeypatch, tmp_path: Path) -> None:
+    log_path = tmp_path / "logs" / "backend.log"
+    log_path.parent.mkdir(parents=True)
+    log_path.write_bytes(b"0123456789")
+
+    def fake_popen(*args, **kwargs):
+        kwargs["stdout"].write("new\n")
+        kwargs["stdout"].flush()
+        return SimpleNamespace(pid=9876)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "MAX_SERVICE_LOG_BYTES", 4)
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path)
+
+    assert log_path.read_text(encoding="utf-8") == "6789new\n"
+
+
+def test_spawn_process_passes_custom_environment(monkeypatch, tmp_path: Path) -> None:
+    captured = {}
+    log_path = tmp_path / "logs" / "backend.log"
+    env = {"AEGISOPS_API_PROXY_TARGET": "http://127.0.0.1:9000"}
+
+    def fake_popen(*args, **kwargs):
+        captured["args"] = args
+        captured["kwargs"] = kwargs
+        return SimpleNamespace(pid=1111)
+
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager.subprocess, "Popen", fake_popen)
+
+    process = service_manager._spawn_process(["python", "-m", "uvicorn"], cwd=tmp_path, log_path=log_path, env=env)
+
+    assert process.pid == 1111
+    assert captured["kwargs"]["env"] == env
+
+
+
+def test_stop_all_uses_supervisor_control_api(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+
+    class FakeConsole:
+        def __init__(self) -> None:
+            self.messages = []
+
+        def print(self, message) -> None:
+            self.messages.append(message)
+
+    states = iter([True, False])
+    payload = _supervisor_status_payload()
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(states))
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
+    monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop") or {"status": "stopping"})
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda _paths, _console: calls.append("legacy"))
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda _config, _console, **_kwargs: calls.append("cleanup"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: calls.append("browser"))
+    monkeypatch.setattr(service_manager, "_report_occupied_service_ports", lambda *_args: calls.append("ports"))
+
+    console = FakeConsole()
+    service_manager.stop_all(console=console)
+
+    assert calls == ["/stop", "legacy", "cleanup", "browser", "ports"]
+    assert console.messages == [
+        "[aegisops] aegisops 已停止（PID=111）。",
+        "[aegisops] daemon 已停止。",
+    ]
+
+
+def test_stop_all_reports_when_supervisor_is_down(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    console = DummyConsole()
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda _paths, _console: console.messages.append("legacy"))
+    monkeypatch.setattr(
+        service_manager,
+        "cleanup_orphan_service_ports",
+        lambda _config, _console, **_kwargs: console.messages.append("cleanup"),
+    )
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: console.messages.append("browser"))
+    monkeypatch.setattr(service_manager, "_report_occupied_service_ports", lambda *_args: console.messages.append("ports"))
+
+    service_manager.stop_all(console)
+
+    assert console.messages == ["[aegisops] AegisOps daemon 未运行。", "legacy", "cleanup", "browser", "ports"]
+
+
+def test_stop_all_uses_legacy_runtime_ports_for_orphan_cleanup(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    console = DummyConsole()
+    captured: list[service_manager.ServiceConfig] = []
+    paths.run_dir.mkdir(parents=True)
+    _write_legacy_runtime_record(
+        paths.backend_pid,
+        service_manager.RuntimeRecord(pid=111, host="0.0.0.0", port=9000),
+    )
+    _write_legacy_runtime_record(
+        paths.frontend_pid,
+        service_manager.RuntimeRecord(pid=222, host="0.0.0.0", port=5273),
+    )
+
+    def fake_cleanup(config, _console, *, extra_configs=()):
+        captured.append(config)
+        captured.extend(extra_configs)
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", fake_cleanup)
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: None)
+    monkeypatch.setattr(service_manager, "_report_occupied_service_ports", lambda *_args: None)
+
+    service_manager.stop_all(console)
+
+    assert [(config.backend_port, config.frontend_port) for config in captured] == [(5173, 5173), (9000, 5273)]
+
+
+def test_status_lines_include_control_api_errors(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    payload = _supervisor_status_payload()
+    payload["backend"]["state"] = "degraded"
+    payload["backend"]["last_error"] = "health failed"
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
+
+    lines = service_manager.build_status_lines(paths)
+
+    backend_line = next(line for line in lines if "aegisops:" in line)
+    assert "state=degraded" in backend_line
+    assert "last_error=health failed" in backend_line
+
+
+
+def test_log_startup_config_appends_to_log_file(tmp_path: Path) -> None:
+    log_path = tmp_path / "backend.log"
+    record = service_manager.RuntimeRecord(pid=2468, pgid=2468, host="0.0.0.0", port=8000)
+
+    service_manager._log_startup_config(log_path, "backend", "0.0.0.0", 8000, record)
+
+    content = log_path.read_text(encoding="utf-8")
+    assert "backend starting: host=0.0.0.0 port=8000 pid=2468 pgid=2468" in content
+
+
+def test_process_inspection_survives_missing_ps(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Minimal images without procps must not crash `aegisops start`/`stop`."""
+    import subprocess as _subprocess
+
+    def _no_ps(*_args, **_kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "ps")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", _no_ps)
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)  # no pgrep either
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+
+    monkeypatch.setattr(service_manager, "_proc_available", lambda: False)
+
+    completed = service_manager._run_ps(["ps", "-eo", "pid="])
+    assert isinstance(completed, _subprocess.CompletedProcess)
+    assert completed.returncode == 127 and completed.stdout == ""
+    assert service_manager._process_list_pids() == []
+    assert service_manager._unix_process_stat(12345) is None
+    assert service_manager._process_command_line(12345) == ""
+    assert service_manager._process_group_member_pids(12345) == []
+    assert service_manager.child_pids(12345) == []
+
+
+@pytest.mark.parametrize("ps_flavour", ["missing", "busybox"])
+def test_process_inspection_falls_back_to_proc_without_ps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ps_flavour: str) -> None:
+    """Without a usable procps (binary missing, or a BusyBox `ps` that rejects -p / -eo) the
+    supervisor/backend must still be discoverable through /proc (stop, orphan cleanup)."""
+
+    def _no_ps(*_args, **_kwargs):
+        if ps_flavour == "missing":
+            raise FileNotFoundError(2, "No such file or directory", "ps")
+        return subprocess.CompletedProcess(_args[0], 1, "", "ps: unrecognized option: p\nBusyBox v1.36.1 multi-call binary.\n")
+
+    proc = tmp_path / "proc"
+    (proc / "self").mkdir(parents=True)
+    # pid 100: daemon (pgid 100, parent 1); pid 101: backend (parent 100, pgid 101); pid 102: zombie child of 101
+    entries = {
+        100: ("(python3) S 1 100 100", ["/opt/aegisops/aegisops/.venv/bin/python", "-m", "aegisops.cli.main", "service-daemon"]),
+        101: ("(python3) S 100 101 100", ["/opt/aegisops/aegisops/.venv/bin/python", "-m", "aegisops.cli.main", "serve"]),
+        102: ("(defunct child) Z 101 101 100", []),
+    }
+    for pid, (stat_tail, argv) in entries.items():
+        (proc / str(pid)).mkdir()
+        (proc / str(pid) / "stat").write_text(f"{pid} {stat_tail} 0 0 0 0 0\n", encoding="utf-8")
+        (proc / str(pid) / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + (b"\0" if argv else b""))
+    (proc / "not-a-pid").mkdir()
+
+    monkeypatch.setattr(service_manager.subprocess, "run", _no_ps)
+    monkeypatch.setattr(service_manager, "which", lambda _name: None)
+    monkeypatch.setattr(service_manager.sys, "platform", "linux")
+    monkeypatch.setattr(service_manager, "_PROC_ROOT", proc)
+
+    assert service_manager._proc_available() is True
+    assert service_manager._process_list_pids() == [100, 101, 102]
+    assert service_manager._unix_process_stat(101) == "S"
+    assert service_manager._unix_pid_is_zombie(102) is True
+    assert service_manager.child_pids(100) == [101]
+    assert service_manager.child_pids(101) == [102]
+    assert service_manager._process_group_member_pids(101) == [101, 102]
+    assert "service-daemon" in service_manager._process_command_line(100)
+    assert service_manager._process_command_line(999) == ""
+
+
+# --- stop/restart must not leave stray processes (INC-619CACF9) ---
+
+
+class _SlowStopProcessAdapter(SleeperProcessAdapter):
+    """Real child process whose stop takes a while, like a backend's graceful shutdown."""
+
+    def __init__(self, stop_delay: float) -> None:
+        super().__init__()
+        self.stop_delay = stop_delay
+
+    def stop(self, process: subprocess.Popen | None) -> None:
+        if process is not None:
+            time.sleep(self.stop_delay)
+        super().stop(process)
+
+
+def _wait_until(predicate, timeout: float = 10.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.05)
+    raise AssertionError("condition was not reached")
+
+
+def _kill_started(adapter: SleeperProcessAdapter) -> None:
+    for process in adapter.started:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
+
+
+def _isolate_stop_cleanup(monkeypatch, paths: service_manager.RuntimePaths) -> None:
+    """Keep stop/start cleanup away from real ports, browser daemons and other installs."""
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args: None)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: [])
+    monkeypatch.setattr(service_manager, "_report_occupied_service_ports", lambda *_args: None)
+    monkeypatch.setattr(service_supervisor, "stop_all_browser_daemons", lambda: [])
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_supervisor_status_answers_while_lifecycle_lock_is_held(monkeypatch) -> None:
+    short_root = make_short_runtime_root("aegisops-status-")
+    paths = _make_runtime_paths(short_root)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(
+        service_manager.ServiceConfig(),
+        backend_adapter=SleeperProcessAdapter(),
+    )
+    daemon._start_control_server()
+    try:
+        # The lock is held for the whole backend stop/start (graceful shutdown, WebUI build,
+        # health wait); /status must still answer or clients take the daemon for stopped.
+        with daemon._lock:
+            running = service_control.supervisor_is_running(paths)
+            status = service_control.read_supervisor_status(paths=paths, timeout=1.0)
+    finally:
+        daemon._stop_control_server()
+        shutil.rmtree(short_root, ignore_errors=True)
+
+    assert running is True
+    assert status.daemon.state == "running"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_stopping_supervisor_rejects_restarts_and_starts_no_backend(monkeypatch) -> None:
+    short_root = make_short_runtime_root("aegisops-stopping-")
+    paths = _make_runtime_paths(short_root)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    adapter = SleeperProcessAdapter()
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(), backend_adapter=adapter)
+    daemon._start_control_server()
+    status_codes: dict[str, int] = {}
+    try:
+        daemon.request_stop()
+        for path in ("/restart", "/restart/backend", "/restart/webui"):
+            try:
+                service_control.control_api_request("POST", path, paths=paths, timeout=10.0, json={})
+                status_codes[path] = 200
+            except httpx.HTTPStatusError as exc:
+                status_codes[path] = exc.response.status_code
+        daemon.restart_backend(reason="late restart")
+    finally:
+        daemon._stop_control_server()
+        _kill_started(adapter)
+        shutil.rmtree(short_root, ignore_errors=True)
+
+    assert status_codes == {"/restart": 409, "/restart/backend": 409, "/restart/webui": 409}
+    assert adapter.started == []
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
+def test_stop_all_returns_only_after_daemon_stopped_backend(monkeypatch) -> None:
+    short_root = make_short_runtime_root("aegisops-stopwait-")
+    paths = _make_runtime_paths(short_root)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    _isolate_stop_cleanup(monkeypatch, paths)
+    adapter = _SlowStopProcessAdapter(stop_delay=1.5)
+    daemon = service_supervisor.SupervisorDaemon(
+        service_manager.ServiceConfig(),
+        interval=0.05,
+        backend_adapter=adapter,
+    )
+    thread = threading.Thread(target=daemon.run, daemon=True)
+    thread.start()
+    console = DummyConsole()
+    try:
+        _wait_until(lambda: bool(adapter.started) and service_control.supervisor_is_running(paths))
+        backend = adapter.started[0]
+
+        service_manager.stop_all(console)
+
+        backend_alive_at_return = backend.poll() is None
+        thread.join(timeout=10)
+    finally:
+        daemon.request_stop()
+        thread.join(timeout=10)
+        _kill_started(adapter)
+        shutil.rmtree(short_root, ignore_errors=True)
+
+    assert backend_alive_at_return is False
+    assert not thread.is_alive()
+    assert "[aegisops] daemon 已停止。" in console.messages
+
+
+def test_stop_all_waits_for_daemon_process_after_control_api_closes(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    api_states = iter([True, False, False, False])
+    pid_states = iter([True, True, False])
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: next(api_states))
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: calls.append(f"alive:{pid}") or next(pid_states))
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status())
+    monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop"))
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args: calls.append("legacy"))
+    monkeypatch.setattr(service_manager, "cleanup_recorded_backend", lambda *_args: calls.append("record"))
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: calls.append("cleanup"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: calls.append("browser"))
+    monkeypatch.setattr(service_manager, "_report_occupied_service_ports", lambda *_args: calls.append("ports"))
+
+    service_manager.stop_all(DummyConsole())
+
+    assert calls == ["/stop", "alive:100", "alive:100", "alive:100", "legacy", "record", "cleanup", "browser", "ports"]
+
+
+def test_stop_all_force_stops_daemon_that_ignores_stop(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    console = DummyConsole()
+    terminated: list[int] = []
+    calls: list[str] = []
+    monkeypatch.setattr(service_manager, "DAEMON_STOP_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: not terminated)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: not terminated)
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _seconds: None)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status())
+    monkeypatch.setattr(service_manager, "request_stop", lambda **_kwargs: calls.append("/stop"))
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: terminated.append(pid))
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args: calls.append("legacy"))
+    monkeypatch.setattr(service_manager, "cleanup_recorded_backend", lambda *_args: calls.append("record"))
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: calls.append("cleanup"))
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: calls.append("browser"))
+    monkeypatch.setattr(service_manager, "_report_occupied_service_ports", lambda *_args: calls.append("ports"))
+
+    service_manager.stop_all(console)
+
+    assert terminated == [100]
+    assert calls == ["/stop", "legacy", "record", "cleanup", "browser", "ports"]
+    assert any("强制结束（PID=100）" in message for message in console.messages)
+
+
+def test_force_stop_skips_reused_daemon_pid_once_control_api_is_gone(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    terminated: list[int] = []
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(service_manager, "_process_command_line", lambda _pid: "/usr/bin/vim notes.txt")
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: terminated.append(pid))
+
+    service_manager._force_stop_daemon(paths, 100, DummyConsole())
+
+    assert terminated == []
+
+
+def test_start_all_waits_for_stopping_daemon_instead_of_requesting_restart(monkeypatch) -> None:
+    calls: list[object] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/aegisops-test"))
+    payload = _supervisor_status_payload()
+    payload["daemon"]["state"] = "stopping"
+    payload["backend"].update({"pid": None, "state": "stopped"})
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(service_manager, "read_supervisor_status", lambda *_args, **_kwargs: _supervisor_status(payload))
+    monkeypatch.setattr(service_manager, "request_restart", lambda *_args, **_kwargs: calls.append("restart"))
+    monkeypatch.setattr(
+        service_manager,
+        "_wait_for_daemon_exit",
+        lambda _paths, pid, **_kwargs: calls.append(("wait", pid)) or True,
+    )
+    monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: calls.append("start"))
+
+    service_manager.start_all(service_manager.ServiceConfig(), console)
+
+    assert calls == [("wait", 100), "start"]
+
+
+RECORD_IDENTITY = "lstart:Wed Oct 21 12:00:00 2026"
+
+
+def _write_backend_runtime(
+    paths: service_manager.RuntimePaths,
+    pid: int,
+    port: int,
+    identity: str | None = RECORD_IDENTITY,
+) -> Path:
+    directory = service_manager.backend_runtime_dir(paths)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{pid}.json"
+    payload = {"pid": pid, "host": "127.0.0.1", "port": port, "started_at": 1_792_540_800.0}
+    if identity is not None:
+        payload["process_identity"] = identity
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_cleanup_recorded_backend_stops_the_recorded_process(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    record_path = _write_backend_runtime(paths, 2904, 5173)
+    terminated: list[int] = []
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 2904 and not terminated)
+    monkeypatch.setattr(service_manager, "_process_identity", lambda _pid: RECORD_IDENTITY)
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: terminated.append(pid))
+    # identity must not depend on command lines or port lookups (Windows may refuse both)
+    monkeypatch.setattr(service_manager, "_process_command_line", lambda _pid: "")
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: pytest.fail("port lookup is not identity"))
+
+    cleaned = service_manager.cleanup_recorded_backend(paths, DummyConsole())
+
+    assert cleaned == [2904]
+    assert terminated == [2904]
+    assert not record_path.exists()
+
+
+def test_cleanup_recorded_backend_never_signals_reused_pid(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    record_path = _write_backend_runtime(paths, 2904, 5173)
+    terminated: list[int] = []
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)
+    # another program got the pid one second later and even listens on the same port
+    monkeypatch.setattr(service_manager, "_process_identity", lambda _pid: "lstart:Wed Oct 21 12:00:01 2026")
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [2904])
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: terminated.append(pid))
+
+    assert service_manager.cleanup_recorded_backend(paths, DummyConsole()) == []
+    assert terminated == []
+    assert not record_path.exists()
+
+
+@pytest.mark.parametrize("recorded, current", [(RECORD_IDENTITY, None), (None, RECORD_IDENTITY)])
+def test_cleanup_recorded_backend_keeps_record_when_identity_is_unknown(monkeypatch, tmp_path: Path, recorded, current) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    record_path = _write_backend_runtime(paths, 2904, 5173, identity=recorded)
+    console = DummyConsole()
+    terminated: list[int] = []
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(service_manager, "_process_identity", lambda _pid: current)
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: terminated.append(pid))
+
+    assert service_manager.cleanup_recorded_backend(paths, console) == []
+    assert terminated == []
+    assert record_path.exists()
+    assert any("PID=2904" in message and "未自动结束" in message for message in console.messages)
+
+
+def test_cleanup_recorded_backend_keeps_record_when_backend_survives_kill(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    record_path = _write_backend_runtime(paths, 2904, 5173)
+    console = DummyConsole()
+    terminated: list[int] = []
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)  # e.g. taskkill access denied
+    monkeypatch.setattr(service_manager, "_process_identity", lambda _pid: RECORD_IDENTITY)
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda pid, *_args, **_kwargs: terminated.append(pid))
+    monkeypatch.setattr(service_manager.time, "sleep", lambda _seconds: None)
+
+    assert service_manager.cleanup_recorded_backend(paths, console) == []
+    assert terminated == [2904]
+    assert record_path.exists()
+    assert any("无法结束残留后端（PID=2904）" in message for message in console.messages)
+
+
+def test_cleanup_recorded_backend_drops_record_of_exited_backend(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    record_path = _write_backend_runtime(paths, 2904, 5173)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: False)
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda *_args, **_kwargs: pytest.fail("must not kill"))
+
+    assert service_manager.cleanup_recorded_backend(paths, DummyConsole()) == []
+    assert not record_path.exists()
+
+
+def test_new_backend_record_never_overwrites_an_unresolved_one(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    old_record = _write_backend_runtime(paths, 2904, 18673, identity=None)
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid in {2904, os.getpid()})
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda *_args, **_kwargs: pytest.fail("must not kill"))
+
+    assert service_manager.cleanup_recorded_backend(paths, DummyConsole()) == []
+    # the next backend (e.g. `aegisops start --port 18674`) records itself next to it
+    new_record = service_manager.write_backend_runtime_record(
+        service_manager.backend_runtime_dir(paths), host="127.0.0.1", port=18674
+    )
+
+    assert old_record.exists()
+    assert json.loads(old_record.read_text(encoding="utf-8"))["port"] == 18673
+    assert new_record != old_record
+    assert json.loads(new_record.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    assert service_manager.cleanup_recorded_backend(paths, DummyConsole()) == []
+    assert old_record.exists() and new_record.exists()
+
+
+def test_remove_backend_runtime_record_keeps_newer_owner(tmp_path: Path) -> None:
+    record_path = service_manager.write_backend_runtime_record(tmp_path / "run" / "backend-runtime", host="127.0.0.1", port=5173)
+
+    service_manager.remove_backend_runtime_record(record_path, pid=os.getpid() + 1)
+    assert json.loads(record_path.read_text(encoding="utf-8"))["pid"] == os.getpid()
+
+    service_manager.remove_backend_runtime_record(record_path)
+    assert not record_path.exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="reads the creation token through ps or /proc")
+def test_process_identity_is_stable_for_a_live_process_and_missing_for_dead_ones() -> None:
+    first = service_manager._process_identity(os.getpid())
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait(timeout=10)
+
+    assert first is not None
+    assert service_manager._process_identity(os.getpid()) == first
+    assert service_manager._process_identity(process.pid) is None
+
+
+def test_proc_identity_uses_boot_id_and_start_ticks(monkeypatch, tmp_path: Path) -> None:
+    proc = tmp_path / "proc"
+    (proc / "4242").mkdir(parents=True)
+    (proc / "sys" / "kernel" / "random").mkdir(parents=True)
+    (proc / "sys" / "kernel" / "random" / "boot_id").write_text("b0b0-1\n", encoding="utf-8")
+    fields = ["S"] + ["0"] * 18 + ["1250"]  # stat fields 3..22, field 22 = start ticks
+    (proc / "4242" / "stat").write_text(f"4242 (python (x)) {' '.join(fields)} 0 0\n", encoding="utf-8")
+    monkeypatch.setattr(service_manager, "_PROC_ROOT", proc)
+
+    assert service_manager._proc_identity(4242) == "proc:b0b0-1:1250"
+    assert service_manager._proc_identity(9999) is None
+    (proc / "sys" / "kernel" / "random" / "boot_id").unlink()
+    assert service_manager._proc_identity(4242) is None
+
+
+@pytest.mark.parametrize(
+    "recorded, current",
+    [
+        ("proc:b0b0-1:1250", "lstart:Wed Oct 21 12:00:00 2026"),
+        ("lstart:Wed Oct 21 12:00:00 2026", "proc:b0b0-1:1250"),
+    ],
+)
+def test_cleanup_recorded_backend_keeps_record_when_identity_source_changes(
+    monkeypatch, tmp_path: Path, recorded, current
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    record_path = _write_backend_runtime(paths, 2904, 5173, identity=recorded)
+    console = DummyConsole()
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(service_manager, "_process_identity", lambda _pid: current)
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda *_args, **_kwargs: pytest.fail("must not kill"))
+
+    assert service_manager.cleanup_recorded_backend(paths, console) == []
+    assert record_path.exists()
+    assert any("未自动结束" in message for message in console.messages)
+
+
+def test_windows_process_identity_uses_creation_filetime(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(
+        service_manager,
+        "_windows_process_creation_filetime",
+        lambda pid: 134_048_160_123_456_789 if pid == 2904 else None,
+    )
+    monkeypatch.setattr(service_manager, "_process_command_line", lambda _pid: pytest.fail("no command line needed"))
+
+    assert service_manager._process_identity(2904) == "filetime:134048160123456789"
+    assert service_manager._process_identity(3000) is None
+
+
+def test_run_windows_netstat_matches_local_port_exactly(monkeypatch) -> None:
+    stdout = "\n".join(
+        [
+            "  TCP    0.0.0.0:51730          0.0.0.0:0              LISTENING       1111",
+            "  TCP    127.0.0.1:15173        0.0.0.0:0              LISTENING       2222",
+            "  TCP    127.0.0.1:60123        127.0.0.1:5173         ESTABLISHED     3333",
+            "  TCP    127.0.0.1:5173         0.0.0.0:0              LISTENING       2904",
+        ]
+    )
+    monkeypatch.setattr(
+        service_manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout),
+    )
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+
+    assert service_manager.port_owner_pids(5173) == [2904]
+
+
+def test_start_backend_passes_runtime_record_path_and_clears_old_record_first(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    events: list[str] = []
+    spawned: dict[str, object] = {}
+
+    def fake_spawn(command, **kwargs):
+        events.append("spawn")
+        spawned.update(kwargs)
+        return SimpleNamespace(pid=1234, args=command)
+
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "cleanup_recorded_backend", lambda *_args: events.append("record"))
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [])
+    monkeypatch.setattr(service_manager, "port_is_in_use", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(service_manager, "resolve_aegisops_cli_command", lambda _root: ["/env/bin/aegisops"])
+    monkeypatch.setattr(service_manager, "_spawn_process", fake_spawn)
+    monkeypatch.setattr(service_manager, "_log_startup_config", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "wait_for_http", lambda *_args, **_kwargs: None)
+
+    service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole(), paths=paths)
+
+    assert events == ["record", "spawn"]
+    assert spawned["env"][service_manager.BACKEND_RUNTIME_DIR_ENV] == str(service_manager.backend_runtime_dir(paths))
+
+
+def test_start_backend_port_error_names_owner_and_manual_fix(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    paths.run_dir.mkdir(parents=True)
+    paths.log_dir.mkdir(parents=True)
+    monkeypatch.setattr(service_manager.sys, "platform", "darwin")
+    monkeypatch.setattr(service_manager, "ensure_install_layout", lambda: tmp_path)
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda _port: [2904])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(
+        service_manager,
+        "_process_command_line",
+        lambda _pid: "node /srv/app/node_modules/vite/bin/vite.js --api-key SECRET-TOKEN",
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_run_ps",
+        lambda args: subprocess.CompletedProcess(args, 0, "/usr/local/bin/node [x]\n" if "comm=" in args else "", ""),
+    )
+    monkeypatch.setattr(service_manager, "_terminate_orphan_pid", lambda *_args, **_kwargs: pytest.fail("must not kill"))
+
+    with pytest.raises(service_manager.ServiceError) as exc_info:
+        service_manager._start_backend_process(service_manager.ServiceConfig(), DummyConsole(), paths=paths)
+
+    message = str(exc_info.value)
+    assert "端口 5173 已被占用" in message
+    assert "PID 2904: /usr/local/bin/node (x)" in message
+    assert "SECRET-TOKEN" not in message
+    assert "kill 2904" in message
+    assert "请先执行 `aegisops stop`" not in message
+
+
+def test_windows_port_hint_uses_process_snapshot_and_taskkill(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda pid: pid == 2904)
+    monkeypatch.setattr(
+        service_manager,
+        "_windows_process_snapshot",
+        lambda _pid: {
+            "name": "python.exe",
+            "command_line": "python.exe app.py --token SECRET-TOKEN",
+            "executable_path": "C:\\Python312\\python.exe",
+        },
+    )
+
+    hint = service_manager._occupied_port_hint([2904, 3000])
+
+    assert "PID 2904: C:\\Python312\\python.exe" in hint
+    assert "SECRET-TOKEN" not in hint
+    assert "PID 3000，进程已不存在" in hint
+    assert "taskkill /PID 2904 /PID 3000 /T /F" in hint
+
+
+def test_windows_process_snapshot_accepts_bom_prefixed_json(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "which", lambda name: "powershell.exe" if name == "powershell" else None)
+    stdout = '\ufeff{"Name":"python.exe","CommandLine":"python.exe -m aegisops.cli.main serve --port 5173","ExecutablePath":"C:\\\\py\\\\python.exe"}\r\n'
+    monkeypatch.setattr(service_manager.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout))
+
+    snapshot = service_manager._windows_process_snapshot(2904)
+
+    assert snapshot == {
+        "name": "python.exe",
+        "command_line": "python.exe -m aegisops.cli.main serve --port 5173",
+        "executable_path": "C:\\py\\python.exe",
+    }
+
+
+def test_stop_all_reports_port_still_held_by_unidentified_process(monkeypatch, tmp_path: Path) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    console = DummyConsole()
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+    monkeypatch.setattr(service_manager, "cleanup_legacy_runtime_processes", lambda *_args: None)
+    monkeypatch.setattr(service_manager, "cleanup_orphan_service_ports", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(service_manager, "stop_all_browser_daemons", lambda: [])
+    monkeypatch.setattr(service_manager, "port_owner_pids", lambda port: [2904] if port == 5173 else [])
+    monkeypatch.setattr(service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(service_manager, "_process_image_name", lambda _pid: "python3")
+
+    service_manager.stop_all(console)
+
+    warning = console.messages[-1]
+    assert warning.startswith("[aegisops] 注意：端口 5173 仍被占用（PID 2904: python3）")
+    assert "kill 2904" in warning

@@ -1,0 +1,1233 @@
+"""
+Tests for aegisops.skill.installer and eligibility checking.
+"""
+
+import asyncio
+import os
+import shutil
+import signal
+import subprocess
+import tempfile
+import io
+import zipfile
+from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from aegisops.skill.skill import Skill, SkillInfo, SkillInstallSpec, SkillRequires, SkillMetadata
+from aegisops.skill.installer import (
+    SkillInstaller,
+    SkillInstallResult,
+    DepInstallResult,
+    _resolve_source,
+    _user_skills_root,
+)
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def clear_skill_cache():
+    """Clear Skill cache before each test."""
+    Skill.clear_cache()
+    yield
+    Skill.clear_cache()
+
+
+@pytest.fixture
+def tmp_skills_dir(tmp_path: Path, monkeypatch):
+    """Keep install/discovery tests independent of actual bundled skill names."""
+    from aegisops.project.instance import Instance
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(Skill, "_source_root", lambda: tmp_path / "source")
+    monkeypatch.setattr(Instance, "get_directory", lambda: str(tmp_path / "workspace"))
+    monkeypatch.setattr(Instance, "get_worktree", lambda: str(tmp_path / "workspace"))
+    d = tmp_path / ".aegisops" / "plugins" / "skills"
+    d.mkdir(parents=True)
+    return d
+
+
+def make_skill_info(
+    name: str = "test-skill",
+    requires_bins: list | None = None,
+    requires_env: list | None = None,
+    install_specs: list | None = None,
+) -> SkillInfo:
+    requires = None
+    if requires_bins or requires_env:
+        requires = SkillRequires(bins=requires_bins, env=requires_env)
+
+    specs = None
+    if install_specs:
+        specs = [SkillInstallSpec(**s) for s in install_specs]
+
+    return SkillInfo(
+        name=name,
+        description="A test skill",
+        location=f"/nonexistent/skills/{name}/SKILL.md",
+        requires=requires,
+        install_specs=specs,
+    )
+
+
+# ---------------------------------------------------------------------------
+# _resolve_source
+# ---------------------------------------------------------------------------
+
+class TestResolveSource:
+    def test_safeskill_scheme(self):
+        r = _resolve_source("safeskill:ioc-lookup")
+        assert r["kind"] == "safeskill"
+        assert r["value"] == "ioc-lookup"
+
+    def test_safeskill_uri_scheme(self):
+        source = "safeskill://tbx/6ef3925b1f6245bcbd7da39f23c28652/onesig-use@1.0.0"
+        r = _resolve_source(source)
+        assert r["kind"] == "safeskill"
+        assert r["value"] == source
+
+    def test_clawhub_scheme(self):
+        r = _resolve_source("clawhub:github")
+        assert r["kind"] == "clawhub"
+        assert r["value"] == "github"
+
+    def test_github_scheme(self):
+        r = _resolve_source("github:owner/repo")
+        assert r["kind"] == "github"
+        assert r["value"] == "owner/repo"
+
+    def test_github_url(self):
+        r = _resolve_source("https://github.com/owner/repo")
+        assert r["kind"] == "github"
+        assert r["value"] == "owner/repo"
+
+    def test_github_url_with_subpath(self):
+        r = _resolve_source("https://github.com/owner/repo/tree/main/subdir")
+        assert r["kind"] == "github"
+        assert "owner/repo" in r["value"]
+
+    def test_github_blob_url_with_skill_directory_subpath(self):
+        r = _resolve_source(
+            "https://github.com/mattpocock/skills/blob/main/skills/engineering/diagnose"
+        )
+        assert r["kind"] == "github"
+        assert r["value"] == "mattpocock/skills/skills/engineering/diagnose"
+
+    def test_github_blob_url_to_skill_md_uses_parent_directory(self):
+        r = _resolve_source(
+            "https://github.com/mattpocock/skills/blob/main/skills/engineering/diagnose/SKILL.md"
+        )
+        assert r["kind"] == "github"
+        assert r["value"] == "mattpocock/skills/skills/engineering/diagnose"
+
+    def test_github_scheme_blob_path_with_subpath(self):
+        r = _resolve_source(
+            "github:mattpocock/skills/blob/main/skills/engineering/diagnose"
+        )
+        assert r["kind"] == "github"
+        assert r["value"] == "mattpocock/skills/skills/engineering/diagnose"
+
+    def test_https_url(self):
+        r = _resolve_source("https://example.com/SKILL.md")
+        assert r["kind"] == "url"
+        assert r["value"] == "https://example.com/SKILL.md"
+
+    def test_skills_sh_url(self):
+        r = _resolve_source("https://www.skills.sh/owner/repo/demo")
+        assert r["kind"] == "skills_sh"
+        assert r["value"] == "owner/repo/demo"
+
+    def test_local_absolute(self):
+        r = _resolve_source("/home/user/skills/my-skill")
+        assert r["kind"] == "local"
+        assert r["value"] == "/home/user/skills/my-skill"
+
+    def test_local_relative(self):
+        r = _resolve_source("./my-skill")
+        assert r["kind"] == "local"
+
+    def test_shorthand_owner_repo(self):
+        r = _resolve_source("owner/repo")
+        assert r["kind"] == "github"
+        assert r["value"] == "owner/repo"
+
+
+# ---------------------------------------------------------------------------
+# SkillInfo eligibility checking
+# ---------------------------------------------------------------------------
+
+class TestCheckEligibility:
+    def test_no_requires_is_eligible(self):
+        skill = make_skill_info("no-reqs")
+        result = Skill.check_eligibility(skill)
+        assert result.eligible is True
+        assert result.missing == []
+
+    def test_bin_present(self):
+        skill = make_skill_info("bin-skill", requires_bins=["python3"])
+        result = Skill.check_eligibility(skill)
+        # python3 should be present in the test environment
+        assert result.eligible is True
+        assert result.missing == []
+
+    def test_bin_missing(self):
+        skill = make_skill_info("bin-skill", requires_bins=["__nonexistent_binary__"])
+        result = Skill.check_eligibility(skill)
+        assert result.eligible is False
+        assert any("bin:__nonexistent_binary__" in m for m in (result.missing or []))
+
+    def test_env_present(self):
+        os.environ["TEST_AEGISOPS_VAR"] = "hello"
+        try:
+            skill = make_skill_info("env-skill", requires_env=["TEST_AEGISOPS_VAR"])
+            result = Skill.check_eligibility(skill)
+            assert result.eligible is True
+        finally:
+            del os.environ["TEST_AEGISOPS_VAR"]
+
+    def test_env_missing(self):
+        skill = make_skill_info("env-skill", requires_env=["__MISSING_ENV_VAR__"])
+        result = Skill.check_eligibility(skill)
+        assert result.eligible is False
+        assert any("env:__MISSING_ENV_VAR__" in m for m in (result.missing or []))
+
+    def test_multiple_missing(self):
+        skill = make_skill_info(
+            "multi-miss",
+            requires_bins=["__no_bin_1__", "__no_bin_2__"],
+            requires_env=["__NO_ENV_VAR__"],
+        )
+        result = Skill.check_eligibility(skill)
+        assert result.eligible is False
+        assert len(result.missing or []) == 3
+
+
+# ---------------------------------------------------------------------------
+# Skill._parse_frontmatter (YAML upgrade)
+# ---------------------------------------------------------------------------
+
+class TestParseFrontmatter:
+    def test_simple_frontmatter(self):
+        content = "---\nname: test-skill\ndescription: Hello\n---\n# Body"
+        data = Skill._parse_frontmatter(content)
+        assert data["name"] == "test-skill"
+        assert data["description"] == "Hello"
+
+    def test_nested_metadata_aegisops(self):
+        content = (
+            "---\n"
+            "name: test-skill\n"
+            "description: Hello\n"
+            "metadata:\n"
+            "  aegisops:\n"
+            "    requires:\n"
+            "      bins: [gh]\n"
+            "    install:\n"
+            "      - kind: brew\n"
+            "        formula: gh\n"
+            "---\n"
+        )
+        data = Skill._parse_frontmatter(content)
+        assert data["name"] == "test-skill"
+        meta = data.get("metadata", {}).get("aegisops", {})
+        assert meta["requires"]["bins"] == ["gh"]
+        assert meta["install"][0]["kind"] == "brew"
+
+    def test_metadata_openclaw_compatible(self):
+        content = (
+            "---\n"
+            "name: openclaw-compat\n"
+            "description: Test\n"
+            "metadata:\n"
+            "  openclaw:\n"
+            "    requires:\n"
+            "      bins: [node]\n"
+            "---\n"
+        )
+        data = Skill._parse_frontmatter(content)
+        meta = data.get("metadata", {}).get("openclaw", {})
+        assert meta["requires"]["bins"] == ["node"]
+
+    def test_no_frontmatter_returns_empty(self):
+        data = Skill._parse_frontmatter("# Just a markdown file")
+        assert data == {}
+
+
+# ---------------------------------------------------------------------------
+# SkillInstaller._save_skill_content
+# ---------------------------------------------------------------------------
+
+class TestSaveSkillContent:
+    def test_save_valid_content(self, tmp_skills_dir: Path):
+        content = "---\nname: my-skill\ndescription: My skill\n---\n# Body"
+        with patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir):
+            result = SkillInstaller._save_skill_content(content, "global")
+
+        assert result.success is True
+        assert result.skill_name == "my-skill"
+        saved = tmp_skills_dir / "my-skill" / "SKILL.md"
+        assert saved.exists()
+        assert saved.read_text() == content
+
+    def test_save_invalid_name_fails(self, tmp_skills_dir: Path):
+        content = "---\nname: Invalid Name!\ndescription: Bad\n---\n"
+        with patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir):
+            result = SkillInstaller._save_skill_content(content, "global")
+
+        assert result.success is False
+        assert result.error is not None
+
+    def test_save_no_name_uses_hint(self, tmp_skills_dir: Path):
+        content = "---\ndescription: No name\n---\n"
+        with patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir):
+            result = SkillInstaller._save_skill_content(content, "global", skill_name_hint="hinted-skill")
+
+        assert result.success is True
+        assert result.skill_name == "hinted-skill"
+
+
+# ---------------------------------------------------------------------------
+# SkillInstaller.install_from_source
+# ---------------------------------------------------------------------------
+
+class TestInstallFromSource:
+    @pytest.mark.asyncio
+    async def test_run_subprocess_isolates_stdio_and_process_group(self):
+        proc = MagicMock()
+        proc.communicate = AsyncMock(return_value=(b"ok", b""))
+        proc.returncode = 0
+
+        with patch(
+            "aegisops.skill.installer.asyncio.create_subprocess_exec",
+            AsyncMock(return_value=proc),
+        ) as mock_exec:
+            returncode, stdout, stderr = await SkillInstaller._run_subprocess(
+                ["demo"],
+                timeout_sec=1,
+            )
+
+        assert returncode == 0
+        assert stdout == "ok"
+        assert stderr == ""
+        kwargs = mock_exec.call_args.kwargs
+        assert kwargs["stdin"] == asyncio.subprocess.DEVNULL
+        assert kwargs["stdout"] == asyncio.subprocess.PIPE
+        assert kwargs["stderr"] == asyncio.subprocess.PIPE
+        if os.name != "nt":
+            assert kwargs["start_new_session"] is True
+
+    def test_subprocess_stdio_kwargs_uses_windows_process_group(self):
+        with (
+            patch("aegisops.skill.installer.os.name", "nt"),
+            patch(
+                "aegisops.skill.installer.subprocess.CREATE_NEW_PROCESS_GROUP",
+                512,
+                create=True,
+            ),
+        ):
+            kwargs = SkillInstaller._subprocess_stdio_kwargs()
+
+        assert kwargs["creationflags"] == 512
+        assert "start_new_session" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_run_subprocess_timeout_terminates_process_group(self):
+        proc = MagicMock()
+        proc.pid = 12345
+        proc.communicate = AsyncMock(return_value=(b"", b""))
+        proc.returncode = None
+        wait_calls = 0
+
+        async def fake_wait_for(awaitable, timeout):
+            nonlocal wait_calls
+            wait_calls += 1
+            if wait_calls == 1:
+                awaitable.close()
+                raise asyncio.TimeoutError()
+            return await awaitable
+
+        with (
+            patch(
+                "aegisops.skill.installer.asyncio.create_subprocess_exec",
+                AsyncMock(return_value=proc),
+            ),
+            patch("aegisops.skill.installer.asyncio.wait_for", fake_wait_for),
+            patch("aegisops.skill.installer.os.killpg") as mock_killpg,
+        ):
+            with pytest.raises(TimeoutError):
+                await SkillInstaller._run_subprocess(["demo"], timeout_sec=1)
+
+        mock_killpg.assert_called_once_with(12345, signal.SIGTERM)
+
+    def test_signal_process_tree_force_uses_windows_taskkill(self):
+        proc = MagicMock()
+        proc.pid = 12345
+
+        with (
+            patch("aegisops.skill.installer.os.name", "nt"),
+            patch("aegisops.skill.installer.subprocess.run") as mock_run,
+        ):
+            mock_run.return_value.returncode = 0
+            SkillInstaller._signal_process_tree(proc, signal.SIGTERM, force=True)
+
+        mock_run.assert_called_once_with(
+            ["taskkill", "/PID", "12345", "/T", "/F"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+        proc.kill.assert_not_called()
+        proc.terminate.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_skills_sh_cli_staging_imports_agent_skill(self, tmp_skills_dir):
+        class Proc:
+            returncode = 0
+
+            async def communicate(self):
+                return b"installed", b""
+
+        async def fake_create_subprocess_exec(*_cmd, **kwargs):
+            staged_skill = Path(kwargs["cwd"]) / ".agents" / "skills" / "demo"
+            staged_skill.mkdir(parents=True)
+            (staged_skill / "SKILL.md").write_text(
+                "---\nname: demo\ndescription: Demo\n---\n",
+                encoding="utf-8",
+            )
+            return Proc()
+
+        with (
+            patch("aegisops.skill.installer.shutil.which", return_value="/usr/bin/npx"),
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch(
+                "aegisops.skill.installer.asyncio.create_subprocess_exec",
+                fake_create_subprocess_exec,
+            ),
+        ):
+            result = await SkillInstaller.install_from_source(
+                "https://www.skills.sh/owner/repo/demo"
+            )
+
+        assert result.success is True
+        assert result.skill_name == "demo"
+        assert (tmp_skills_dir / "demo" / "SKILL.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_skills_sh_cli_timeout_returns_error(self):
+        with (
+            patch("aegisops.skill.installer.shutil.which", return_value="/usr/bin/npx"),
+            patch.object(
+                SkillInstaller,
+                "_run_subprocess",
+                AsyncMock(side_effect=TimeoutError("Command timed out after 45s")),
+            ),
+        ):
+            result = await SkillInstaller._install_from_skills_sh_cli(
+                "owner/repo/demo",
+                "global",
+                yes=True,
+            )
+
+        assert result.success is False
+        assert "timed out" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_install_from_source_overall_timeout_returns_error(self):
+        async def fake_wait_for(awaitable, timeout):
+            awaitable.close()
+            raise asyncio.TimeoutError()
+
+        with patch("aegisops.skill.installer.asyncio.wait_for", fake_wait_for):
+            result = await SkillInstaller.install_from_source("github:owner/repo/demo")
+
+        assert result.success is False
+        assert "timed out" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_safeskill_requires_npx(self, tmp_skills_dir):
+        with patch("aegisops.skill.installer.shutil.which", return_value=None):
+            result = await SkillInstaller.install_from_source("safeskill:test")
+        assert result.success is False
+        assert "npx is required" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_safeskill_cli_uses_cn_region_and_aegisops_agent(self, tmp_skills_dir):
+        source = "safeskill://tbx/6ef3925b1f6245bcbd7da39f23c28652/onesig-use@1.0.0"
+        captured = {}
+
+        async def fake_run_subprocess(cmd, *, timeout_sec, cwd=None, env=None):
+            captured["cmd"] = cmd
+            captured["timeout_sec"] = timeout_sec
+            captured["cwd"] = cwd
+            captured["env"] = env
+            staged_skill = Path(env["HOME"]) / ".aegisops" / "plugins" / "skills" / "onesig-use"
+            staged_skill.mkdir(parents=True)
+            (staged_skill / "SKILL.md").write_text(
+                "---\nname: onesig-use\ndescription: OneSig\n---\n",
+                encoding="utf-8",
+            )
+            return 0, "✓ onesig-use (copied)", ""
+
+        with (
+            patch("aegisops.skill.installer.shutil.which", return_value="/usr/bin/npx"),
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch.object(SkillInstaller, "_run_subprocess", fake_run_subprocess),
+        ):
+            result = await SkillInstaller.install_from_source(source)
+
+        assert result.success is True
+        assert result.skill_name == "onesig-use"
+        assert (tmp_skills_dir / "onesig-use" / "SKILL.md").exists()
+        assert captured["cmd"] == [
+            "/usr/bin/npx",
+            "-y",
+            "@safeskill/cli",
+            "--region",
+            "cn",
+            "add",
+            source,
+            "--agent",
+            "aegisops",
+            "--yes",
+        ]
+        assert captured["env"]["HOME"] == captured["cwd"]
+        assert captured["env"]["USERPROFILE"] == captured["cwd"]
+        staging = Path(captured["cwd"])
+        assert captured["env"]["APPDATA"] == str(staging / "AppData" / "Roaming")
+        assert captured["env"]["LOCALAPPDATA"] == str(staging / "AppData" / "Local")
+        assert captured["env"]["XDG_CONFIG_HOME"] == str(staging / ".config")
+        assert captured["env"]["XDG_CACHE_HOME"] == str(staging / ".cache")
+        assert captured["env"]["NPM_CONFIG_CACHE"] == str(staging / ".npm")
+
+    @pytest.mark.asyncio
+    async def test_local_file(self, tmp_path: Path, tmp_skills_dir: Path):
+        skill_dir = tmp_path / "source-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: local-test\ndescription: Local\n---\n"
+        )
+        with patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir):
+            result = await SkillInstaller.install_from_source(str(skill_dir))
+
+        assert result.success is True
+        assert result.skill_name == "local-test"
+
+    @pytest.mark.asyncio
+    async def test_local_file_not_found(self):
+        result = await SkillInstaller.install_from_source("/nonexistent/path/SKILL.md")
+        assert result.success is False
+
+    @pytest.mark.asyncio
+    async def test_url_success(self, tmp_skills_dir: Path):
+        mock_content = "---\nname: url-skill\ndescription: From URL\n---\n"
+
+        class Resp:
+            status_code = 200
+            text = mock_content
+            headers = {}
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, _url: str):
+                return Resp()
+
+        with (
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source(
+                "https://example.com/SKILL.md"
+            )
+
+        assert result.success is True
+        assert result.skill_name == "url-skill"
+
+    @pytest.mark.asyncio
+    async def test_url_http_error(self, tmp_skills_dir: Path):
+        class Resp:
+            status_code = 404
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, _url: str):
+                return Resp()
+
+        with (
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source("https://example.com/SKILL.md")
+
+        assert result.success is False
+        assert "404" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_github_api_403_falls_back_to_raw_skill_md(self, tmp_skills_dir: Path):
+        skill_content = (
+            "---\n"
+            "name: web-design-guidelines\n"
+            "description: Web design review\n"
+            "---\n"
+            "# Web Interface Guidelines\n"
+        )
+
+        class Resp:
+            def __init__(self, status_code: int, text: str = ""):
+                self.status_code = status_code
+                self.text = text
+
+            def json(self):
+                return []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                if url.endswith("/main/skills/web-design-guidelines/SKILL.md"):
+                    return Resp(200, skill_content)
+                if "api.github.com" in url:
+                    return Resp(403, "rate limited")
+                return Resp(404, "not found")
+
+        with (
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source(
+                "github:vercel-labs/agent-skills/web-design-guidelines"
+            )
+
+        assert result.success is True
+        assert result.skill_name == "web-design-guidelines"
+        assert "raw GitHub SKILL.md fallback" in result.message
+        assert (tmp_skills_dir / "web-design-guidelines" / "SKILL.md").exists()
+
+    @pytest.mark.asyncio
+    async def test_github_archive_fallback_finds_skill_by_name(self, tmp_skills_dir: Path):
+        skill_content = (
+            "---\n"
+            "name: improve-codebase-architecture\n"
+            "description: Improve codebase architecture\n"
+            "---\n"
+            "# Improve Codebase Architecture\n"
+        )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr(
+                "skills-main/skills/engineering/improve-codebase-architecture/SKILL.md",
+                skill_content,
+            )
+            zf.writestr(
+                "skills-main/skills/engineering/improve-codebase-architecture/references/checklist.md",
+                "checklist",
+            )
+
+        class Resp:
+            def __init__(self, status_code: int, text: str = "", content: bytes = b""):
+                self.status_code = status_code
+                self.text = text
+                self.content = content
+
+            def json(self):
+                return []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                if "codeload.github.com" in url:
+                    return Resp(200, content=zip_buffer.getvalue())
+                return Resp(404, "not found")
+
+        with (
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source(
+                "github:mattpocock/skills/improve-codebase-architecture"
+            )
+
+        assert result.success is True
+        assert result.skill_name == "improve-codebase-architecture"
+        assert "GitHub archive" in result.message
+        assert (
+            tmp_skills_dir
+            / "improve-codebase-architecture"
+            / "references"
+            / "checklist.md"
+        ).exists()
+
+    @pytest.mark.asyncio
+    async def test_github_archive_fallback_rejects_zip_slip_members(self, tmp_skills_dir: Path):
+        skill_content = (
+            "---\n"
+            "name: demo\n"
+            "description: Demo skill\n"
+            "---\n"
+            "# Demo\n"
+        )
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zf:
+            zf.writestr("repo-main/demo/SKILL.md", skill_content)
+            zf.writestr("repo-main/demo/../demo2/pwned.txt", "pwned")
+
+        class Resp:
+            def __init__(self, status_code: int, text: str = "", content: bytes = b""):
+                self.status_code = status_code
+                self.text = text
+                self.content = content
+
+            def json(self):
+                return []
+
+        class Client:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_args):
+                return None
+
+            async def get(self, url: str):
+                if "codeload.github.com" in url:
+                    return Resp(200, content=zip_buffer.getvalue())
+                return Resp(404, "not found")
+
+        with (
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch("httpx.AsyncClient", return_value=Client()),
+        ):
+            result = await SkillInstaller.install_from_source("github:owner/repo/demo")
+
+        assert result.success is True
+        assert (tmp_skills_dir / "demo" / "SKILL.md").exists()
+        assert not (tmp_skills_dir / "demo2" / "pwned.txt").exists()
+
+
+# ---------------------------------------------------------------------------
+# SkillInstaller._build_install_command
+# ---------------------------------------------------------------------------
+
+class TestBuildInstallCommand:
+    def test_brew(self):
+        spec = SkillInstallSpec(kind="brew", formula="gh")
+        cmd = SkillInstaller._build_install_command(spec)
+        assert cmd == ["brew", "install", "gh"]
+
+    def test_npm(self):
+        spec = SkillInstallSpec(kind="npm", package="clawhub")
+        cmd = SkillInstaller._build_install_command(spec)
+        assert cmd == ["npm", "install", "-g", "--ignore-scripts", "clawhub"]
+
+    def test_uv(self):
+        spec = SkillInstallSpec(kind="uv", package="some-tool")
+        cmd = SkillInstaller._build_install_command(spec)
+        assert cmd == ["uv", "tool", "install", "some-tool"]
+
+    def test_go(self):
+        spec = SkillInstallSpec(kind="go", module="github.com/user/tool@latest")
+        cmd = SkillInstaller._build_install_command(spec)
+        assert cmd == ["go", "install", "github.com/user/tool@latest"]
+
+    def test_missing_formula_returns_none(self):
+        spec = SkillInstallSpec(kind="brew")
+        assert SkillInstaller._build_install_command(spec) is None
+
+    def test_os_skip(self):
+        spec = SkillInstallSpec(kind="brew", formula="gh", os=["win32"])
+        cmd = SkillInstaller._build_install_command(spec)
+        # On non-Windows, should return None
+        import platform
+        if platform.system().lower() != "windows":
+            assert cmd is None
+
+
+# ---------------------------------------------------------------------------
+# SkillInstaller.uninstall
+# ---------------------------------------------------------------------------
+
+class TestUninstall:
+    @pytest.mark.asyncio
+    async def test_uninstall_user_managed(self, tmp_skills_dir: Path):
+        skill_dir = tmp_skills_dir / "to-remove"
+        skill_dir.mkdir(parents=True)
+        skill_path = skill_dir / "SKILL.md"
+        skill_path.write_text("---\nname: to-remove\ndescription: Test\n---\n")
+
+        mock_skill = SkillInfo(
+            name="to-remove",
+            description="Test",
+            location=str(skill_path),
+        )
+
+        with (
+            patch("aegisops.skill.installer._user_skills_root", return_value=tmp_skills_dir),
+            patch.object(Skill, "get", return_value=mock_skill),
+        ):
+            result = await SkillInstaller.uninstall("to-remove")
+
+        assert result.success is True
+        assert not skill_dir.exists()
+
+    @pytest.mark.asyncio
+    async def test_uninstall_not_found(self):
+        with patch.object(Skill, "get", return_value=None):
+            result = await SkillInstaller.uninstall("ghost-skill")
+
+        assert result.success is False
+        assert "not found" in (result.error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_uninstall_non_user_managed(self, tmp_path: Path):
+        other_dir = tmp_path / "system" / "my-skill"
+        other_dir.mkdir(parents=True)
+        skill_path = other_dir / "SKILL.md"
+        skill_path.write_text("---\nname: my-skill\ndescription: Sys\n---\n")
+
+        mock_skill = SkillInfo(
+            name="my-skill",
+            description="Sys",
+            location=str(skill_path),
+        )
+
+        with patch.object(Skill, "get", return_value=mock_skill):
+            result = await SkillInstaller.uninstall("my-skill")
+
+        assert result.success is False
+        assert "user-managed" in (result.error or "").lower()
+
+
+# ---------------------------------------------------------------------------
+# SkillInstaller.install_deps  (the function that had the message-field bug)
+# ---------------------------------------------------------------------------
+
+class TestInstallDeps:
+    @pytest.mark.asyncio
+    async def test_skill_not_found_returns_error(self):
+        """install_deps: skill lookup fails → returns DepInstallResult with error."""
+        with patch.object(Skill, "get", return_value=None):
+            results = await SkillInstaller.install_deps("ghost-skill")
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "not found" in (results[0].error or "").lower()
+
+    @pytest.mark.asyncio
+    async def test_no_install_specs_returns_success(self):
+        """install_deps: skill has no install specs → returns success with message.
+
+        This exercises the bug-fixed path: DepInstallResult now has message field.
+        """
+        skill = make_skill_info("no-deps-skill")  # install_specs=None
+        with patch.object(Skill, "get", return_value=skill):
+            results = await SkillInstaller.install_deps("no-deps-skill")
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert "no install specs" in results[0].message.lower()
+
+    @pytest.mark.asyncio
+    async def test_install_id_not_found_returns_error(self):
+        """install_deps: specified install_id doesn't exist in specs → error."""
+        skill = make_skill_info(
+            "has-deps",
+            install_specs=[{"kind": "brew", "id": "brew-gh", "formula": "gh"}],
+        )
+        with patch.object(Skill, "get", return_value=skill):
+            results = await SkillInstaller.install_deps("has-deps", install_id="nonexistent-id")
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "nonexistent-id" in (results[0].error or "")
+
+    @pytest.mark.asyncio
+    async def test_install_id_filters_to_matching_spec(self):
+        """install_deps with install_id only runs the matching spec."""
+        skill = make_skill_info(
+            "multi-deps",
+            install_specs=[
+                {"kind": "brew", "id": "brew-gh", "formula": "gh"},
+                {"kind": "uv", "id": "uv-tool", "package": "some-tool"},
+            ],
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(b"ok", b""))
+
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            results = await SkillInstaller.install_deps("multi-deps", install_id="uv-tool")
+
+        assert len(results) == 1
+        assert results[0].spec_id == "uv-tool"
+
+    @pytest.mark.asyncio
+    async def test_successful_spec_execution(self):
+        """install_deps: spec runs successfully → result.success is True."""
+        skill = make_skill_info(
+            "brew-skill",
+            install_specs=[{"kind": "brew", "id": "brew-gh", "formula": "gh"}],
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(b"installed gh\n", b""))
+
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            results = await SkillInstaller.install_deps("brew-skill")
+
+        assert len(results) == 1
+        assert results[0].success is True
+        assert results[0].returncode == 0
+        assert "gh" in results[0].stdout
+
+    @pytest.mark.asyncio
+    async def test_failed_spec_execution(self):
+        """install_deps: spec exits non-zero → result.success is False."""
+        skill = make_skill_info(
+            "fail-skill",
+            install_specs=[{"kind": "brew", "formula": "nonexistent-pkg"}],
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.returncode = 1
+        mock_proc.communicate = AsyncMock(return_value=(b"", b"Error: formula not found\n"))
+
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+        ):
+            results = await SkillInstaller.install_deps("fail-skill")
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert results[0].returncode == 1
+        assert results[0].error is not None
+
+    @pytest.mark.asyncio
+    async def test_spec_timeout(self):
+        """install_deps: subprocess times out → result.success is False with timeout error."""
+        import asyncio as _asyncio
+
+        skill = make_skill_info(
+            "slow-skill",
+            install_specs=[{"kind": "brew", "formula": "slow-pkg"}],
+        )
+
+        mock_proc = MagicMock()
+        mock_proc.kill = MagicMock()
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+
+        async def raise_timeout(*args, **kwargs):
+            raise _asyncio.TimeoutError()
+
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc),
+            patch("asyncio.wait_for", side_effect=raise_timeout),
+        ):
+            results = await SkillInstaller.install_deps("slow-skill", timeout_ms=100)
+
+        assert len(results) == 1
+        assert results[0].success is False
+        assert "timed out" in (results[0].error or "").lower()
+        mock_proc.kill.assert_called_once()
+
+
+class TestManagedPipDeps:
+    """A managed install runs the release's verified tree: pip never installs into it."""
+
+    @pytest.fixture(autouse=True)
+    def _managed(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path / "root"))
+        monkeypatch.setenv("AEGISOPS_DEPLOY_MODE", "managed")
+
+    @pytest.mark.asyncio
+    async def test_a_package_the_release_lacks_is_refused_without_running_pip(self):
+        skill = make_skill_info(
+            "pip-skill",
+            install_specs=[{"kind": "pip", "id": "pip-x", "package": "aegisops-surely-not-installed-xyz"}],
+        )
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            results = await SkillInstaller.install_deps("pip-skill")
+
+        spawn.assert_not_called()
+        assert results[0].success is False
+        assert results[0].spec_id == "pip-x"
+        assert "managed install" in (results[0].error or "")
+        assert "aegisops-surely-not-installed-xyz" in (results[0].error or "")
+
+    @pytest.mark.asyncio
+    async def test_a_package_the_release_has_counts_as_installed(self):
+        skill = make_skill_info("pip-skill", install_specs=[{"kind": "pip", "package": "packaging>=1"}])
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            results = await SkillInstaller.install_deps("pip-skill")
+
+        spawn.assert_not_called()
+        assert results[0].success is True
+        assert "provided by this release" in results[0].message
+
+    @pytest.mark.asyncio
+    async def test_an_extra_the_release_lacks_and_an_unreadable_version_are_refused(self, monkeypatch, tmp_path):
+        site = tmp_path / "site"
+        for name, version, requires in (
+            ("aegisops-fake-extras", "1.0", [f'aegisops-surely-not-installed-xyz; extra == "more"']),
+            ("aegisops-fake-badver", "not-a-version", []),
+        ):
+            info = site / f"{name.replace('-', '_')}-0.dist-info"
+            info.mkdir(parents=True)
+            lines = ["Metadata-Version: 2.1", f"Name: {name}", f"Version: {version}"]
+            lines += [f"Requires-Dist: {req}" for req in requires]
+            (info / "METADATA").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        monkeypatch.syspath_prepend(str(site))
+        skill = make_skill_info(
+            "pip-skill",
+            install_specs=[
+                {"kind": "pip", "id": "extra", "package": "aegisops-fake-extras[more]"},
+                {"kind": "pip", "id": "badver", "package": "aegisops-fake-badver>=1"},
+            ],
+        )
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec") as spawn,
+        ):
+            results = await SkillInstaller.install_deps("pip-skill")
+
+        spawn.assert_not_called()
+        assert [(r.spec_id, r.success) for r in results] == [("extra", False), ("badver", False)]
+        assert "aegisops-fake-extras[more]" in (results[0].error or "")
+        assert "aegisops-fake-badver>=1" in (results[1].error or "")
+
+    @pytest.mark.asyncio
+    async def test_other_kinds_still_run_in_a_managed_install(self):
+        skill = make_skill_info("brew-skill", install_specs=[{"kind": "brew", "formula": "gh"}])
+        mock_proc = MagicMock()
+        mock_proc.returncode = 0
+        mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+        with (
+            patch.object(Skill, "get", return_value=skill),
+            patch("asyncio.create_subprocess_exec", return_value=mock_proc) as spawn,
+        ):
+            results = await SkillInstaller.install_deps("brew-skill")
+
+        spawn.assert_called_once()
+        assert results[0].success is True
+
+
+@pytest.mark.asyncio
+async def test_pip_deps_still_install_outside_a_managed_install(monkeypatch, tmp_path):
+    monkeypatch.setenv("AEGISOPS_ROOT", str(tmp_path / "root"))
+    monkeypatch.delenv("AEGISOPS_DEPLOY_MODE", raising=False)
+    skill = make_skill_info("pip-skill", install_specs=[{"kind": "pip", "package": "packaging"}])
+    mock_proc = MagicMock()
+    mock_proc.returncode = 0
+    mock_proc.communicate = AsyncMock(return_value=(b"", b""))
+    with (
+        patch.object(Skill, "get", return_value=skill),
+        patch("asyncio.create_subprocess_exec", return_value=mock_proc) as spawn,
+    ):
+        results = await SkillInstaller.install_deps("pip-skill")
+
+    spawn.assert_called_once()
+    assert spawn.call_args.args[1:4] == ("-m", "pip", "install")
+    assert results[0].success is True
+
+
+# ---------------------------------------------------------------------------
+# SkillInstaller._build_install_command — pip and go-module fallback
+# ---------------------------------------------------------------------------
+
+class TestBuildInstallCommandExtended:
+    def test_pip(self):
+        import sys
+        spec = SkillInstallSpec(kind="pip", package="requests")
+        cmd = SkillInstaller._build_install_command(spec)
+        assert cmd is not None
+        assert cmd[0] == sys.executable
+        assert "pip" in cmd
+        assert "requests" in cmd
+
+    def test_go_package_fallback(self):
+        """go spec with package (no module) should fall back to package."""
+        spec = SkillInstallSpec(kind="go", package="github.com/user/tool@latest")
+        cmd = SkillInstaller._build_install_command(spec)
+        assert cmd is not None
+        assert "github.com/user/tool@latest" in cmd
+
+    def test_download_kind_returns_none(self):
+        spec = SkillInstallSpec(kind="download", url="https://example.com/tool")
+        cmd = SkillInstaller._build_install_command(spec)
+        assert cmd is None
+
+
+INSTALL_GROUP_FAMILIES = [
+    "skills-sh", "safeskill", "clawhub", "github-zip", "contents-api", "github-raw", "url", "local", "raw",
+]
+
+
+async def _install_group_package(family, content, tmp_path, monkeypatch, *, scope="global"):
+    """Replace through each installer family; v2 only replaces a skill after an explicit overwrite."""
+    from aegisops.skill import installer as installer_module
+
+    token = installer_module._OVERWRITE_ALLOWED.set(True)
+    try:
+        return await _install_group_package_once(family, content, tmp_path, monkeypatch, scope=scope)
+    finally:
+        installer_module._OVERWRITE_ALLOWED.reset(token)
+
+
+async def _install_group_package_once(family, content, tmp_path, monkeypatch, *, scope="global"):
+    """Exercise each real replacement boundary with offline download responses."""
+    import httpx
+
+    def response(text="", *, payload=None, data=None):
+        return MagicMock(status_code=200, text=text, content=payload or text.encode(), headers={}, json=lambda: data)
+
+    if family in {"skills-sh", "safeskill"}:
+        root = ".agents/skills" if family == "skills-sh" else ".aegisops/plugins/skills"
+        staged = tmp_path / "staging" / root / "group-demo"
+        staged.mkdir(parents=True, exist_ok=True)
+        (staged / "SKILL.md").write_bytes(content.encode())
+        (staged / "asset.txt").write_text("New asset")
+        try:
+            imported = SkillInstaller._import_staged_skill_dirs(tmp_path / "staging", scope)
+            return SkillInstallResult(success=bool(imported))
+        except ValueError as exc:
+            return SkillInstallResult(success=False, error=str(exc))
+    if family == "local":
+        source = tmp_path / "incoming.md"
+        source.write_bytes(content.encode())
+        return await SkillInstaller._install_from_local(str(source), scope)
+    if family == "raw":
+        return SkillInstaller._save_skill_content(content, scope)
+
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    monkeypatch.setattr(httpx, "AsyncClient", lambda **_kwargs: client)
+    if family in {"clawhub", "github-zip"}:
+        archive = io.BytesIO()
+        prefix = "repository-main/skills/group-demo/" if family == "github-zip" else ""
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr(prefix + "SKILL.md", content)
+            zf.writestr(prefix + "asset.txt", "New asset")
+        if family == "clawhub":
+            client.get.return_value = response(payload=archive.getvalue())
+            return await SkillInstaller._install_from_clawhub("group-demo", scope)
+        with zipfile.ZipFile(io.BytesIO(archive.getvalue())) as zf:
+            return SkillInstaller._import_skill_from_github_zip(
+                zf, "owner", "repository", "main", ["skills/group-demo"], "group-demo", scope,
+            )
+    if family == "contents-api":
+        entries = [
+            {"type": "file", "name": "SKILL.md", "download_url": "https://offline.invalid/skill"},
+            {"type": "file", "name": "asset.txt", "download_url": "https://offline.invalid/asset"},
+        ]
+        async def get(url):
+            if "api.github.com" in url:
+                return response(data=entries)
+            return response(content if url.endswith("/skill") else "New asset")
+        client.get.side_effect = get
+        return await SkillInstaller._download_github_dir(client, "owner", "repository", "main", "", scope)
+    client.get.return_value = response(content)
+    if family == "github-raw":
+        return await SkillInstaller._download_github_skill_md_raw(client, "owner", "repository", "main", "", scope)
+    return await SkillInstaller._install_from_url("https://offline.invalid/skill", scope)
+
+
+@pytest.mark.parametrize("family", INSTALL_GROUP_FAMILIES)
+@pytest.mark.parametrize("old_metadata", [{"group": "Personal"}, {"group": ""}, {"group": None}, {}, None])
+async def test_all_installer_families_preserve_explicit_groups_before_replacement(
+    tmp_path, tmp_skills_dir, monkeypatch, family, old_metadata,
+):
+    import yaml
+
+    destination = tmp_skills_dir / "group-demo" / "SKILL.md"
+    if old_metadata is not None:
+        destination.parent.mkdir()
+        destination.write_text("---\n" + yaml.safe_dump({"name": "group-demo", "description": "Old", **old_metadata}) + "---\nOld body\n")
+    incoming = (
+        "---\r\nname: group-demo\r\ndescription: Analyze: alerts\r\ngroup: Package\r\n"
+        "metadata:\r\n  extra:\r\n    values: [1, 2]\r\n---\r\n\r\nNew body  \r\n"
+    )
+    result = await _install_group_package(family, incoming, tmp_path, monkeypatch)
+    assert result.success, result.error
+    saved = destination.read_bytes().decode()
+    metadata = Skill._parse_frontmatter(saved)
+    expected = (old_metadata["group"] or "") if old_metadata is not None and "group" in old_metadata else "Package"
+    assert metadata["group"] == expected
+    assert metadata["description"] == "Analyze: alerts"
+    assert metadata["metadata"] == {"extra": {"values": [1, 2]}}
+    assert saved.endswith("---\r\n\r\nNew body  \r\n")
+    assert "\n" not in saved.replace("\r\n", "")
+
+
+@pytest.mark.parametrize("family", INSTALL_GROUP_FAMILIES)
+@pytest.mark.parametrize("old_header", ["group: [not, scalar]\n", "metadata: [unclosed\n"])
+async def test_all_installer_families_fail_before_overwriting_unrecoverable_metadata(
+    tmp_path, tmp_skills_dir, monkeypatch, family, old_header,
+):
+    destination = tmp_skills_dir / "group-demo" / "SKILL.md"
+    destination.parent.mkdir()
+    original = f"---\nname: group-demo\ndescription: Old\n{old_header}---\nOld body\n".encode()
+    destination.write_bytes(original)
+    asset = destination.parent / "asset.txt"
+    asset.write_text("Original asset")
+    incoming = "---\nname: group-demo\ndescription: New\ngroup: Package\n---\nNew body\n"
+    result = await _install_group_package(family, incoming, tmp_path, monkeypatch)
+    assert not result.success
+    assert destination.read_bytes() == original
+    assert asset.read_text() == "Original asset"
+
+
+@pytest.mark.parametrize("family", INSTALL_GROUP_FAMILIES)
+@pytest.mark.parametrize("protected_source", ["shipped", "project", "aegisops"])
+async def test_all_installer_families_cannot_shadow_readonly_skills(
+    tmp_path, tmp_skills_dir, monkeypatch, family, protected_source,
+):
+    roots = {
+        "shipped": tmp_path / "source/.aegisops/plugins/skills",
+        "project": tmp_path / "workspace/.aegisops/plugins/skills",
+        "aegisops": tmp_path / ".aegisops/skills",
+    }
+    protected = roots[protected_source] / "group-demo" / "SKILL.md"
+    protected.parent.mkdir(parents=True)
+    original = "---\nname: group-demo\ndescription: Original\ngroup: Fixed\n---\nOld body\n"
+    protected.write_text(original)
+    incoming = "---\nname: group-demo\ndescription: Replacement\ngroup: Replacement\n---\nNew body\n"
+    result = await _install_group_package(family, incoming, tmp_path, monkeypatch)
+    assert not result.success and "read-only" in result.error
+    assert protected.read_text() == original
+    assert not (tmp_skills_dir / "group-demo").exists()

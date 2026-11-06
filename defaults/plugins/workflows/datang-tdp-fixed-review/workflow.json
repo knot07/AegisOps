@@ -1,0 +1,66 @@
+{
+  "name": "datang-tdp-fixed-review",
+  "nameCn": "TDP 固定研判工作流",
+  "description": "Deterministic TDP evidence collection, source geolocation, and rule evaluation with one constrained LLM analysis stage.",
+  "description_cn": "固定执行 TDP 取证、攻击源地理识别、HTTP 报文提取、规则判断、受限模型分析和结果落库，不执行任何封禁或设备修改。",
+  "start": "prepare",
+  "nodes": [
+    {
+      "id": "prepare",
+      "type": "python",
+      "description": "校验攻击源、时间范围和研判轮次，建立固定调查上下文。",
+      "code": "import importlib.util\nfrom pathlib import Path\np = Path.home() / '.aegisops' / 'plugins' / 'workflows' / 'datang-tdp-fixed-review' / 'runner.py'\ns = importlib.util.spec_from_file_location('datang_tdp_fixed_prepare', p)\nm = importlib.util.module_from_spec(s)\ns.loader.exec_module(m)\noutputs.update(m.prepare(inputs))"
+    },
+    {
+      "id": "collect_evidence",
+      "type": "python",
+      "description": "按固定顺序查询实时监控、原始日志、聚合事件、时间线、结果分布和关联告警。",
+      "code": "import importlib.util\nfrom pathlib import Path\np = Path.home() / '.aegisops' / 'plugins' / 'workflows' / 'datang-tdp-fixed-review' / 'runner.py'\ns = importlib.util.spec_from_file_location('datang_tdp_fixed_collect', p)\nm = importlib.util.module_from_spec(s)\ns.loader.exec_module(m)\noutputs.update(m.collect_evidence(inputs, tool))"
+    },
+    {
+      "id": "rule_engine",
+      "type": "python",
+      "description": "提取扫描强度、信誉、白名单、利用与失陷特征，生成不可被模型覆盖的结论和分级处置建议。",
+      "code": "import importlib.util\nfrom pathlib import Path\np = Path.home() / '.aegisops' / 'plugins' / 'workflows' / 'datang-tdp-fixed-review' / 'runner.py'\ns = importlib.util.spec_from_file_location('datang_tdp_fixed_rules', p)\nm = importlib.util.module_from_spec(s)\ns.loader.exec_module(m)\noutputs.update(m.evaluate_rules(inputs))"
+    },
+    {
+      "id": "model_analysis",
+      "type": "python",
+      "description": "模型只分析脱敏证据，不负责选择接口或执行工具。模型不可用时返回规则引擎结果。",
+      "code": "import importlib.util\nfrom pathlib import Path\np = Path.home() / '.aegisops' / 'plugins' / 'workflows' / 'datang-tdp-fixed-review' / 'runner.py'\ns = importlib.util.spec_from_file_location('datang_tdp_fixed_model', p)\nm = importlib.util.module_from_spec(s)\ns.loader.exec_module(m)\noutputs.update(m.analyze_with_model(inputs, llm))"
+    },
+    {
+      "id": "finalize",
+      "type": "python",
+      "description": "合并规则与模型补充信息，锁定规则处置等级并直接同步到看板数据库。",
+      "code": "import importlib.util\nfrom pathlib import Path\np = Path.home() / '.aegisops' / 'plugins' / 'workflows' / 'datang-tdp-fixed-review' / 'runner.py'\ns = importlib.util.spec_from_file_location('datang_tdp_fixed_finalize', p)\nm = importlib.util.module_from_spec(s)\ns.loader.exec_module(m)\noutputs.update(m.finalize(inputs))"
+    }
+  ],
+  "edges": [
+    {"from": "prepare", "to": "collect_evidence", "order": 0, "mapping": {"context": "context"}},
+    {"from": "collect_evidence", "to": "rule_engine", "order": 0, "mapping": {"context": "context", "evidence_bundle": "evidence_bundle"}},
+    {"from": "rule_engine", "to": "model_analysis", "order": 0, "mapping": {"context": "context", "evidence_bundle": "evidence_bundle", "rule_result": "rule_result", "model_bundle": "model_bundle"}},
+    {"from": "model_analysis", "to": "finalize", "order": 0, "mapping": {"context": "context", "rule_result": "rule_result", "model_bundle": "model_bundle", "model_result": "model_result", "model_raw_output": "model_raw_output", "model_error": "model_error"}}
+  ],
+  "metadata": {
+    "node_timeout_s": 480,
+    "runtime": {
+      "history_mode": "summary",
+      "strict_edge_mapping": true
+    },
+    "sampleInputs": {
+      "task_key": "203.0.113.10|1700000000|1700007200|1",
+      "ip": "203.0.113.10",
+      "start_time": 1700000000,
+      "end_time": 1700007200,
+      "alert_time": 1700003600,
+      "round_number": 1,
+      "alert_context": {
+        "threat_name": "示例扫描告警",
+        "severity": "低",
+        "count": 1
+      },
+      "model_enabled": true
+    }
+  }
+}

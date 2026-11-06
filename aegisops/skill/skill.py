@@ -1,0 +1,1184 @@
+"""
+Skill Discovery and Management
+
+Discovers SKILL.md files from AegisOps-compatible locations and provides
+access to skill information. Mirrors original AegisOps Skill namespace.
+"""
+
+import json
+import asyncio
+import os
+import glob
+import re
+import shutil
+import sys
+import tempfile
+import threading
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Literal, Optional, Set
+from pathlib import Path
+from pydantic import BaseModel, Field, computed_field, field_validator
+from pydantic_core import PydanticCustomError
+
+from aegisops.utils.log import Log
+from aegisops.project.instance import Instance
+
+
+log = Log.create(service="skill")
+
+#: ``source`` of a skill served by a deployment content source (see _overlay_managed).
+MANAGED_SKILL_SOURCE = "managed"
+
+# Process-wide reentrant lock guarding ~/.aegisops/config/skill_settings.json.
+# FastAPI runs request handlers on a thread pool, so concurrent toggle calls
+# can race on the JSON file.  We use an RLock so high-level read-modify-write
+# helpers (toggle_disabled, set_disabled, etc.) can hold the lock across the
+# entire load → mutate → save sequence while still calling the lower-level
+# load_disabled / save_disabled primitives, which also acquire it.
+_SETTINGS_LOCK = threading.RLock()
+
+# Sidecar path used purely as a target for OS file-locking primitives.  We
+# don't lock the JSON itself because (a) ``os.replace`` would atomically
+# swap the inode out from under any open handle, and (b) on Windows the
+# real file is briefly absent during ``tempfile.mkstemp + replace``.  A
+# dedicated zero-byte ``.lock`` file gives every process a stable fd to
+# coordinate on.
+_LOCK_FILENAME = "skill_settings.json.lock"
+
+
+def _platform_file_lock(fd: int) -> None:
+    """Acquire an exclusive OS-level lock on ``fd`` (blocking).
+
+    Linux / macOS: ``fcntl.flock`` with ``LOCK_EX``.
+    Windows:       ``msvcrt.locking`` with ``LK_LOCK``.
+
+    Both are advisory and *cross-process*, which is exactly what we need
+    when uvicorn runs with ``--workers N`` and several worker processes
+    might call :meth:`Skill.toggle_disabled` concurrently.
+    """
+    if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
+        import msvcrt
+
+        # ``locking`` requires a non-zero length to lock.  One byte is
+        # enough for an advisory range lock on the sentinel file.
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _platform_file_unlock(fd: int) -> None:
+    if sys.platform == "win32":  # pragma: no cover
+        import msvcrt
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+
+
+@contextmanager
+def _settings_cross_process_lock(directory: Path) -> Iterator[None]:
+    """Acquire a cross-process advisory lock on a sentinel file.
+
+    The lock file is created lazily inside ``~/.aegisops/config/`` and is
+    *never* removed — keeping the inode stable across runs is what makes
+    the lock meaningful.  An empty file is fine; the lock is on the fd,
+    not the contents.
+
+    Best-effort: if the platform refuses to grant a lock (read-only FS,
+    NFS without lockd, sandboxing, …) we log and continue, falling back
+    to the in-process ``_SETTINGS_LOCK`` only.  Better to over-write than
+    to wedge the user's UI on file-lock failure.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / _LOCK_FILENAME
+    fd: Optional[int] = None
+    locked = False
+    try:
+        # ``O_CREAT`` so the very first caller bootstraps the file.
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            _platform_file_lock(fd)
+            locked = True
+        except OSError as exc:
+            log.warn(
+                "skill.disabled.flock_failed",
+                {"path": str(lock_path), "error": str(exc)},
+            )
+        yield
+    finally:
+        if fd is not None:
+            if locked:
+                _platform_file_unlock(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+# ---------------------------------------------------------------------------
+# Metadata Models
+# ---------------------------------------------------------------------------
+
+class SkillInstallSpec(BaseModel):
+    """Spec for installing a skill's tool dependency."""
+    id: Optional[str] = Field(default=None, description="Unique id within the skill's install list")
+    kind: Literal["brew", "npm", "uv", "pip", "go", "download"] = Field(
+        ..., description="Package manager / download kind"
+    )
+    label: Optional[str] = Field(default=None, description="Human-readable install label")
+    bins: Optional[List[str]] = Field(default=None, description="Binaries provided after install")
+    formula: Optional[str] = Field(default=None, description="Homebrew formula name")
+    package: Optional[str] = Field(default=None, description="npm / uv / pip / go package name")
+    module: Optional[str] = Field(default=None, description="Go module path")
+    url: Optional[str] = Field(default=None, description="Download URL (kind=download)")
+    archive: Optional[str] = Field(default=None, description="Archive type: zip / tar.gz / tar.bz2")
+    os: Optional[List[str]] = Field(default=None, description="Supported OS list (darwin/linux/win32)")
+
+
+class SkillRequires(BaseModel):
+    """Runtime requirements that must be satisfied for the skill to be eligible."""
+    bins: Optional[List[str]] = Field(default=None, description="All binaries must exist in PATH")
+    any_bins: Optional[List[str]] = Field(default=None, description="At least one binary must exist")
+    env: Optional[List[str]] = Field(default=None, description="All env vars must be set")
+
+
+class SkillMetadata(BaseModel):
+    """Structured metadata parsed from SKILL.md frontmatter."""
+    requires: Optional[SkillRequires] = None
+    install: Optional[List[SkillInstallSpec]] = None
+    os: Optional[List[str]] = None
+    homepage: Optional[str] = None
+    emoji: Optional[str] = None
+    ui_hidden: Optional[bool] = None
+    managed_by: Optional[str] = None
+
+
+def normalize_skill_group(value: Any) -> str:
+    """Validate the group stored in this skill's own frontmatter."""
+    if value is None:
+        return ""
+    if not isinstance(value, str):
+        raise PydanticCustomError("group_type", "group must be a string or null")
+    value = value.strip()
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        raise PydanticCustomError("group_control", "group must not contain control characters")
+    if len(value) > 32:
+        raise PydanticCustomError("group_length", "group must be at most 32 characters")
+    return value
+
+
+class SkillInfo(BaseModel):
+    """Skill information"""
+    name: str = Field(..., description="Skill name")
+    group: Optional[str] = None
+    _validate_group = field_validator("group", mode="before")(normalize_skill_group)
+
+    description: str = Field(..., description="Skill description")
+    location: str = Field(..., description="Path to SKILL.md file")
+    source: Optional[str] = Field(default=None, description="Discovery source")
+    category: Optional[str] = Field(default=None, description="Skill category (e.g. 'system')")
+    ui_hidden: bool = Field(default=False, description="Whether the skill should be omitted from skill management UI")
+    native: bool = Field(default=False, description=(
+        "True only for project-installed skills (<cwd>/.aegisops/plugins/skills/). "
+        "All other locations (.aegisops/skills/, ~/.aegisops/plugins/skills/, .claude/) "
+        "are considered custom (user-defined). "
+        "Derived from source; not declared in SKILL.md frontmatter."
+    ))
+
+    @computed_field
+    @property
+    def group_readonly(self) -> bool:
+        """Project/aegisops definitions retain their existing, stricter readonly rule."""
+        return Skill.is_readonly(self)
+
+    # Extended metadata (populated from frontmatter metadata.aegisops / metadata.openclaw)
+    metadata: Optional[SkillMetadata] = Field(default=None, description="Parsed skill metadata")
+    install_specs: Optional[List[SkillInstallSpec]] = Field(
+        default=None, description="Dependency install specs from metadata"
+    )
+    requires: Optional[SkillRequires] = Field(
+        default=None, description="Runtime requirements from metadata"
+    )
+
+    # Eligibility (populated by Skill.check_eligibility)
+    eligible: Optional[bool] = Field(default=None, description="True if all requirements are met")
+    missing: Optional[List[str]] = Field(
+        default=None, description="List of missing bins/env vars"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Skill Discovery
+# ---------------------------------------------------------------------------
+
+class Skill:
+    """
+    Skill discovery and management.
+
+    Discovers SKILL.md files from (lowest → highest priority):
+    - .claude dirs
+    - global built-in and project-bundled .aegisops dirs
+    - ~/.aegisops/plugins (user-level customizations, wins on collision)
+    """
+
+    _cache: Optional[Dict[str, SkillInfo]] = None
+    _cache_key: Optional[tuple[str, str]] = None
+    _cache_lock = threading.Lock()
+    _cache_generation = 0
+    _cache_loads: Dict[tuple[int, tuple[str, str]], threading.Event] = {}
+
+    @staticmethod
+    def _source_root() -> Path:
+        """Return the AegisOps source installation root."""
+        return Path(__file__).resolve().parents[2]
+
+    @classmethod
+    def is_system_shipped(cls, path: Path | str) -> bool:
+        """Identify definitions at the installation root, never the request cwd."""
+        resolved = Path(path).resolve()
+        root = cls._source_root() / ".aegisops"
+        return any(
+            resolved.is_relative_to((root / subdir).resolve())
+            for subdir in ("skill", "skills", "plugins/skill", "plugins/skills")
+        )
+
+    @classmethod
+    def is_readonly(cls, skill: SkillInfo) -> bool:
+        from aegisops.content.managed import is_managed_location
+
+        return (
+            skill.native
+            or skill.source in {"project", "aegisops", MANAGED_SKILL_SOURCE}
+            or is_managed_location(skill.location)
+            or cls.is_system_shipped(skill.location)
+        )
+
+    @classmethod
+    def is_managed(cls, skill: SkillInfo) -> bool:
+        """A skill the deployment serves through a content source, not a file."""
+        from aegisops.content.managed import is_managed_location
+
+        return is_managed_location(skill.location)
+
+    @classmethod
+    async def read_body(cls, skill: SkillInfo, *, scope: Optional[str] = None) -> str:
+        """The skill's SKILL.md text, wherever the skill comes from.
+
+        A managed skill is fetched from its content source; ``scope`` (the
+        session using it) keeps one version for the whole task.  A local skill
+        is read from its file, as before.
+        """
+        from aegisops.content.managed import fetch_managed_pinned, parse_managed_location
+
+        managed = parse_managed_location(skill.location)
+        if managed is not None:
+            body = await fetch_managed_pinned(managed[0], managed[1], scope=scope)
+            return body.as_text()
+        return await asyncio.to_thread(Path(skill.location).read_text, encoding="utf-8")
+
+    @classmethod
+    def base_directory(cls, skill: SkillInfo) -> Optional[str]:
+        """Where a skill's attachments live; ``None`` for a managed skill, which has none on disk."""
+        if cls.is_managed(skill):
+            return None
+        return os.path.dirname(skill.location)
+
+    @classmethod
+    def preserve_install_group(
+        cls, destination: Path, content: str, *, scope: str, name: Optional[str] = None,
+    ) -> str:
+        """Prepare an installation before any destructive write.
+
+        All native installers, including Hub, use this same readonly/collision
+        check and key-presence merge. No copy may shadow a selected readonly
+        definition. First installs retain the incoming default verbatim.
+        """
+        incoming, _, _ = cls._decode_frontmatter(content)
+        name = (incoming.get("name") or name or destination.parent.name).strip()
+        if not cls._is_valid_name(name):
+            raise ValueError(f"Invalid skill name: {name!r}")
+        # Re-discover at the write boundary: a warmed cache is not permission to
+        # overwrite a definition which has since appeared on disk.
+        selected = cls._discover().get(name)
+        if cls.is_system_shipped(destination) or (selected and cls.is_readonly(selected)):
+            raise ValueError(f"Skill '{name}' is read-only; installation cannot replace or shadow it")
+        if destination.parent.is_symlink() or destination.is_symlink():
+            raise ValueError(f"Cannot install through a skill symlink: {destination}")
+        if destination.exists():
+            if scope == "project":
+                raise ValueError(f"Skill '{name}' is read-only; project definitions cannot be replaced")
+            previous, _, _ = cls._decode_frontmatter(destination.read_bytes().decode("utf-8"))
+            if "group" in previous:
+                return cls.render_frontmatter(content, {"group": previous["group"]})
+        if "group" in incoming:
+            normalize_skill_group(incoming["group"])
+        return content
+
+    @staticmethod
+    def _global_aegisops_root() -> str:
+        """Runtime root holding user-level skills: ``AEGISOPS_ROOT`` → ``~/.aegisops``.
+
+        Same resolution as ``aegisops.config.config.get_aegisops_root``. User skills
+        are created and installed under ``<root>/plugins/skills`` (routes,
+        installer, hub), so discovery must read the same root or an instance
+        started with ``AEGISOPS_ROOT`` never lists what it just wrote.
+        """
+        root = os.getenv("AEGISOPS_ROOT")
+        if root:
+            return root
+        return os.path.join(os.path.expanduser("~"), ".aegisops")
+
+    @staticmethod
+    def _cache_context() -> tuple[str, str]:
+        """Return the normalized request context that scopes discovery."""
+        current_dir = Instance.get_directory() or os.getcwd()
+        worktree = Instance.get_worktree() or current_dir
+        return (
+            os.path.normcase(os.path.realpath(current_dir)),
+            os.path.normcase(os.path.realpath(worktree)),
+        )
+
+    # Generation of the managed-content snapshot the cache was built from
+    # (aegisops.content.managed); a refresh that changed it rediscovers.
+    _managed_generation: int = -1
+
+    @classmethod
+    def _sync_managed_content(cls) -> None:
+        from aegisops.content.managed import ManagedContent
+
+        generation = ManagedContent.generation()
+        if generation != cls._managed_generation:
+            cls._managed_generation = generation
+            cls.clear_cache()
+
+    @classmethod
+    def _all_sync(cls) -> List[SkillInfo]:
+        """Discover skills once per request context and cache generation."""
+        cls._sync_managed_content()
+        context_key = cls._cache_context()
+        while True:
+            with cls._cache_lock:
+                if cls._cache is not None and cls._cache_key == context_key:
+                    return list(cls._cache.values())
+                generation = cls._cache_generation
+                load_key = (generation, context_key)
+                completion = cls._cache_loads.get(load_key)
+                should_discover = completion is None
+                if completion is None:
+                    completion = threading.Event()
+                    cls._cache_loads[load_key] = completion
+
+            if not should_discover:
+                completion.wait()
+                continue
+
+            try:
+                discovered = cls._discover()
+            except BaseException:
+                with cls._cache_lock:
+                    cls._cache_loads.pop(load_key, None)
+                    completion.set()
+                raise
+
+            with cls._cache_lock:
+                if generation == cls._cache_generation:
+                    cls._cache = discovered
+                    cls._cache_key = context_key
+                cls._cache_loads.pop(load_key, None)
+                completion.set()
+                if (
+                    generation == cls._cache_generation
+                    and cls._cache is not None
+                    and cls._cache_key == context_key
+                ):
+                    return list(cls._cache.values())
+            # The cache was invalidated while discovery was running. Repeat
+            # against the new generation instead of publishing stale data.
+
+    @classmethod
+    def _parse_skill_md(cls, filepath: str, source: Optional[str] = None) -> Optional[SkillInfo]:
+        """
+        Parse a SKILL.md file to extract name, description, category and metadata.
+
+        Args:
+            filepath: Path to SKILL.md file
+
+        Returns:
+            SkillInfo or None if parsing fails
+        """
+        try:
+            with open(filepath, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            data = cls._parse_frontmatter(content)
+            if not data:
+                return None
+
+            name = (data.get("name") or "").strip()
+            description = (data.get("description") or "").strip()
+            category = (data.get("category") or "").strip().lower() or None
+            ui_hidden = cls._as_bool(data.get("ui_hidden"))
+
+            if not cls._is_valid_name(name) or not cls._is_valid_description(description):
+                return None
+
+            # Parse extended metadata. Dependency fields remain compatible
+            # with metadata.aegisops and metadata.openclaw, while ownership is
+            # declared directly as metadata.managed_by.
+            skill_metadata: Optional[SkillMetadata] = None
+            install_specs: Optional[List[SkillInstallSpec]] = None
+            requires: Optional[SkillRequires] = None
+
+            raw_meta = data.get("metadata")
+            if isinstance(raw_meta, dict):
+                nested_meta = (
+                    raw_meta.get("aegisops")
+                    or raw_meta.get("openclaw")
+                )
+                parsed_meta = (
+                    dict(nested_meta)
+                    if isinstance(nested_meta, dict)
+                    else {}
+                )
+                if "managed_by" in raw_meta:
+                    parsed_meta["managed_by"] = raw_meta["managed_by"]
+                if parsed_meta:
+                    try:
+                        skill_metadata = SkillMetadata.model_validate(
+                            parsed_meta
+                        )
+                        install_specs = skill_metadata.install or None
+                        requires = skill_metadata.requires or None
+                        ui_hidden = ui_hidden or bool(skill_metadata.ui_hidden)
+                    except Exception as exc:
+                        log.warn("skill.metadata.parse.error", {
+                            "filepath": filepath,
+                            "error": str(exc),
+                        })
+
+            # native: only project-installed skills (<cwd>/.aegisops/plugins/skills/) are built-in;
+            # all other sources (aegisops/skills/, ~/.aegisops/plugins/, .claude/) are custom.
+            is_native = source == "project"
+
+            return SkillInfo(
+                name=name,
+                group=data.get("group"),
+                description=description,
+                location=filepath,
+                source=source,
+                category=category,
+                ui_hidden=ui_hidden,
+                native=is_native,
+                metadata=skill_metadata,
+                install_specs=install_specs,
+                requires=requires,
+            )
+        except Exception as e:
+            log.warn("skill.parse.error", {"filepath": filepath, "error": str(e)})
+            return None
+
+    @staticmethod
+    def _decode_frontmatter(content: str) -> tuple[Dict[str, Any], str, str]:
+        """Decode native YAML or the old UI's unquoted, flat string fields.
+
+        Recovery quotes only the offending top-level scalar, then lets the
+        *same* YAML decoder validate the whole document. In particular, nested
+        metadata is never flattened by a second key/value parser. Ambiguous or
+        otherwise broken YAML fails closed before a writer touches the file.
+        """
+        import yaml
+
+        lines = content.splitlines(keepends=True)
+        newline = "\r\n" if lines and lines[0].endswith("\r\n") else "\n"
+        if not lines or lines[0].strip() != "---":
+            return {}, content, newline
+        end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+        if end is None:
+            raise ValueError("SKILL.md frontmatter has no closing delimiter")
+        header = lines[1:end]
+        repaired: set[int] = set()
+        while True:
+            try:
+                parsed = yaml.safe_load("".join(header))
+                break
+            except yaml.YAMLError as exc:
+                mark = getattr(exc, "problem_mark", None)
+                index = mark.line if mark is not None else -1
+                match = (
+                    re.fullmatch(r"(name|description|category|group):[ \t]+([^\r\n]+)[\r\n]*", header[index])
+                    if 0 <= index < len(header) and index not in repaired else None
+                )
+                value = match[2].rstrip() if match else ""
+                # Quotes/collections/tags/anchors/block scalars are real YAML,
+                # not the legacy flat-string format. Do not guess at repairs.
+                if not value or value[0] in "'\"[{!&*|>@`%" or not re.search(r":(?:\s|$)", value):
+                    raise ValueError("Cannot safely decode SKILL.md frontmatter") from exc
+                # The legacy UI wrote the whole flat value verbatim, including
+                # any hashes. Retain it rather than silently treating its tail
+                # as a YAML comment during recovery.
+                header[index] = f"{match[1]}: {json.dumps(value, ensure_ascii=False)}{newline}"
+                repaired.add(index)
+        if parsed is not None and not isinstance(parsed, dict):
+            raise ValueError("SKILL.md frontmatter must be a mapping")
+        return parsed or {}, "".join(lines[end + 1:]), newline
+
+    @classmethod
+    def _parse_frontmatter(cls, content: str) -> Dict[str, Any]:
+        """Discovery skips damaged definitions; writers use the strict decoder."""
+        try:
+            return cls._decode_frontmatter(content)[0]
+        except ValueError:
+            return {}
+
+    @classmethod
+    def render_frontmatter(
+        cls, content: str, updates: Dict[str, Any], *, body: Optional[str] = None
+    ) -> str:
+        """Merge metadata without normalizing the original Markdown body bytes."""
+        import yaml
+
+        data, original_body, newline = cls._decode_frontmatter(content)
+        data.update(updates)
+        if "group" in updates:
+            data["group"] = normalize_skill_group(updates["group"])
+        header = yaml.safe_dump(data, allow_unicode=True, sort_keys=False).replace("\n", newline)
+        rendered_body = original_body if body is None else newline + body
+        return f"---{newline}{header}---{newline}{rendered_body}"
+
+    @classmethod
+    def update_frontmatter(cls, path: Path, updates: Dict[str, Any]) -> str:
+        """Patch one already-resolved SKILL.md without changing its body bytes."""
+        content = path.read_bytes().decode("utf-8")
+        rendered = cls.render_frontmatter(content, updates)
+        path.write_bytes(rendered.encode("utf-8"))
+        return rendered
+
+    @staticmethod
+    def _is_valid_name(name: str) -> bool:
+        return bool(re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name))
+
+    @staticmethod
+    def _is_valid_description(description: str) -> bool:
+        return 1 <= len(description) <= 1024
+
+    @staticmethod
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
+    @classmethod
+    def _scan_directory(
+        cls,
+        directory: str,
+        pattern: str,
+        skills: Dict[str, SkillInfo],
+        source: Optional[str] = None,
+    ) -> None:
+        """
+        Scan a directory for SKILL.md files
+
+        Args:
+            directory: Base directory to scan
+            pattern: Glob pattern (e.g., "**/SKILL.md")
+            skills: Dictionary to add found skills to
+        """
+        if not os.path.exists(directory):
+            return
+
+        try:
+            search_pattern = os.path.join(directory, pattern)
+            matches = glob.glob(search_pattern, recursive=True)
+
+            for match in matches:
+                skill_info = cls._parse_skill_md(match, source=source)
+                if skill_info:
+                    if skill_info.name in skills:
+                        existing = skills[skill_info.name]
+                        if existing.source != skill_info.source:
+                            log.info("skill.override", {
+                                "name": skill_info.name,
+                                "selected": match,
+                                "selected_source": skill_info.source,
+                                "replaced": existing.location,
+                                "replaced_source": existing.source,
+                            })
+                        else:
+                            log.warn("skill.duplicate", {
+                                "name": skill_info.name,
+                                "existing": existing.location,
+                                "duplicate": match,
+                            })
+
+                    skills[skill_info.name] = skill_info
+                    log.debug("skill.found", {
+                        "name": skill_info.name,
+                        "location": match,
+                    })
+
+        except Exception as e:
+            log.error("skill.scan.error", {
+                "directory": directory,
+                "error": str(e)
+            })
+
+    @classmethod
+    def _discover(cls) -> Dict[str, SkillInfo]:
+        """
+        Discover all skills. Last wins on name collision.
+
+        Scan order (lowest → highest priority):
+          1. .claude dirs       (global ~/.claude + project-level)
+          2. ~/.aegisops/skill[s] (global built-ins)
+          3. <source>/.aegisops   (bundled with the AegisOps installation)
+          4. <project>/.aegisops  (project-level)
+          5. ~/.aegisops/plugins  (user customizations)
+
+        Source labels:
+          "aegisops"   — built-in skills inside .aegisops/skills/ directories
+          "claude"   — skills discovered from .claude/ directories
+          "user"     — user-installed skills under ~/.aegisops/plugins/skills/
+          "project"  — project-installed skills under <project>/.aegisops/plugins/skills/
+        """
+        skills: Dict[str, SkillInfo] = {}
+
+        home_dir = os.path.expanduser("~")
+        current_dir = Instance.get_directory() or os.getcwd()
+        worktree = Instance.get_worktree() or current_dir
+        # Built-in skill patterns (legacy skill[s]/ directories, not under plugins/)
+        builtin_patterns = (
+            "skill/**/SKILL.md",
+            "skills/**/SKILL.md",
+        )
+        # User/project-installed plugin patterns
+        plugin_patterns = (
+            "plugins/skill/**/SKILL.md",
+            "plugins/skills/**/SKILL.md",
+        )
+        global_aegisops = cls._global_aegisops_root()
+        source_aegisops = str(cls._source_root() / ".aegisops")
+
+        # 1) .claude directories — lowest priority
+        global_claude = os.path.join(home_dir, ".claude")
+        if os.path.isdir(global_claude):
+            cls._scan_directory(global_claude, "skills/**/SKILL.md", skills, source="claude")
+        for claude_dir in cls._find_dirs_up(".claude", current_dir, worktree):
+            cls._scan_directory(claude_dir, "skills/**/SKILL.md", skills, source="claude")
+
+        # 2) Global built-in skills — overrides .claude
+        if os.path.isdir(global_aegisops):
+            for pattern in builtin_patterns:
+                cls._scan_directory(global_aegisops, pattern, skills, source="aegisops")
+
+        # 3) Source installation .aegisops — available regardless of request cwd.
+        #    Keep plugin skills labelled "project" for the current Skill UI's
+        #    built-in/custom classification.
+        if os.path.normpath(source_aegisops) != os.path.normpath(global_aegisops):
+            for pattern in builtin_patterns:
+                cls._scan_directory(source_aegisops, pattern, skills, source="aegisops")
+            for pattern in plugin_patterns:
+                cls._scan_directory(source_aegisops, pattern, skills, source="project")
+
+        # 4) Project-level .aegisops — highest priority
+        #    Built-in skills: source="aegisops"; project-installed plugins: source="project"
+        for aegisops_dir in cls._find_dirs_up(".aegisops", current_dir, worktree):
+            if os.path.normpath(aegisops_dir) in {
+                os.path.normpath(global_aegisops),
+                os.path.normpath(source_aegisops),
+            }:
+                continue
+            for pattern in builtin_patterns:
+                cls._scan_directory(aegisops_dir, pattern, skills, source="aegisops")
+            for pattern in plugin_patterns:
+                cls._scan_directory(aegisops_dir, pattern, skills, source="project")
+
+        # 5) User-installed plugins — explicit customizations win over project bundles
+        if os.path.isdir(global_aegisops):
+            for pattern in plugin_patterns:
+                cls._scan_directory(global_aegisops, pattern, skills, source="user")
+
+        # 6) Skills the deployment manages (aegisops.content.managed) — they win
+        #    over every local copy of the same name, which is not loaded at all:
+        #    a file dropped into a skills directory cannot stand in for one.
+        cls._overlay_managed(skills)
+
+        log.info("skill.discovery.complete", {"count": len(skills), "names": list(skills.keys())})
+        return skills
+
+    @classmethod
+    def _overlay_managed(cls, skills: Dict[str, SkillInfo]) -> None:
+        from aegisops.content.managed import managed_entries, managed_ids, managed_location
+
+        # Every name the deployment controls leaves the local listing, also one
+        # it no longer lists: an unavailable skill is not replaced by a copy.
+        for name in managed_ids("skill"):
+            local = skills.pop(name, None)
+            if local is not None:
+                log.info("skill.managed.shadows_local", {"name": name, "local": local.location})
+        for entry in managed_entries("skill"):
+            name = entry.ref.content_id
+            skills[name] = SkillInfo(
+                name=name,
+                description=(entry.summary or entry.name or name).strip() or name,
+                location=managed_location("skill", name),
+                source=MANAGED_SKILL_SOURCE,
+                category=(entry.metadata or {}).get("category"),
+            )
+
+    @staticmethod
+    def _find_dirs_up(target: str, start_dir: str, stop_dir: str) -> List[str]:
+        results: List[str] = []
+        current = Path(start_dir).resolve()
+        stop = Path(stop_dir).resolve()
+        while True:
+            candidate = current / target
+            if candidate.exists() and candidate.is_dir():
+                results.append(str(candidate))
+            if current == stop or current == current.parent:
+                break
+            current = current.parent
+        return results
+
+    @classmethod
+    async def all(cls) -> List[SkillInfo]:
+        """
+        Get all available skills (including disabled ones).
+
+        Use this for management UIs that need to display the full inventory
+        and reflect each skill's disabled state.  For agent runtime use
+        :meth:`list_enabled` so disabled skills are excluded from the system
+        prompt and the ``skill`` tool's description.
+
+        Matches TypeScript Skill.all().
+
+        Returns:
+            List of all discovered skills
+        """
+        return await asyncio.to_thread(cls._all_sync)
+
+    @classmethod
+    async def list_enabled(cls) -> List[SkillInfo]:
+        """
+        Get skills that are enabled (i.e. visible to the agent).
+
+        Disabled skills — those whose names appear in
+        ``~/.aegisops/config/skill_settings.json`` under ``disabled`` — are
+        filtered out.  Agent loaders and the ``skill`` tool's description
+        builder must use this method so that toggling a skill off in the
+        Skill UI actually removes it from the LLM's system prompt.
+        """
+        skills = await cls.all()
+        disabled = cls.load_disabled()
+        if not disabled:
+            return skills
+        return [s for s in skills if s.name not in disabled]
+
+    @classmethod
+    async def get(cls, name: str) -> Optional[SkillInfo]:
+        """
+        Get a skill by name
+
+        Matches TypeScript Skill.get()
+
+        Args:
+            name: Skill name
+
+        Returns:
+            SkillInfo or None if not found
+        """
+        skills = await cls.all()
+        skill = next((item for item in skills if item.name == name), None)
+        if not skill:
+            return None
+        return skill
+
+    @classmethod
+    def clear_cache(cls) -> None:
+        """Clear the skill cache (for testing or forced refresh)"""
+        with cls._cache_lock:
+            cls._cache = None
+            cls._cache_key = None
+            cls._cache_generation += 1
+        log.info("skill.cache.cleared")
+
+    @classmethod
+    async def refresh(cls) -> List[SkillInfo]:
+        """
+        Force refresh of skill cache
+
+        Returns:
+            List of all discovered skills
+        """
+        cls.clear_cache()
+        return await cls.all()
+
+    # ----- Disabled state (user preferences) -----
+
+    @staticmethod
+    def settings_path() -> Path:
+        """Path to the user-level skill settings file."""
+        from aegisops.config.config import _get_config_dir
+
+        return _get_config_dir() / "skill_settings.json"
+
+    @classmethod
+    @contextmanager
+    def _locked_rmw(cls) -> Iterator[None]:
+        """Hold both the in-process RLock and the cross-process file lock.
+
+        Use this around every read-modify-write of the disabled-skills
+        file so multiple worker processes (uvicorn ``--workers N``) cannot
+        interleave their loads / saves and lose each other's updates.
+        Single-shot reads (:meth:`load_disabled`) don't need this — the
+        on-disk file is always a valid JSON snapshot because
+        :meth:`save_disabled` publishes via ``os.replace``.
+        """
+        with _SETTINGS_LOCK:
+            with _settings_cross_process_lock(cls.settings_path().parent):
+                yield
+
+    @classmethod
+    def load_disabled(cls) -> Set[str]:
+        """Return the set of skill names the user has marked as disabled.
+
+        Disabled skills are still discoverable (so the management UI can
+        list them) but are excluded from :meth:`list_enabled`, which is what
+        the agent uses.  Missing or malformed files yield an empty set.
+        """
+        path = cls.settings_path()
+        with _SETTINGS_LOCK:
+            try:
+                if not path.exists():
+                    return set()
+                data = json.loads(path.read_text(encoding="utf-8"))
+                disabled = data.get("disabled", [])
+                if isinstance(disabled, list):
+                    return {str(n) for n in disabled if isinstance(n, str)}
+            except Exception as exc:
+                log.warn("skill.disabled.load_failed", {"error": str(exc)})
+        return set()
+
+    @classmethod
+    def save_disabled(cls, disabled: Set[str]) -> None:
+        """Persist the disabled-skill set, creating parent dirs as needed.
+
+        Write atomically via ``tempfile`` + :func:`os.replace`.  A plain
+        ``write_text`` opens the file in truncate mode, so a crash, SIGKILL,
+        or full disk midway through the write can leave a half-written /
+        empty JSON behind.  On the next ``load_disabled`` call the parser
+        would throw and we would silently fall back to an empty set —
+        wiping every disabled preference the user had configured.  The
+        ``tmp + rename`` dance keeps the on-disk file pointing at a fully
+        written payload until the very last instant.
+        """
+        path = cls.settings_path()
+        with _SETTINGS_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"disabled": sorted(disabled)}
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(path.parent),
+                prefix=".skill_settings_",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                os.replace(tmp_path, str(path))
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+    @classmethod
+    def is_disabled(cls, name: str) -> bool:
+        return name in cls.load_disabled()
+
+    @classmethod
+    def set_disabled(cls, name: str, disabled: bool) -> bool:
+        """Set whether the given skill is disabled.
+
+        The whole read-modify-write runs under :meth:`_locked_rmw` so two
+        concurrent callers — including separate uvicorn workers — cannot
+        lose each other's updates.
+
+        Returns the new disabled state (mirrors the input ``disabled``).
+        """
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if disabled:
+                current.add(name)
+            else:
+                current.discard(name)
+            cls.save_disabled(current)
+        return disabled
+
+    @classmethod
+    def toggle_disabled(cls, name: str) -> bool:
+        """Flip the disabled state of a skill and return the new value."""
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if name in current:
+                current.discard(name)
+                new_value = False
+            else:
+                current.add(name)
+                new_value = True
+            cls.save_disabled(current)
+        return new_value
+
+    @classmethod
+    def forget_disabled(cls, name: str) -> None:
+        """Remove a name from the disabled list (no-op if not present).
+
+        Call this after deleting a skill so its preference does not linger
+        as a ghost record in the settings file.
+        """
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if name in current:
+                current.discard(name)
+                cls.save_disabled(current)
+
+    @classmethod
+    def rename_disabled(cls, old_name: str, new_name: str) -> None:
+        """Migrate a disabled flag from ``old_name`` to ``new_name``."""
+        if old_name == new_name:
+            return
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if old_name in current:
+                current.discard(old_name)
+                current.add(new_name)
+                cls.save_disabled(current)
+
+    # ----- Eligibility -----
+
+    @classmethod
+    def check_eligibility(cls, skill: SkillInfo) -> SkillInfo:
+        """
+        Check if a skill's runtime requirements are satisfied.
+
+        Returns a **new** SkillInfo with `eligible` and `missing` populated.
+        The original object is not modified.  Missing entries use the format
+        "<kind>:<name>", e.g. "bin:gh" or "env:GITHUB_TOKEN".
+        """
+        if skill.requires is None:
+            skill = skill.model_copy(update={"eligible": True, "missing": []})
+            return skill
+
+        missing: List[str] = []
+        req = skill.requires
+
+        # Check required binaries (all must be present)
+        if req.bins:
+            for b in req.bins:
+                if not shutil.which(b):
+                    missing.append(f"bin:{b}")
+
+        # Check any_bins (at least one must be present)
+        if req.any_bins:
+            if not any(shutil.which(b) for b in req.any_bins):
+                missing.append(f"any_bin:{','.join(req.any_bins)}")
+
+        # Check environment variables
+        if req.env:
+            for var in req.env:
+                if not os.environ.get(var):
+                    missing.append(f"env:{var}")
+
+        skill = skill.model_copy(update={
+            "eligible": len(missing) == 0,
+            "missing": missing,
+        })
+        return skill
+
+    # ----- File Watcher Integration -----
+
+    _watcher: Optional["SkillFileWatcher"] = None
+
+    @classmethod
+    def start_watcher(cls) -> None:
+        """Start watching skill directories for changes."""
+        if cls._watcher is not None:
+            return
+        cls._watcher = SkillFileWatcher(cls)
+        cls._watcher.start()
+
+    @classmethod
+    def stop_watcher(cls) -> None:
+        """Stop the file watcher."""
+        if cls._watcher is not None:
+            cls._watcher.stop()
+            cls._watcher = None
+
+
+def _skill_event_should_reload(event: object) -> bool:
+    """Return True if a watchdog event affects a ``SKILL.md`` file.
+
+    Atomic-save flows rename a temp file onto the real ``SKILL.md``; we have
+    to consult both ``src_path`` and ``dest_path`` so the watcher reloads on
+    those renames as well.
+    """
+    for attr in ("src_path", "dest_path"):
+        path = getattr(event, attr, "") or ""
+        if path.endswith("SKILL.md"):
+            return True
+    return False
+
+
+class SkillFileWatcher:
+    """
+    Watches skill directories for SKILL.md changes and auto-invalidates
+    the Skill cache via watchdog.
+
+    Uses a debounce timer so rapid successive writes only trigger one
+    cache clear.
+    """
+
+    _DEBOUNCE_SECONDS = 0.5
+    _AEGISOPS_SKILL_DIRS = (
+        "skill",
+        "skills",
+        os.path.join("plugins", "skill"),
+        os.path.join("plugins", "skills"),
+    )
+    _CLAUDE_SKILL_DIRS = ("skills",)
+
+    def __init__(self, skill_cls: type):
+        self._skill_cls = skill_cls
+        self._observer: Optional[object] = None
+        self._debounce_timer: Optional[threading.Timer] = None
+        self._lock = threading.Lock()
+
+    # ---- public ----
+
+    def start(self) -> None:
+        try:
+            from watchdog.observers import Observer
+            from watchdog.events import FileSystemEventHandler, FileSystemEvent
+        except ImportError:
+            log.warn("skill.watcher.watchdog_missing",
+                      {"msg": "watchdog not installed, skill file watcher disabled"})
+            return
+
+        watch_dirs = self._collect_watch_dirs()
+        if not watch_dirs:
+            log.info("skill.watcher.no_dirs", {"msg": "no skill directories to watch"})
+            return
+
+        watcher = self
+
+        # Only react to actual content-mutation events.  watchdog emits
+        # ``opened``/``closed``/``closed_no_write`` events whenever any code
+        # (including the skill loader itself) reads ``SKILL.md`` files, which
+        # would otherwise cause a self-sustaining cache-invalidation loop.
+        _RELOAD_EVENT_TYPES = frozenset({"modified", "created", "deleted", "moved"})
+
+        class _Handler(FileSystemEventHandler):
+            def on_any_event(self, event: FileSystemEvent):
+                if event.is_directory:
+                    return
+                if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
+                    return
+                if _skill_event_should_reload(event):
+                    watcher._schedule_clear()
+
+        handler = _Handler()
+        observer = Observer()
+        for d in watch_dirs:
+            try:
+                observer.schedule(handler, d, recursive=True)
+                log.debug("skill.watcher.watching", {"directory": d})
+            except Exception as e:
+                log.warn("skill.watcher.schedule_error", {"directory": d, "error": str(e)})
+
+        observer.daemon = True
+        observer.start()
+        self._observer = observer
+        log.info("skill.watcher.started", {"directories": list(watch_dirs)})
+
+    def stop(self) -> None:
+        with self._lock:
+            if self._debounce_timer is not None:
+                self._debounce_timer.cancel()
+                self._debounce_timer = None
+        if self._observer is not None:
+            try:
+                self._observer.stop()  # type: ignore[union-attr]
+                self._observer.join(timeout=2)  # type: ignore[union-attr]
+            except Exception:
+                pass
+            self._observer = None
+            log.info("skill.watcher.stopped")
+
+    # ---- internal ----
+
+    def _schedule_clear(self) -> None:
+        """Debounced cache invalidation."""
+        with self._lock:
+            if self._debounce_timer is not None:
+                self._debounce_timer.cancel()
+            self._debounce_timer = threading.Timer(
+                self._DEBOUNCE_SECONDS, self._do_clear
+            )
+            self._debounce_timer.daemon = True
+            self._debounce_timer.start()
+
+    def _do_clear(self) -> None:
+        self._skill_cls.clear_cache()
+        log.info("skill.watcher.cache_cleared", {"reason": "SKILL.md changed on disk"})
+
+    def _collect_watch_dirs(self) -> Set[str]:
+        """Gather concrete skill roots that may contain SKILL.md files."""
+        dirs: Set[str] = set()
+        home = os.path.expanduser("~")
+
+        try:
+            current_dir = Instance.get_directory() or os.getcwd()
+        except Exception:
+            current_dir = os.getcwd()
+        try:
+            worktree = Instance.get_worktree() or current_dir
+        except Exception:
+            worktree = current_dir
+
+        aegisops_roots = Skill._find_dirs_up(".aegisops", current_dir, worktree)
+        global_aegisops = Skill._global_aegisops_root()
+        if os.path.isdir(global_aegisops):
+            aegisops_roots.append(global_aegisops)
+        for root in aegisops_roots:
+            dirs.update(self._existing_subdirs(root, self._AEGISOPS_SKILL_DIRS))
+
+        claude_roots = Skill._find_dirs_up(".claude", current_dir, worktree)
+        global_claude = os.path.join(home, ".claude")
+        if os.path.isdir(global_claude):
+            claude_roots.append(global_claude)
+        for root in claude_roots:
+            dirs.update(self._existing_subdirs(root, self._CLAUDE_SKILL_DIRS))
+
+        return dirs
+
+    @staticmethod
+    def _existing_subdirs(root: str, relative_dirs: tuple[str, ...]) -> Set[str]:
+        """Return existing watch roots below a discovery root, with stable dedupe."""
+        dirs: Set[str] = set()
+        for rel in relative_dirs:
+            candidate = os.path.realpath(os.path.join(root, rel))
+            if os.path.isdir(candidate):
+                dirs.add(candidate)
+        return dirs

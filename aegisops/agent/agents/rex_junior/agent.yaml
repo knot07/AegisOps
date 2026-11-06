@@ -1,0 +1,11 @@
+name: rex-junior
+group: 系统辅助
+name_cn: Rex 执行智能体
+description: "Focused task executor. A general-purpose agent for simple tasks."
+mode: subagent
+hidden: false
+tags: [system]
+color: "#20B2AA"
+delegatable: true
+# Explicit tool allowlist for the focused executor.
+tools: []

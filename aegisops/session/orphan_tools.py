@@ -1,0 +1,198 @@
+"""Recovery helpers for tool calls left running by interrupted processes."""
+
+import time
+from typing import Any, Dict, Iterable, Optional
+
+from aegisops.session.message import Message, MessageWithParts, ToolPart, ToolStateCompleted, ToolStateError, ToolStatePending
+from aegisops.session.session import SessionInfo
+from aegisops.session.ownership import SessionExecutionLease, current_lease
+from aegisops.storage.storage import Storage
+from aegisops.utils.log import Log
+
+
+log = Log.create(service="session.orphan_tools")
+
+
+INTERRUPTED_TOOL_ERROR = "Interrupted by server restart"
+INTERRUPTED_MESSAGE_ERROR = "Message generation was interrupted by a server restart."
+
+
+def _build_interrupted_error_state(state: object, now_ms: int) -> ToolStateError:
+    """Create the terminal error state used for recovered orphaned tools."""
+    time_info = getattr(state, "time", {}) or {}
+    start_ms = time_info.get("start", now_ms)
+
+    return ToolStateError(
+        status="error",
+        input=getattr(state, "input", {}),
+        error=INTERRUPTED_TOOL_ERROR,
+        metadata=getattr(state, "metadata", None),
+        time={"start": start_ms, "end": now_ms},
+    )
+
+
+def _build_interrupted_message_error() -> Dict[str, Any]:
+    """Error payload for assistant replies cut off by a restart (same shape as an abort)."""
+    return {
+        "name": "MessageAbortedError",
+        "message": INTERRUPTED_MESSAGE_ERROR,
+        "data": {"message": INTERRUPTED_MESSAGE_ERROR},
+    }
+
+
+def _is_unfinished_assistant(info: object) -> bool:
+    """A reply with neither terminal status nor a persisted completion time."""
+    if not (
+        getattr(info, "role", None) == "assistant"
+        and getattr(info, "finish", None) is None
+        and getattr(info, "error", None) is None
+    ):
+        return False
+    # Older writers recorded completion without a finish reason. Keep those
+    # replies intact; zero/invalid timestamps are not evidence of completion.
+    timestamps = getattr(info, "time", None)
+    if isinstance(timestamps, dict):
+        for key in ("completed", "end"):
+            value = timestamps.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                return False
+    return True
+
+
+async def abort_orphan_running_parts_in_messages(
+    session_id: str,
+    messages_with_parts: Iterable[MessageWithParts],
+) -> int:
+    """Interrupt orphaned tools and submitted delegation receipts.
+
+    Repair only while holding the same shared lease used by live runners.
+    """
+    lease = current_lease(session_id)
+    if lease is None:
+        lease = await SessionExecutionLease.acquire(session_id)
+        if lease is None:
+            return 0
+        async with lease:
+            return await abort_orphan_running_parts_in_messages(session_id, messages_with_parts)
+    lease.require_owned()
+    from aegisops.session.core.status import SessionStatus
+    from aegisops.session.runner import SessionRunner
+    from aegisops.session.session_loop import SessionLoop
+
+    # A pending input can still be streaming; only recover it when no runner
+    # can resume writing its state. Running tools retain their existing recovery.
+    recover_pending = (
+        SessionStatus.get_for_session(session_id).type == "idle"
+        and not SessionLoop.is_running(session_id)
+        and session_id not in SessionRunner._active_sessions
+    )
+    now_ms = int(time.time() * 1000)
+    repaired = 0
+
+    for msg_with_parts in messages_with_parts:
+        message_id = msg_with_parts.info.id
+        for part in msg_with_parts.parts:
+            if not isinstance(part, ToolPart):
+                continue
+            state = part.state
+            if getattr(state, "status", None) == "running":
+                part.state = _build_interrupted_error_state(state, now_ms)
+            elif isinstance(state, ToolStatePending) and recover_pending:
+                part.state = _build_interrupted_error_state(state, now_ms)
+            elif (
+                part.tool in {"delegate_task", "task"}
+                and isinstance(state, ToolStateCompleted)
+                and state.metadata.get("submitted") is True
+                and state.metadata.get("status") == "running"
+            ):
+                from aegisops.session.agent_inbox import AgentInbox
+                from aegisops.session.session_loop import SessionLoop
+
+                child_id = state.metadata.get("sessionId")
+                # Registrations also cover done-callback handoffs and finalizers.
+                if (
+                    child_id in AgentInbox._children
+                    or child_id in AgentInbox._wakes
+                    or SessionLoop.is_running(child_id)
+                ):
+                    continue
+                part.state = state.model_copy(update={"metadata": {
+                    **state.metadata,
+                    "status": "error",
+                    "result": INTERRUPTED_TOOL_ERROR,
+                    "finished_at": now_ms,
+                }})
+            else:
+                continue
+
+            await Message.store_part(session_id, message_id, part)
+            repaired += 1
+
+        # Same rule as pending tools: only close a reply no runner can still
+        # be writing (a busy, queued or looping session keeps it open).
+        if recover_pending and _is_unfinished_assistant(msg_with_parts.info):
+            updated = await Message.update(
+                session_id,
+                message_id,
+                error=_build_interrupted_message_error(),
+                finish="error",
+            )
+            if updated is not None:
+                # callers serialize the preloaded objects, keep them in sync
+                msg_with_parts.info = updated
+            repaired += 1
+
+    if repaired:
+        log.info("session.orphan_tools.aborted", {
+            "session_id": session_id,
+            "count": repaired,
+        })
+    return repaired
+
+
+async def abort_orphan_running_parts(session_id: str) -> int:
+    """Mark persisted running tool parts as interrupted errors."""
+    if current_lease(session_id) is None:
+        lease = await SessionExecutionLease.acquire(session_id)
+        if lease is None:
+            return 0
+        async with lease:
+            return await abort_orphan_running_parts(session_id)
+    messages_with_parts = await Message.list_with_parts(session_id)
+    return await abort_orphan_running_parts_in_messages(session_id, messages_with_parts)
+
+
+async def abort_orphan_running_parts_for_sessions(
+    session_ids: Iterable[str],
+    *,
+    skip_busy: bool = False,
+) -> int:
+    """Best-effort recovery for a known set of sessions."""
+    total = 0
+    for session_id in dict.fromkeys(session_ids):
+        try:
+            if skip_busy:
+                from aegisops.session.core.status import SessionStatus
+
+                if session_id in SessionStatus.get_busy_session_ids():
+                    continue
+            total += await abort_orphan_running_parts(session_id)
+        except Exception as exc:
+            log.warn("session.orphan_tools.session_failed", {
+                "session_id": session_id,
+                "error": str(exc),
+            })
+    return total
+
+
+async def abort_all_orphan_running_parts(*, limit: Optional[int] = None) -> int:
+    """Best-effort startup recovery for all persisted sessions."""
+    entries = await Storage.list_entries(prefix="session:", model=SessionInfo)
+    session_ids = [
+        session.id
+        for _, session in entries
+        if getattr(session, "status", None) != "deleted"
+    ]
+    if limit is not None:
+        session_ids = session_ids[:limit]
+    return await abort_orphan_running_parts_for_sessions(session_ids, skip_busy=True)

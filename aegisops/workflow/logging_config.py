@@ -1,0 +1,68 @@
+"""Logging configuration for aegisops.workflow.
+
+Workflow logs go to stderr. File logging is intentionally disabled so the
+AegisOps log directory only contains backend.log, webui.log, and date folders.
+"""
+
+import logging
+import sys
+from typing import Optional
+
+
+def setup_workflow_logging(
+    level: int = logging.INFO,
+    format_string: Optional[str] = None,
+    stream=None,
+    file: bool = True,
+) -> None:
+    """配置 aegisops.workflow 的日志输出（控制台）。
+
+    Args:
+        level: 日志级别，默认为 INFO
+        format_string: 日志格式字符串，如果为 None 则使用默认格式
+        stream: 输出流，默认为 sys.stderr
+        file: 兼容旧参数；当前不会创建 workflow.log 文件
+
+    Example:
+        >>> from aegisops.workflow import setup_workflow_logging
+        >>> setup_workflow_logging()  # 使用默认配置
+        >>> setup_workflow_logging(level=logging.DEBUG)  # 启用 DEBUG 级别
+    """
+    if format_string is None:
+        format_string = "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"
+
+    if stream is None:
+        stream = sys.stderr
+
+    formatter = logging.Formatter(format_string, datefmt="%Y-%m-%d %H:%M:%S")
+
+    logger = logging.getLogger("aegisops.workflow")
+    logger.setLevel(level)
+    logger.handlers.clear()
+
+    # Console
+    console_handler = logging.StreamHandler(stream)
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # Workflow file logging is intentionally disabled. Structured workflow
+    # activity should be emitted through ``aegisops.utils.log`` so the log
+    # directory only contains backend.log, webui.log, and date folders.
+
+    logger.propagate = False
+
+
+def enable_verbose_logging() -> None:
+    """启用详细日志输出（DEBUG 级别）。
+    
+    这是 setup_workflow_logging(level=logging.DEBUG) 的快捷方式。
+    """
+    setup_workflow_logging(level=logging.DEBUG)
+
+
+def disable_workflow_logging() -> None:
+    """禁用 aegisops.workflow 的日志输出。"""
+    logger = logging.getLogger("aegisops.workflow")
+    logger.handlers.clear()
+    logger.setLevel(logging.CRITICAL + 1)  # 设置为比 CRITICAL 更高的级别

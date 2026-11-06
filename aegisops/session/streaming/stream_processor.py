@@ -1,0 +1,2631 @@
+"""
+Stream Processor
+
+Processes streaming LLM responses with synchronous tool execution.
+Ported from AegisOps' SessionProcessor pattern.
+"""
+
+import copy
+import json
+import os
+import re
+import asyncio
+import contextvars
+import time as _time
+from datetime import datetime
+from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable, Iterable
+from dataclasses import dataclass, field
+
+from aegisops.utils.log import Log
+from aegisops.utils.id import Identifier
+from aegisops.session.message import (
+    Message,
+    MessageInfo,
+    MessageRole,
+    PartTime,
+    TextPart,
+    ReasoningPart,
+    ToolPart,
+    ToolStatePending,
+    ToolStateRunning,
+    ToolStateCompleted,
+    ToolStateError,
+)
+from aegisops.session.streaming.model_activity import ModelActivity
+from aegisops.session.streaming.stream_events import (
+    StreamEvent,
+    ToolCallEvent,
+    ReasoningStartEvent,
+    ReasoningDeltaEvent,
+    ReasoningEndEvent,
+    TextStartEvent,
+    TextDeltaEvent,
+    TextEndEvent,
+    ToolInputStartEvent,
+    ToolInputErrorEvent,
+)
+from aegisops.tool.registry import (
+    ToolRegistry,
+    ToolContext,
+    ToolResult,
+    callable_tool_denial_reason,
+)
+from aegisops.permission import PermissionNext
+from aegisops.agent.agent import AgentInfo
+from aegisops.utils.langfuse import span_scope
+from aegisops.session.core.defaults import DOOM_LOOP_THRESHOLD
+
+
+log = Log.create(service="session.stream_processor")
+
+# Holds the token of the StreamProcessor whose sibling ``delegate_task`` task
+# we are running inside. Tasks copy the context at creation, so a child
+# session's own runner inherits this value -- storing the owner instead of a
+# bare flag is what lets that child tell "my parent dispatched me in parallel"
+# apart from "my own tool call is parallel", which decides whether it may hold
+# its slot.
+_PARALLEL_TOOL_CALL_OWNER: contextvars.ContextVar[Optional[object]] = contextvars.ContextVar(
+    "aegisops_parallel_tool_call_owner", default=None
+)
+
+
+def parallel_tool_call_owner() -> Optional[object]:
+    """Token of the processor running the current parallel subagent task."""
+    return _PARALLEL_TOOL_CALL_OWNER.get()
+
+
+# Note: Using message part types from message.py instead of custom class
+
+
+def _resolve_tool_error(result: ToolResult) -> str:
+    """Prefer an explicit tool error, then fall back to captured output."""
+    if result.error:
+        return result.error
+
+    metadata_output = ""
+    if isinstance(result.metadata, dict):
+        metadata_output = str(result.metadata.get("output") or "").strip()
+    if metadata_output:
+        return metadata_output
+
+    if isinstance(result.output, str):
+        output_text = result.output.strip()
+        if output_text:
+            return output_text
+
+    return "Unknown error"
+
+
+def _invalid_tool_call_parse_error(tool_input: Dict[str, Any]) -> tuple[str, str]:
+    """Return original tool name and user-facing parse error for invalid tool events."""
+    original_tool = str(tool_input.get("tool") or "unknown").strip() or "unknown"
+    raw_error = str(tool_input.get("error") or "Failed to parse tool arguments.").strip()
+    prefix = f"Failed to parse tool arguments for {original_tool}"
+    if raw_error.startswith(prefix):
+        return original_tool, raw_error
+    return original_tool, f"{prefix}: {raw_error}"
+
+
+@dataclass
+class ToolCallState:
+    """State for tracking tool calls"""
+    id: str
+    name: str
+    input: Dict[str, Any]
+    part_id: str
+    status: str = "pending"  # "pending", "running", "completed", "error"
+    output: Optional[str] = None
+    error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    # Model-emitted input before any tool.execute.before hook patched ``input``
+    raw_input: Optional[Dict[str, Any]] = None
+
+
+class StreamProcessor:
+    """
+    Stream processor for LLM responses
+    
+    Handles streaming events and executes tools synchronously.
+    Ported from AegisOps' SessionProcessor behavior.
+    """
+
+    def set_allowed_tool_names(self, allowed_tool_names: Iterable[str]) -> None:
+        """Set the tools the model may call for this turn."""
+        self._allowed_tool_names = sorted(set(allowed_tool_names))
+    
+    def __init__(
+        self,
+        session_id: str,
+        assistant_message: MessageInfo,
+        agent: AgentInfo,
+        abort_event: Optional[asyncio.Event] = None,
+        permission_callback: Optional[Callable[[Dict[str, Any]], Awaitable[None]]] = None,
+        text_delta_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        reasoning_delta_callback: Optional[Callable[[str], Awaitable[None]]] = None,
+        tool_start_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+        tool_end_callback: Optional[Callable[[str, ToolResult], Awaitable[None]]] = None,
+        event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
+        config_data: Optional[Dict[str, Any]] = None,
+        session_key: Optional[str] = None,
+        main_session_key: Optional[str] = None,
+        workspace_dir: Optional[str] = None,
+        langfuse_generation: Optional[Any] = None,
+        step_index: Optional[int] = None,
+        execution_mode: str = "build",
+        plan_file_path: Optional[str] = None,
+        plan_relative_path: Optional[str] = None,
+        plan_permission_path: Optional[str] = None,
+        allowed_tool_names: Optional[Iterable[str]] = None,
+        model_activity: Optional[ModelActivity] = None,
+        max_parallel_subagents: Optional[int] = None,
+    ):
+        self.session_id = session_id
+        self.assistant_message = assistant_message
+        self.agent = agent
+        self.abort_event = abort_event or asyncio.Event()
+        self.permission_callback = permission_callback
+        self.text_delta_callback = text_delta_callback
+        self.reasoning_delta_callback = reasoning_delta_callback
+        self.tool_start_callback = tool_start_callback
+        self.tool_end_callback = tool_end_callback
+        self.event_publish_callback = event_publish_callback
+        self.model_activity = model_activity or ModelActivity(session_id, assistant_message.id, event_publish_callback)
+        # Agent inbox generation of the execution this step belongs to, taken
+        # while it is live: a delegation still in the tool pipeline when that
+        # execution is cancelled checks it and does not bind the next one.
+        from aegisops.session.agent_inbox import AgentInbox
+        self._agent_inbox = AgentInbox._inboxes.get(session_id)
+        self._config_data = config_data
+        self._session_key = session_key or session_id
+        self._main_session_key = main_session_key or session_id
+        self._workspace_dir = workspace_dir
+        self._langfuse_generation = langfuse_generation
+        self._step_index = step_index
+        self._execution_mode = execution_mode
+        self._plan_file_path = plan_file_path
+        self._plan_relative_path = plan_relative_path
+        self._plan_permission_path = plan_permission_path
+        self._allowed_tool_names: Optional[List[str]] = None
+        if allowed_tool_names is not None:
+            self.set_allowed_tool_names(allowed_tool_names)
+        self._sandbox_runtime_cache = None
+        self._sandbox_config_cache = None
+        self._sandbox_context_cache = None
+        self._sandbox_context_resolved = False
+        
+        # Track message parts
+        self.parts: List[Any] = []  # TextPart, ReasoningPart, ToolPart
+        self.current_text_part: Optional[TextPart] = None
+        self.current_reasoning_part: Optional[ReasoningPart] = None
+        self.reasoning_parts: Dict[str, ReasoningPart] = {}
+        
+        # Track tool calls
+        self.tool_calls: Dict[str, ToolCallState] = {}
+        self._last_visible_text: str = ""
+        # What text_delta_callback has received so far; it moves on every
+        # callback, while _last_visible_text only moves when an event is published.
+        self._callback_visible_text: str = ""
+
+        # Throttle event publishing for text/reasoning deltas to reduce network overhead
+        # Send updates at most every 50ms during streaming
+        self._last_text_event_time: float = 0
+        self._last_reasoning_event_time: Dict[str, float] = {}  # Track per reasoning ID
+        self._text_event_throttle_ms: float = 50
+        self.recent_tool_signatures: List[tuple[str, str]] = []
+        
+        # Finish state
+        self.finish_reason: Optional[str] = None
+        
+        # Flag to stop processing more tool calls (for doom loop prevention)
+        self._stop_tool_processing = False
+        
+        # Flag: model emitted text-embedded tool calls (<tool_use> XML) that were extracted and executed
+        self._text_tool_calls_executed = False
+
+        # Foreground subagents are long-running but independent. Start them as
+        # soon as their tool-call arrives so later sibling tool-calls in the same
+        # model response can launch too; the runner drains these before the step
+        # returns. ``max_parallel_subagents`` bounds how many of one response's
+        # siblings actually run at once (0/None = unbounded); the rest queue in
+        # arrival order. The cap is per model response so a nested delegate
+        # never waits on its own parent's budget.
+        self._parallel_tool_tasks: Dict[str, asyncio.Task[None]] = {}
+        self._max_parallel_subagents = (
+            max(0, int(max_parallel_subagents)) if max_parallel_subagents is not None else 0
+        )
+        self._parallel_tool_gate: Optional[asyncio.Semaphore] = None
+        # Identity for _PARALLEL_TOOL_CALL_OWNER; see owns_current_parallel_tool_call.
+        self._parallel_owner = object()
+        self._sleep_calls = []
+        self._draining_sleep = False
+    
+    async def process_event(self, event: StreamEvent) -> None:
+        """
+        Process a single stream event
+        
+        Args:
+            event: Stream event to process
+        """
+        event_type = event.type
+        
+        # Debug log for reasoning events
+        if event_type.startswith("reasoning"):
+            log.debug("stream.event.processing", {
+                "event_type": event_type,
+                "has_text": hasattr(event, 'text') and bool(getattr(event, 'text', None)),
+            })
+        
+        if event_type == "start":
+            log.debug("stream.start", {"session_id": self.session_id})
+        
+        elif event_type == "reasoning-start":
+            await self._handle_reasoning_start(event)
+        
+        elif event_type == "reasoning-delta":
+            await self._handle_reasoning_delta(event)
+        
+        elif event_type == "reasoning-end":
+            await self._handle_reasoning_end(event)
+        
+        elif event_type == "tool-input-start":
+            await self._handle_tool_input_start(event)
+        
+        elif event_type == "tool-input-delta":
+            pass  # Just track incremental input
+        
+        elif event_type == "tool-input-end":
+            pass  # Input is complete
+
+        elif event_type == "tool-input-error":
+            await self._handle_tool_input_error(event)
+        
+        elif event_type == "tool-call":
+            if self._should_run_tool_call_parallel(event):
+                self._start_parallel_tool_call(event)
+            else:
+                async with self.model_activity.suspend():
+                    await self._handle_tool_call(event)
+        
+        elif event_type == "text-start":
+            await self._handle_text_start(event)
+        
+        elif event_type == "text-delta":
+            await self._handle_text_delta(event)
+        
+        elif event_type == "text-end":
+            await self._handle_text_end(event)
+        
+        elif event_type == "finish":
+            incoming_reason = event.finish_reason
+            # If this step extracted and executed tool calls from inline XML text,
+            # override "stop" so the session loop knows to continue with tool results.
+            if self._text_tool_calls_executed and incoming_reason == "stop":
+                self.finish_reason = "tool-calls"
+                log.info("stream.finish_reason_overridden", {
+                    "original": incoming_reason,
+                    "overridden_to": "tool-calls",
+                    "session_id": self.session_id,
+                })
+            else:
+                self.finish_reason = incoming_reason
+            log.info("stream.finish", {
+                "session_id": self.session_id,
+                "finish_reason": self.finish_reason,
+            })
+    
+    async def _handle_reasoning_start(self, event: ReasoningStartEvent) -> None:
+        """Handle reasoning block start"""
+        part = ReasoningPart(
+            id=Identifier.create("part"),
+            sessionID=self.session_id,
+            messageID=self.assistant_message.id,
+            text="",
+            time=PartTime(start=int(datetime.now().timestamp() * 1000)),
+            metadata=dict(event.metadata) if event.metadata else {},
+        )
+        self.reasoning_parts[event.id] = part
+        self.parts.append(part)
+        
+        # Publish part created event (matches AegisOps Session.updatePart)
+        if self.event_publish_callback:
+            await self.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": part.id,
+                    "messageID": part.messageID,
+                    "sessionID": part.sessionID,
+                    "type": "reasoning",
+                    "text": part.text,
+                    "time": {"start": part.time.start},
+                }
+            })
+        
+        log.info("stream.reasoning.start", {"reasoning_id": event.id})
+
+    @staticmethod
+    def _merge_reasoning_metadata(part: ReasoningPart, metadata: Optional[Dict[str, Any]]) -> None:
+        """Merge streamed reasoning metadata without losing accumulated content."""
+        if not metadata:
+            return
+
+        if part.metadata is None:
+            part.metadata = {}
+
+        for key, value in metadata.items():
+            if key != "reasoningContent":
+                part.metadata[key] = value
+                continue
+
+            existing = part.metadata.get(key)
+            if not isinstance(existing, str) or not isinstance(value, str):
+                part.metadata[key] = value
+                continue
+
+            # Synthetic reasoning-start events seed the first chunk metadata, so
+            # the first delta often repeats the same value. Ignore exact
+            # duplicates while still accepting providers that emit cumulative
+            # reasoning_content.
+            if value == existing:
+                continue
+            if existing == part.text and part.text.endswith(value):
+                continue
+            if value.startswith(existing):
+                part.metadata[key] = value
+                continue
+            part.metadata[key] = existing + value
+    
+    async def _handle_reasoning_delta(self, event: ReasoningDeltaEvent) -> None:
+        """Handle reasoning content delta with throttling"""
+        log.debug("stream.reasoning.delta.received", {
+            "reasoning_id": event.id,
+            "text_len": len(event.text),
+        })
+        if event.id in self.reasoning_parts:
+            part = self.reasoning_parts[event.id]
+            previous_visible = self._sanitize_streaming_text_for_display(part.text)
+            part.text += event.text
+            visible_text = self._sanitize_streaming_text_for_display(part.text)
+            visible_delta = self._appended_delta(previous_visible, visible_text)
+            
+            # Update metadata if provided
+            if event.metadata:
+                self._merge_reasoning_metadata(part, event.metadata)
+            
+            # Call reasoning delta callback for CLI display
+            if self.reasoning_delta_callback and visible_delta:
+                try:
+                    await self.reasoning_delta_callback(visible_delta)
+                except Exception as e:
+                    log.error("stream.reasoning_delta_callback.error", {"error": str(e)})
+            
+            # Throttle event publishing similar to text deltas
+            if self.event_publish_callback and event.text:
+                current_time = _time.time() * 1000
+                last_time = self._last_reasoning_event_time.get(event.id, 0)
+                time_since_last = current_time - last_time
+                
+                # Always publish first few characters, then throttle
+                should_publish = (
+                    len(part.text) <= 50 or  # First ~50 chars always publish
+                    time_since_last >= self._text_event_throttle_ms  # Or throttle interval passed
+                )
+                
+                if should_publish:
+                    self._last_reasoning_event_time[event.id] = current_time
+                    log.debug("stream.reasoning.publishing_delta", {
+                        "delta_len": len(event.text),
+                        "total_len": len(part.text),
+                        "reasoning_id": event.id,
+                        "throttled": time_since_last < self._text_event_throttle_ms,
+                    })
+                    await self.event_publish_callback("message.part.updated", {
+                        "part": {
+                            "id": part.id,
+                            "messageID": part.messageID,
+                            "sessionID": part.sessionID,
+                            "type": "reasoning",
+                            "text": visible_text,
+                            "time": {"start": part.time.start},
+                        },
+                        "delta": visible_delta,
+                    })
+                    log.debug("stream.reasoning.delta.published", {
+                        "part_id": part.id,
+                        "delta": event.text[:20],
+                    })
+    
+    async def _handle_reasoning_end(self, event: ReasoningEndEvent) -> None:
+        """Handle reasoning block end"""
+        if event.id in self.reasoning_parts:
+            part = self.reasoning_parts[event.id]
+            part.text = part.text.strip()
+            
+            if event.metadata:
+                self._merge_reasoning_metadata(part, event.metadata)
+            
+            self._log_dsml_markers(part.text, "reasoning")
+            reasoning_call_attempt = self._has_dsml_call_attempt(part.text)
+            if reasoning_call_attempt:
+                # Reasoning may describe hypothetical calls. Do not execute it.
+                log.warn("stream.reasoning_tool_calls_detected", {
+                    "session_id": self.session_id,
+                    "reasoning_id": event.id,
+                    "action": "suppressed_not_executed",
+                })
+            part.text = self._sanitize_streaming_text_for_display(part.text, final=True)
+
+            # Update time
+            if part.time:
+                part.time.end = int(datetime.now().timestamp() * 1000)
+            
+            # Store the completed reasoning part to database
+            await Message.store_part(self.session_id, self.assistant_message.id, part)
+            
+            # Publish final reasoning part (matches AegisOps Session.updatePart)
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": part.id,
+                        "messageID": part.messageID,
+                        "sessionID": part.sessionID,
+                        "type": "reasoning",
+                        "text": part.text,
+                        "time": {"start": part.time.start, "end": part.time.end},
+                    }
+                })
+            
+            log.info("stream.reasoning.end", {
+                "reasoning_id": event.id,
+                "length": len(part.text),
+            })
+            
+            # Remove from active tracking
+            del self.reasoning_parts[event.id]
+            if reasoning_call_attempt:
+                raise ValueError(
+                    "模型将 DSML 工具调用写入了 reasoning，调用未执行。"
+                    "请重试并要求模型通过原生工具调用通道发送；本轮不能视为任务完成。"
+                )
+    
+    async def _handle_tool_input_start(self, event: ToolInputStartEvent) -> None:
+        """
+        Handle tool input start - create and store pending part
+        
+        Ported from original exact logic:
+        - Create pending ToolPart immediately when tool-input-start is received
+        - Store it to Message._parts so it's available for doom loop detection
+        """
+        # Reuse existing part_id if already tracked, otherwise create new
+        if event.id in self.tool_calls:
+            part_id = self.tool_calls[event.id].part_id
+        else:
+            part_id = Identifier.create("part")
+        
+        # Create pending tool call state in memory
+        self.tool_calls[event.id] = ToolCallState(
+            id=event.id,
+            name=event.tool_name,
+            input={},
+            part_id=part_id,
+            status="pending",
+        )
+        
+        # Create and store pending ToolPart (like AegisOps's Session.updatePart)
+        try:
+            tool_part = ToolPart(
+                id=part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=event.id,
+                tool=event.tool_name,
+                state=ToolStatePending(
+                    status="pending",
+                    input={},
+                    raw="",
+                ),
+            )
+            await Message.store_part(self.session_id, self.assistant_message.id, tool_part)
+            
+            # Publish pending tool event (matches AegisOps Session.updatePart)
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": event.id,
+                        "tool": event.tool_name,
+                        "state": {
+                            "status": "pending",
+                            "input": {},
+                            "raw": "",
+                        }
+                    }
+                })
+            
+            log.debug("stream.tool_input.start", {
+                "tool_call_id": event.id,
+                "tool_name": event.tool_name,
+                "part_id": part_id,
+            })
+        except Exception as e:
+            log.error("stream.tool_input_start.store_part_failed", {"error": str(e)})
+
+    async def _handle_tool_input_error(self, event: ToolInputErrorEvent) -> None:
+        """Mark an input-generation failure without executing a tool."""
+        if event.id in self.tool_calls:
+            tool_state = self.tool_calls[event.id]
+            part_id = tool_state.part_id
+        else:
+            part_id = Identifier.create("part")
+            tool_state = ToolCallState(
+                id=event.id,
+                name=event.tool_name,
+                input=event.input,
+                part_id=part_id,
+                status="pending",
+            )
+            self.tool_calls[event.id] = tool_state
+
+        tool_state.name = event.tool_name
+        tool_state.input = event.input
+        tool_state.status = "error"
+        tool_state.error = event.error
+
+        tool_error_time = int(datetime.now().timestamp() * 1000)
+        error_state = ToolStateError(
+            status="error",
+            input=event.input,
+            error=event.error,
+            time={"start": tool_error_time, "end": tool_error_time},
+        )
+        error_part = ToolPart(
+            id=part_id,
+            sessionID=self.session_id,
+            messageID=self.assistant_message.id,
+            type="tool",
+            callID=event.id,
+            tool=event.tool_name,
+            state=error_state,
+        )
+        await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+        if self.event_publish_callback:
+            await self.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": part_id,
+                    "messageID": self.assistant_message.id,
+                    "sessionID": self.session_id,
+                    "type": "tool",
+                    "callID": event.id,
+                    "tool": event.tool_name,
+                    "state": {
+                        "status": "error",
+                        "input": event.input,
+                        "error": event.error,
+                        "time": {"start": tool_error_time, "end": tool_error_time},
+                    },
+                },
+            })
+
+        log.warn("stream.tool_input.error", {
+            "tool_call_id": event.id,
+            "tool_name": event.tool_name,
+            "error": event.error,
+        })
+    
+    async def _handle_tool_call(self, event: ToolCallEvent) -> None:
+        """
+        Handle tool call - execute tool synchronously
+        
+        This is the key difference from the old implementation:
+        tools are executed immediately upon receiving the tool-call event,
+        not batched after streaming completes.
+        """
+        if event.tool_name == "sleep" and not self._draining_sleep:
+            existing = self.tool_calls.get(event.tool_call_id)
+            if existing and existing.status in ("completed", "error"):
+                return
+            if not any(call.tool_call_id == event.tool_call_id for call in self._sleep_calls):
+                self._sleep_calls.append(event)
+            return
+        tool_call_id = event.tool_call_id
+        tool_name = event.tool_name
+        tool_input = event.input
+        
+        # Check if we should stop processing tool calls (doom loop prevention)
+        if self._stop_tool_processing:
+            log.warn("stream.tool_call.skipped", {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "reason": "doom_loop_prevention_active"
+            })
+            return
+        
+        # Guard: skip if this exact tool_call_id was already executed
+        existing = self.tool_calls.get(tool_call_id)
+        if existing and existing.status in ("completed", "error"):
+            log.warn("stream.tool_call.skipped", {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "reason": "already_executed",
+                "previous_status": existing.status,
+            })
+            return
+        
+        log.info("stream.tool_call", {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+        })
+        
+        # Get existing tool call state (should exist from tool-input-start)
+        # If not, create it (fallback for safety)
+        if tool_call_id not in self.tool_calls:
+            log.warn("stream.tool_call.no_input_start", {
+                "tool_call_id": tool_call_id,
+                "message": "tool-call received without tool-input-start, creating state"
+            })
+            part_id = Identifier.create("part")
+            self.tool_calls[tool_call_id] = ToolCallState(
+                id=tool_call_id,
+                name=tool_name,
+                input=tool_input,
+                part_id=part_id,
+                status="pending",
+            )
+        
+        tool_state = self.tool_calls[tool_call_id]
+        tool_state.input = tool_input
+        # What the model emitted; ``input`` may be rewritten by the
+        # tool.input.rewrite stage below (and, rarely, patched by a
+        # tool.execute.before hook, see _on_input_patched).
+        tool_state.raw_input = tool_input
+
+        if tool_name == "invalid":
+            original_tool, parse_error = _invalid_tool_call_parse_error(tool_input)
+            tool_state.name = original_tool
+            tool_state.status = "error"
+            tool_state.error = parse_error
+
+            tool_error_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_input,
+                error=parse_error,
+                time={"start": tool_error_time, "end": tool_error_time},
+            )
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=original_tool,
+                state=error_state,
+            )
+            await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": original_tool,
+                        "state": {
+                            "status": "error",
+                            "input": tool_input,
+                            "error": parse_error,
+                            "time": {"start": tool_error_time, "end": tool_error_time},
+                        },
+                    },
+                })
+
+            log.warn("stream.tool_call.invalid_arguments", {
+                "tool_call_id": tool_call_id,
+                "tool_name": original_tool,
+                "error": parse_error,
+            })
+            return
+
+        denial_reason = callable_tool_denial_reason(
+            tool_name,
+            self._allowed_tool_names,
+        )
+        if denial_reason:
+            tool_state.status = "error"
+            tool_state.error = denial_reason
+            tool_error_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_input,
+                error=denial_reason,
+                time={"start": tool_error_time, "end": tool_error_time},
+            )
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=error_state,
+            )
+            await Message.store_part(
+                self.session_id,
+                self.assistant_message.id,
+                error_part,
+            )
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": tool_name,
+                        "state": {
+                            "status": "error",
+                            "input": tool_input,
+                            "error": denial_reason,
+                            "time": {
+                                "start": tool_error_time,
+                                "end": tool_error_time,
+                            },
+                        },
+                    },
+                })
+            log.warn("stream.tool_call.not_callable", {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+            })
+            return
+
+        # Hook pipeline: tool.input.rewrite (once, on the raw model input).
+        # Hooks such as redaction-placeholder restore rewrite the input here,
+        # before validation, before the tool.execute.before policy hooks and
+        # before execution, so the running state, doom-loop check, policy
+        # evaluation and the handler all see the same effective input.
+        # tool.execute.before itself runs exactly once, inside Tool.execute
+        # (registry layer) on the canonical payload; it is deliberately not
+        # fired here as well.  Should a tool.execute.before hook still patch
+        # the input, the registry reports it via ToolContext.input_patch_callback.
+        tool_start_time = int(datetime.now().timestamp() * 1000)
+        try:
+            tool_input = await self._rewrite_tool_input(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_call_id=tool_call_id,
+            )
+            tool_state.input = tool_input
+        except asyncio.CancelledError:
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_input=tool_state.input,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+            )
+            raise
+        except Exception as exc:
+            # The pipeline only lets propagate / fail_closed hooks raise out
+            # of a stage; honour that policy the same way the registry does
+            # for tool.execute.before: do not execute.
+            log.error("stream.tool_input_rewrite.error", {
+                "tool": tool_name,
+                "tool_call_id": tool_call_id,
+                "error": str(exc),
+            })
+            await self._finalize_failed_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                error=f"Tool input rewrite hook failed: {exc}",
+            )
+            return
+        tool_state.status = "running"
+
+        # Update ToolPart to running state (like AegisOps's Session.updatePart)
+        # This matches AegisOps's logic: update existing part from pending to running
+        await self._store_and_publish_running_state(
+            tool_state=tool_state,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            tool_start_time=tool_start_time,
+        )
+
+        # Doom loop detection - check recent tool calls in assistant message
+        # Ported from original exact logic: check parts of current assistant message
+        try:
+            # Get all parts of current assistant message from storage
+            parts = await Message.parts(self.assistant_message.id, self.session_id)
+
+            # Observational timing markers must not interrupt doom-loop detection.
+            recent_parts = []
+            for part in reversed(parts):
+                if part.type == "step-start" and getattr(part, "time", None):
+                    continue
+                recent_parts.append(part)
+                if len(recent_parts) == DOOM_LOOP_THRESHOLD:
+                    break
+            # Compare what the model emitted, not the hook-rewritten input.
+            input_signature = json.dumps(tool_state.raw_input, sort_keys=True)
+
+            if (
+                len(recent_parts) == DOOM_LOOP_THRESHOLD and
+                all(
+                    p.type == "tool" and
+                    p.tool == tool_name and
+                    p.state.status != "pending" and
+                    json.dumps(self._doom_loop_input(p), sort_keys=True) == input_signature
+                    for p in recent_parts
+                )
+            ):
+                log.warn("stream.doom_loop_detected", {
+                    "tool": tool_name,
+                    "count": DOOM_LOOP_THRESHOLD,
+                    "input": tool_input,
+                })
+                
+                # Stop processing further tool calls to prevent infinite loop
+                self._stop_tool_processing = True
+                
+                log.warn("stream.doom_loop.prevented", {
+                    "tool": tool_name,
+                    "threshold": DOOM_LOOP_THRESHOLD,
+                    "message": "Skipping redundant tool call - will be handled in next step with full context"
+                })
+                
+                # Skip this tool call (don't execute, don't mark as error)
+                # The tool result from previous call will be available in next step
+                return
+        except Exception as e:
+            log.debug("stream.doom_loop_check_failed", {"error": str(e)})
+        
+        # Notify tool start (for CLI display)
+        if self.tool_start_callback:
+            try:
+                await self.tool_start_callback(tool_name, tool_input)
+            except Exception as e:
+                log.error("stream.tool_start_callback.error", {"error": str(e)})
+        # Execute tool synchronously
+        tool_span_ctx = None
+        if self._langfuse_generation is not None:
+            try:
+                tool_span_ctx = span_scope(
+                    parent=self._langfuse_generation,
+                    name=f"Tool.execute.{tool_name}",
+                    input=tool_input,
+                    metadata={
+                        "session_id": self.session_id,
+                        "message_id": self.assistant_message.id,
+                        "call_id": tool_call_id,
+                        "agent": self.agent.name,
+                        "step": self._step_index,
+                        "session_step": f"{self.session_id}:{self._step_index}" if self._step_index is not None else None,
+                    },
+                )
+            except Exception as exc:
+                log.debug("stream.tool_span.init_failed", {"error": str(exc)})
+        tool_finished = asyncio.Event()
+        try:
+            sandbox_meta = await self._resolve_sandbox_meta(tool_name)
+            if sandbox_meta["blocked"]:
+                result = ToolResult(
+                    success=False,
+                    error=sandbox_meta["error"],
+                    metadata={"sandbox": True, "blocked_by_policy": True},
+                )
+            else:
+                async def _on_input_patched(effective_input: Dict[str, Any]) -> None:
+                    """Registry reports a hook-patched input before the handler runs."""
+                    if not isinstance(effective_input, dict) or effective_input == tool_state.input:
+                        return
+                    tool_state.input = effective_input
+                    await self._store_and_publish_running_state(
+                        tool_state=tool_state,
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        tool_start_time=tool_start_time,
+                    )
+
+                def _make_metadata_cb(
+                        _part_id=tool_state.part_id,
+                        _call_id=tool_call_id,
+                        _tool=tool_name,
+                        _start=tool_start_time,
+                    ):
+                        import copy
+
+                        _finished = [False]
+                        _pending_tasks: set[asyncio.Task[Any]] = set()
+
+                        def _track_task(coro: Awaitable[None]) -> None:
+                            task = asyncio.create_task(coro)
+                            _pending_tasks.add(task)
+
+                            def _cleanup(done_task: asyncio.Task[Any]) -> None:
+                                _pending_tasks.discard(done_task)
+                                try:
+                                    done_task.result()
+                                except asyncio.CancelledError:
+                                    pass
+                                except Exception as exc:
+                                    log.debug("stream.metadata_task.error", {"error": str(exc)})
+
+                            task.add_done_callback(_cleanup)
+
+                        def _cb(metadata: Dict[str, Any]):
+                            if _finished[0]:
+                                return
+                            snapshot = copy.deepcopy(metadata)
+                            tool_state.metadata = snapshot
+                            state_dict = {
+                                "status": "running",
+                                "input": tool_state.input,
+                                "time": {"start": _start},
+                                "metadata": snapshot,
+                            }
+                            if snapshot.get("title"):
+                                state_dict["title"] = snapshot["title"]
+                            if self.event_publish_callback:
+                                async def _safe_publish():
+                                    if _finished[0]:
+                                        return
+                                    try:
+                                        await self.event_publish_callback(
+                                            "message.part.updated",
+                                            {
+                                                "part": {
+                                                    "id": _part_id,
+                                                    "messageID": self.assistant_message.id,
+                                                    "sessionID": self.session_id,
+                                                    "type": "tool",
+                                                    "callID": _call_id,
+                                                    "tool": _tool,
+                                                    "state": state_dict,
+                                                }
+                                            },
+                                        )
+                                    except asyncio.CancelledError:
+                                        return
+                                    except Exception as exc:
+                                        log.debug("stream.metadata_publish.error", {"error": str(exc)})
+                                _track_task(_safe_publish())
+
+                            # Persist updated running state so metadata (e.g. sessionId)
+                            # survives page reload / session switch
+                            async def _persist_running_metadata():
+                                if _finished[0]:
+                                    return
+                                try:
+                                    running_state = ToolStateRunning(
+                                        status="running",
+                                        input=tool_state.input,
+                                        title=snapshot.get("title"),
+                                        metadata=snapshot,
+                                        time={"start": _start},
+                                    )
+                                    part = ToolPart(
+                                        id=_part_id,
+                                        sessionID=self.session_id,
+                                        messageID=self.assistant_message.id,
+                                        type="tool",
+                                        callID=_call_id,
+                                        tool=_tool,
+                                        state=running_state,
+                                    )
+                                    await Message.store_part(
+                                        self.session_id,
+                                        self.assistant_message.id,
+                                        part,
+                                    )
+                                except asyncio.CancelledError:
+                                    return
+                                except Exception as exc:
+                                    log.debug("stream.metadata_persist.error", {"error": str(exc)})
+                            _track_task(_persist_running_metadata())
+
+                        def _mark_finished() -> None:
+                            _finished[0] = True
+                            for task in list(_pending_tasks):
+                                task.cancel()
+
+                        _cb.mark_finished = _mark_finished
+                        return _cb
+
+                tool_extra = {
+                    **sandbox_meta["extra"],
+                    "agent_execution_session": True,
+                    "enforce_callable_tools": True,
+                    "turn_callable_tool_names": (
+                        list(self._allowed_tool_names)
+                        if self._allowed_tool_names is not None
+                        else None
+                    ),
+                    "tool_finished": tool_finished,
+                    "agent_inbox": self._agent_inbox,
+                    "execution_mode": self._execution_mode,
+                    "workspace_dir": self._workspace_dir,
+                    "model": {
+                        "providerID": getattr(
+                            self.assistant_message,
+                            "providerID",
+                            None,
+                        ),
+                        "modelID": getattr(
+                            self.assistant_message,
+                            "modelID",
+                            None,
+                        ),
+                    },
+                    "execution_context": {
+                        "trace_id": f"{self.session_id}:{self.assistant_message.id}",
+                        "execution_id": self.assistant_message.id,
+                        "turn_id": self.assistant_message.id,
+                        "step": int(self._step_index or 0),
+                        "attempt": 1,
+                    },
+                    "plan_file_path": self._plan_file_path,
+                    "plan_relative_path": self._plan_relative_path,
+                    "plan_permission_path": self._plan_permission_path,
+                }
+                ctx = ToolContext(
+                    session_id=self.session_id,
+                    message_id=self.assistant_message.id,
+                    agent=self.agent.name,
+                    call_id=tool_call_id,
+                    abort_event=self.abort_event,
+                    permission_callback=self.permission_callback,
+                    extra=tool_extra,
+                    metadata_callback=_make_metadata_cb(),
+                    event_publish_callback=self.event_publish_callback,
+                    input_patch_callback=_on_input_patched,
+                )
+                cb = ctx._metadata_callback
+                try:
+                    result = await ToolRegistry.execute(
+                        tool_name=tool_name,
+                        ctx=ctx,
+                        **tool_input
+                    )
+                finally:
+                    # Mark metadata callback as finished so pending async
+                    # running-state updates cannot overwrite completed,
+                    # errored, or interrupted tool state.
+                    if cb and hasattr(cb, 'mark_finished'):
+                        cb.mark_finished()
+            # Update tool state
+            tool_state.status = "completed" if result.success else "error"
+            tool_state.output = result.output if result.success else None
+            tool_state.error = result.error if not result.success else None
+            
+            log.info("stream.tool_call.completed", {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "success": result.success,
+            })
+            try:
+                if tool_span_ctx is not None:
+                    end_kwargs: Dict[str, Any] = {
+                        "output": result.output if result.success else result.error,
+                        "metadata": {
+                            "success": result.success,
+                            "title": result.title,
+                            "status": tool_state.status,
+                        },
+                    }
+                    if not result.success:
+                        end_kwargs["level"] = "ERROR"
+                    tool_span_ctx.end(**end_kwargs)
+            except Exception as _span_err:
+                log.debug("stream.tool_span.end_failed", {"error": str(_span_err)})
+            
+            # Update ToolPart in storage with completed state (for doom loop detection)
+            try:
+                tool_end_time = int(datetime.now().timestamp() * 1000)
+                
+                if result.success:
+                    from aegisops.session.files import output_file_attachments, public_resource_id
+
+                    attachments = output_file_attachments(tool_name, getattr(result, "attachments", None))
+                    # output can be str, dict, or list - ToolStateCompleted handles all
+                    completed_state = ToolStateCompleted(
+                        status="completed",
+                        input=tool_state.input,
+                        output=result.output if result.output is not None else "",
+                        title=result.title or tool_name,
+                        metadata=result.metadata or {},
+                        time={"start": tool_start_time, "end": tool_end_time},
+                        attachments=attachments,
+                    )
+                else:
+                    resolved_error = _resolve_tool_error(result)
+                    completed_state = ToolStateError(
+                        status="error",
+                        input=tool_state.input,
+                        error=resolved_error,
+                        metadata=result.metadata or {},
+                        time={"start": tool_start_time, "end": tool_end_time},
+                    )
+                
+                completed_part = ToolPart(
+                    id=tool_state.part_id,
+                    sessionID=self.session_id,
+                    messageID=self.assistant_message.id,
+                    type="tool",
+                    callID=tool_call_id,
+                    tool=tool_name,
+                    state=completed_state,
+                )
+                
+                await Message.store_part(self.session_id, self.assistant_message.id, completed_part)
+                
+                # Publish completed/error tool event (matches AegisOps Session.updatePart)
+                if self.event_publish_callback:
+                    state_dict = {
+                        "status": completed_state.status,
+                        "input": tool_state.input,
+                        "time": {"start": tool_start_time, "end": tool_end_time},
+                    }
+                    if result.success:
+                        state_dict["output"] = result.output if result.output is not None else ""
+                        state_dict["title"] = result.title or tool_name
+                        state_dict["metadata"] = result.metadata or {}
+                        if attachments:
+                            state_dict["attachments"] = [
+                                {
+                                    **attachment,
+                                    "resourceID": public_resource_id(
+                                        self.assistant_message.id, attachment["id"],
+                                    ),
+                                }
+                                for attachment in attachments
+                            ]
+                    else:
+                        state_dict["error"] = resolved_error
+                        state_dict["metadata"] = result.metadata or {}
+                    
+                    await self.event_publish_callback("message.part.updated", {
+                        "part": {
+                            "id": tool_state.part_id,
+                            "messageID": self.assistant_message.id,
+                            "sessionID": self.session_id,
+                            "type": "tool",
+                            "callID": tool_call_id,
+                            "tool": tool_name,
+                            "state": state_dict,
+                        }
+                    })
+                
+            except Exception as e:
+                log.error("stream.tool_call.update_part_failed", {"error": str(e)})
+            
+            # Notify tool end (for CLI display)
+            if self.tool_end_callback:
+                try:
+                    await self.tool_end_callback(tool_name, result)
+                except Exception as e:
+                    log.error("stream.tool_end_callback.error", {"error": str(e)})
+            
+        except asyncio.CancelledError:
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_input=tool_state.input,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                tool_span_ctx=tool_span_ctx,
+            )
+            raise
+        except Exception as e:
+            await self._finalize_failed_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                error=str(e),
+                tool_span_ctx=tool_span_ctx,
+            )
+
+        finally:
+            tool_finished.set()
+
+    async def _finalize_failed_tool_call(
+        self,
+        *,
+        tool_state: ToolCallState,
+        tool_name: str,
+        tool_call_id: str,
+        tool_start_time: int,
+        error: str,
+        tool_span_ctx: Optional[Any] = None,
+    ) -> None:
+        """Persist, publish and report the error state for a tool call that
+        failed outside the handler (execution exception, rewrite hook failure)."""
+        log.error("stream.tool_call.error", {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+            "error": error,
+        })
+        try:
+            if tool_span_ctx is not None:
+                tool_span_ctx.end(
+                    output=error,
+                    metadata={"success": False},
+                    level="ERROR",
+                    status_message="tool_exception",
+                )
+        except Exception as _span_err:
+            log.debug("stream.tool_span.error_end_failed", {"error": str(_span_err)})
+
+        tool_state.status = "error"
+        tool_state.error = error
+
+        # Update ToolPart in storage with error state
+        try:
+            tool_error_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_state.input,
+                error=error,
+                time={"start": tool_start_time, "end": tool_error_time},
+            )
+
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=error_state,
+            )
+            await Message.store_part(self.session_id, self.assistant_message.id, error_part)
+
+            # Publish error tool event (matches AegisOps Session.updatePart)
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": tool_name,
+                        "state": {
+                            "status": "error",
+                            "input": tool_state.input,
+                            "error": error,
+                            "time": {"start": tool_start_time, "end": tool_error_time},
+                        }
+                    }
+                })
+
+        except Exception as store_e:
+            log.error("stream.tool_call.update_part_failed", {"error": str(store_e)})
+
+        # Create error result for callback
+        error_result = ToolResult(
+            success=False,
+            output="",
+            error=error,
+            title="",
+            metadata={},
+        )
+
+        # Notify tool end with error (for CLI display)
+        if self.tool_end_callback:
+            try:
+                await self.tool_end_callback(tool_name, error_result)
+            except Exception as e2:
+                log.error("stream.tool_end_callback.error", {"error": str(e2)})
+
+    async def _rewrite_tool_input(
+        self,
+        *,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_call_id: str,
+    ) -> Dict[str, Any]:
+        """Run the tool.input.rewrite stage and return the effective input.
+
+        Contract: hooks rewrite ``ctx.input["tool"]["input"]`` in place (a
+        deep copy of the model input, so ``raw_input`` stays untouched).  The
+        stage carries no decision: ``decision`` / ``execution`` / ``skip`` in
+        the output are ignored, tool.execute.before is the place for those.
+        Exceptions from propagate / fail_closed hooks propagate to the caller.
+        """
+        from aegisops.hooks.pipeline import HookPipeline
+
+        hook_ctx = await HookPipeline.run_tool_input_rewrite({
+            "sessionID": self.session_id,
+            "messageID": self.assistant_message.id,
+            "workspace": self._workspace_dir,
+            "agent": self.agent.name,
+            "tool": {
+                "name": tool_name,
+                "input": copy.deepcopy(tool_input),
+                "callID": tool_call_id,
+            },
+        })
+        ignored = sorted(
+            key for key in ("decision", "execution", "skip")
+            if isinstance(hook_ctx.output, dict) and key in hook_ctx.output
+        )
+        if ignored:
+            log.warn("stream.tool_input_rewrite.decision_ignored", {
+                "tool": tool_name,
+                "tool_call_id": tool_call_id,
+                "keys": ignored,
+            })
+        tool_section = hook_ctx.input.get("tool") if isinstance(hook_ctx.input, dict) else None
+        updated = tool_section.get("input") if isinstance(tool_section, dict) else None
+        if isinstance(updated, dict):
+            return updated
+        return tool_input
+
+    async def _store_and_publish_running_state(
+        self,
+        *,
+        tool_state: ToolCallState,
+        tool_name: str,
+        tool_call_id: str,
+        tool_start_time: int,
+    ) -> None:
+        """Persist and publish the running ToolPart with the current input.
+
+        Called once when execution starts and again if a tool.execute.before
+        hook patched the input, so UI surfaces show what actually executes.
+        """
+        try:
+            tool_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=ToolStateRunning(
+                    status="running",
+                    input=tool_state.input,
+                    time={"start": tool_start_time},
+                ),
+            )
+            await Message.store_part(self.session_id, self.assistant_message.id, tool_part)
+
+            # Publish running tool event (matches AegisOps Session.updatePart)
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": tool_name,
+                        "state": {
+                            "status": "running",
+                            "input": tool_state.input,
+                            "time": {"start": tool_start_time},
+                        }
+                    }
+                })
+        except Exception as e:
+            log.error("stream.tool_call.update_part_failed", {"error": str(e)})
+
+    def _doom_loop_input(self, part: Any) -> Any:
+        """Input to compare for doom-loop detection: what the model emitted.
+
+        Stored parts carry the hook-patched input (what executed); calls this
+        processor handled also remember the raw model input, so repeated
+        identical calls still match even when a hook rewrote them.
+        """
+        state = self.tool_calls.get(getattr(part, "callID", None))
+        if state is not None and state.raw_input is not None:
+            return state.raw_input
+        return getattr(getattr(part, "state", None), "input", None)
+
+    async def _finalize_interrupted_tool_call(
+        self,
+        *,
+        tool_state: ToolCallState,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_call_id: str,
+        tool_start_time: int,
+        tool_span_ctx: Optional[Any] = None,
+    ) -> None:
+        """Emit and persist the terminal state for an interrupted tool call."""
+        interrupt_msg = "Tool execution was interrupted"
+        interrupted_metadata = {
+            **tool_state.metadata,
+            "status": "interrupted",
+            "interrupted": True,
+        }
+        tool_state.metadata = interrupted_metadata
+        log.info("stream.tool_call.cancelled", {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+        })
+        try:
+            if tool_span_ctx is not None:
+                tool_span_ctx.end(
+                    output=interrupt_msg,
+                    metadata={"success": False},
+                    level="ERROR",
+                    status_message="tool_cancelled",
+                )
+        except Exception as span_error:
+            log.debug(
+                "stream.tool_span.cancel_end_failed",
+                {"error": str(span_error)},
+            )
+
+        tool_state.status = "error"
+        tool_state.error = interrupt_msg
+        tool_end_time = int(datetime.now().timestamp() * 1000)
+        error_state = ToolStateError(
+            status="error",
+            input=tool_input,
+            error=interrupt_msg,
+            metadata=interrupted_metadata,
+            time={"start": tool_start_time, "end": tool_end_time},
+        )
+        error_part = ToolPart(
+            id=tool_state.part_id,
+            sessionID=self.session_id,
+            messageID=self.assistant_message.id,
+            type="tool",
+            callID=tool_call_id,
+            tool=tool_name,
+            state=error_state,
+        )
+        try:
+            await Message.store_part(
+                self.session_id,
+                self.assistant_message.id,
+                error_part,
+            )
+            if self.event_publish_callback:
+                await self.event_publish_callback(
+                    "message.part.updated",
+                    {
+                        "part": {
+                            "id": tool_state.part_id,
+                            "messageID": self.assistant_message.id,
+                            "sessionID": self.session_id,
+                            "type": "tool",
+                            "callID": tool_call_id,
+                            "tool": tool_name,
+                            "state": {
+                                "status": "error",
+                                "input": tool_input,
+                                "error": interrupt_msg,
+                                "metadata": interrupted_metadata,
+                                "time": {
+                                    "start": tool_start_time,
+                                    "end": tool_end_time,
+                                },
+                            },
+                        }
+                    },
+                )
+        except Exception as store_error:
+            log.error(
+                "stream.tool_call.cancelled_update_failed",
+                {"error": str(store_error)},
+            )
+
+    async def _load_config_data(self) -> Dict[str, Any]:
+        """Load and cache config as plain dict."""
+        if isinstance(self._config_data, dict):
+            return self._config_data
+        try:
+            from aegisops.config import Config
+
+            cfg = await Config.get()
+            self._config_data = cfg.model_dump(by_alias=True, exclude_none=True)
+        except Exception as e:
+            log.warn("stream.sandbox.config_load_failed", {"error": str(e)})
+            self._config_data = {}
+        return self._config_data or {}
+
+    async def _resolve_sandbox_meta(self, tool_name: str) -> Dict[str, Any]:
+        """
+        Resolve sandbox metadata for tool execution.
+
+        Returns:
+            Dict with keys:
+            - blocked: bool
+            - error: Optional[str]
+            - extra: Dict[str, Any]
+        """
+        result: Dict[str, Any] = {"blocked": False, "error": None, "extra": {}}
+        try:
+            from aegisops.sandbox.context import resolve_sandbox_context
+            from aegisops.sandbox.config import resolve_sandbox_config_for_agent
+            from aegisops.sandbox.runtime_status import resolve_sandbox_runtime_status
+            from aegisops.sandbox.types import BashSandboxConfig
+
+            if self._sandbox_runtime_cache is None:
+                config_data = await self._load_config_data()
+                self._sandbox_runtime_cache = resolve_sandbox_runtime_status(
+                    config_data=config_data,
+                    session_key=self._session_key,
+                    agent_id=self.agent.name,
+                    main_session_key=self._main_session_key,
+                )
+            runtime = self._sandbox_runtime_cache
+
+            if not runtime.sandboxed:
+                return result
+
+            # Sandbox tool constraints are policy input owned by the policy
+            # extension.  AegisOps does not normalize, merge, or decide against
+            # this raw metadata.
+            result["extra"]["sandbox_tool_policy"] = runtime.tool_policy_metadata
+
+            if self._sandbox_config_cache is None:
+                config_data = await self._load_config_data()
+                self._sandbox_config_cache = resolve_sandbox_config_for_agent(
+                    config_data=config_data,
+                    agent_id=self.agent.name,
+                )
+
+            # Sandbox metadata is needed for sandbox-aware tools, including workflow
+            # entrypoint so workflow runtime can execute python nodes in sandbox.
+            if tool_name not in {"bash", "read", "write", "edit", "run_workflow"}:
+                return result
+
+            if not self._sandbox_context_resolved:
+                config_data = await self._load_config_data()
+                self._sandbox_context_cache = await resolve_sandbox_context(
+                    config_data=config_data,
+                    session_key=self._session_key,
+                    agent_id=self.agent.name,
+                    main_session_key=self._main_session_key,
+                    workspace_dir=self._workspace_dir,
+                )
+                self._sandbox_context_resolved = True
+            sandbox_ctx = self._sandbox_context_cache
+            if not sandbox_ctx:
+                return result
+
+            sandbox = BashSandboxConfig(
+                container_name=sandbox_ctx.container_name,
+                workspace_dir=sandbox_ctx.workspace_dir,
+                container_workdir=sandbox_ctx.container_workdir,
+                env=sandbox_ctx.docker.env,
+            )
+            result["extra"]["sandbox"] = {
+                **sandbox.model_dump(exclude_none=True),
+                "workspace_access": sandbox_ctx.workspace_access,
+                "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
+            }
+            elevated_cfg = getattr(self._sandbox_config_cache, "elevated", None)
+            if elevated_cfg and elevated_cfg.enabled:
+                elevated_tools = elevated_cfg.tools or ["bash"]
+                result["extra"]["sandbox_elevated"] = {
+                    "enabled": True,
+                    "tools": elevated_tools,
+                }
+            return result
+        except Exception as e:
+            log.warn("stream.sandbox.resolve_failed", {"tool": tool_name, "error": str(e)})
+            return result
+    
+    async def _handle_text_start(self, event: TextStartEvent) -> None:
+        """Handle text block start"""
+        log.info("stream.text.start", {"session_id": self.session_id})
+        self._last_visible_text = ""
+        self._callback_visible_text = ""
+
+        self.current_text_part = TextPart(
+            id=Identifier.create("part"),
+            sessionID=self.session_id,
+            messageID=self.assistant_message.id,
+            text="",
+            time=PartTime(start=int(datetime.now().timestamp() * 1000)),
+            metadata=event.metadata or {},
+        )
+        self.parts.append(self.current_text_part)
+
+        # Persist an empty placeholder immediately so the final stored part
+        # order matches the stream semantics. Without this, a tool part that
+        # starts after text streaming begins but before ``text-end`` would be
+        # stored earlier, and a completion-time refetch would reorder the UI as
+        # reasoning -> tool -> text instead of reasoning -> text -> tool.
+        await Message.store_part(
+            self.session_id,
+            self.assistant_message.id,
+            self.current_text_part,
+        )
+        
+        # Publish part created event (matches AegisOps Session.updatePart)
+        if self.event_publish_callback:
+            await self.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": self.current_text_part.id,
+                    "messageID": self.current_text_part.messageID,
+                    "sessionID": self.current_text_part.sessionID,
+                    "type": "text",
+                    "text": self.current_text_part.text,
+                    "time": {"start": self.current_text_part.time.start},
+                }
+            })
+    
+    async def _handle_text_delta(self, event: TextDeltaEvent) -> None:
+        """Handle text content delta with throttling to reduce network/render overhead"""
+        if self.current_text_part:
+            self.current_text_part.text += event.text
+            visible_text = self._sanitize_streaming_text_for_display(self.current_text_part.text)
+            visible_delta = self._compute_visible_delta(self._last_visible_text, visible_text)
+            
+            if len(self.current_text_part.text) <= 100 or len(self.current_text_part.text) % 100 < len(event.text):
+                log.debug("stream.text.delta", {
+                    "delta_length": len(event.text),
+                    "total_length": len(self.current_text_part.text),
+                })
+            
+            # Call text delta callback if provided (for CLI display). Callers append
+            # what they get, so measure from what they were already given: publishing
+            # is throttled, and headless runs have no publish callback at all.
+            if self.text_delta_callback:
+                callback_delta = self._appended_delta(self._callback_visible_text, visible_text)
+                self._callback_visible_text = visible_text
+                if callback_delta:
+                    await self.text_delta_callback(callback_delta)
+            
+            # Update metadata if provided
+            if event.metadata:
+                if self.current_text_part.metadata is None:
+                    self.current_text_part.metadata = {}
+                self.current_text_part.metadata.update(event.metadata)
+            
+            # Throttle event publishing to reduce network overhead and TUI render thrashing
+            # Only publish if enough time has passed since last event (50ms throttle)
+            # This dramatically improves TUI responsiveness during streaming
+            if self.event_publish_callback:
+                current_time = _time.time() * 1000
+                time_since_last = current_time - self._last_text_event_time
+                
+                # Always publish first few characters to show immediate feedback
+                should_publish = (
+                    len(self.current_text_part.text) <= 50 or  # First ~50 chars always publish
+                    time_since_last >= self._text_event_throttle_ms  # Or throttle interval passed
+                )
+                
+                if should_publish:
+                    self._last_text_event_time = current_time
+                    if len(self.current_text_part.text) <= 100 or len(self.current_text_part.text) % 100 < len(event.text):
+                        log.debug("stream.text.publishing_delta", {
+                            "delta_len": len(visible_delta),
+                            "part_id": self.current_text_part.id,
+                            "throttled": time_since_last < self._text_event_throttle_ms,
+                        })
+                    self._last_visible_text = visible_text
+                    await self.event_publish_callback("message.part.updated", {
+                        "part": {
+                            "id": self.current_text_part.id,
+                            "messageID": self.current_text_part.messageID,
+                            "sessionID": self.current_text_part.sessionID,
+                            "type": "text",
+                            "text": visible_text,
+                            "time": {"start": self.current_text_part.time.start},
+                        },
+                        "delta": visible_delta,
+                    })
+            else:
+                log.warn("stream.text.no_publish_callback", {})
+    
+    async def _handle_text_end(self, event: TextEndEvent) -> None:
+        """Handle text block end"""
+        if self.current_text_part:
+            self.current_text_part.text = self.current_text_part.text.rstrip()
+            
+            if event.metadata:
+                if self.current_text_part.metadata is None:
+                    self.current_text_part.metadata = {}
+                self.current_text_part.metadata.update(event.metadata)
+            
+            # Intercept text-embedded tool calls produced by models that hallucinate
+            # tool invocations as text rather than using the native API tool-calling
+            # mechanism.  Two formats are supported:
+            #   1. XML:  <tool_use>{"name":"...","input":{...}}</tool_use>
+            #   2. DSML: <｜DSML｜tool_calls>...</｜DSML｜tool_calls>
+            #   3. JSON: [{"tool_name":"...","parameters":{...}}]
+            # Parse, execute, and strip them so the conversation loop continues
+            # correctly and no raw markup/JSON appears in the UI.
+            raw_text = self.current_text_part.text
+            self._log_dsml_markers(raw_text, "text")
+            all_text_tool_calls: list[dict] = []
+            cleaned, literals = self._protect_dsml_literals(raw_text)
+
+            if (
+                "<tool_use>" in cleaned
+                or "<minimax:tool_call>" in cleaned
+                or self._contains_dsml_tool_markup(cleaned)
+            ):
+                cleaned, xml_calls = self._parse_xml_text_tool_calls(cleaned)
+                all_text_tool_calls.extend(xml_calls)
+
+            json_cleaned, json_calls = self._parse_json_text_tool_calls(cleaned)
+            if json_calls:
+                cleaned = json_cleaned
+                all_text_tool_calls.extend(json_calls)
+
+            self._restore_dsml_call_inputs(all_text_tool_calls, literals)
+            attempted_dsml = self._has_dsml_call_attempt(raw_text)
+            malformed_dsml = attempted_dsml and (
+                not self._dsml_tags_balanced(raw_text)
+                or not all_text_tool_calls
+                or self._has_invalid_dsml_block(raw_text)
+                or self._has_dsml_call_attempt(cleaned)
+            )
+            if malformed_dsml:
+                # Preserve the payload and following prose as inert evidence.
+                # Do not execute a partial batch or discard its complete calls.
+                cleaned, literals = self._protect_dsml_literals(raw_text)
+                cleaned = re.sub(
+                    r"<\s*/?\s*" + self._DSML_NAMESPACE_RE,
+                    lambda match: match.group().replace("<", "&lt;", 1),
+                    cleaned, flags=re.IGNORECASE,
+                )
+            cleaned = self._restore_dsml_literals(cleaned, literals)
+            if cleaned != raw_text:
+                self.current_text_part.text = cleaned
+
+            if all_text_tool_calls and not malformed_dsml:
+                log.warn("stream.text_tool_calls_detected", {
+                    "count": len(all_text_tool_calls),
+                    "names": [tc["name"] for tc in all_text_tool_calls],
+                    "session_id": self.session_id,
+                })
+                for tc in all_text_tool_calls:
+                    if not self._stop_tool_processing:
+                        await self._handle_tool_call(ToolCallEvent(
+                            tool_call_id=tc["id"],
+                            tool_name=tc["name"],
+                            input=tc["input"],
+                        ))
+                self._text_tool_calls_executed = True
+            elif (
+                "<tool_use>" in raw_text
+                or "<minimax:tool_call>" in raw_text
+                or self._contains_dsml_tool_markup(raw_text)
+            ):
+                log.warn("stream.text_tool_use_xml_stripped", {
+                    "session_id": self.session_id,
+                    "reason": "found XML tool-call markup but could not parse any valid tool calls",
+                })
+
+            self.current_text_part.text = self._sanitize_streaming_text_for_display(
+                self.current_text_part.text, final=True
+            )
+
+            # Release text held while a potential tag was incomplete, including
+            # inert malformed-call evidence, to append-only CLI consumers too.
+            if self.text_delta_callback:
+                final_delta = self._appended_delta(
+                    self._callback_visible_text, self.current_text_part.text
+                )
+                self._callback_visible_text = self.current_text_part.text
+                if final_delta:
+                    await self.text_delta_callback(final_delta)
+
+            # Update time
+            if self.current_text_part.time:
+                self.current_text_part.time.end = int(datetime.now().timestamp() * 1000)
+            
+            # Store the completed text part to database
+            await Message.store_part(self.session_id, self.assistant_message.id, self.current_text_part)
+            
+            # Publish final text part (matches AegisOps Session.updatePart)
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": self.current_text_part.id,
+                        "messageID": self.current_text_part.messageID,
+                        "sessionID": self.current_text_part.sessionID,
+                        "type": "text",
+                        "text": self.current_text_part.text,
+                        "time": {"start": self.current_text_part.time.start, "end": self.current_text_part.time.end},
+                    }
+                })
+            
+            log.debug("stream.text.end", {
+                "length": len(self.current_text_part.text),
+            })
+            
+            self.current_text_part = None
+            if malformed_dsml:
+                raise ValueError(
+                    "模型返回了不完整或无效的 DSML 工具调用，本段调用未执行。"
+                    "请重试并要求模型使用原生工具调用；残余文本已保留。"
+                )
+
+    async def persist_interrupted_parts(self) -> None:
+        """Store the text and reasoning streamed so far when the step is cancelled.
+
+        Text is written at ``text-end`` and reasoning at ``reasoning-end``. A
+        cancelled step (the stop button cancels its task) never reaches them,
+        so the stored text part stayed the empty placeholder from
+        ``text-start`` although the user had already seen the text. Keep what
+        was shown: the display-sanitized text, without running any tool call
+        embedded in it. The parts are taken before they are written, so a
+        write that was given up on is not attempted again.
+        """
+        now = int(datetime.now().timestamp() * 1000)
+        part, self.current_text_part = self.current_text_part, None
+        reasoning_parts = list(self.reasoning_parts.values())
+        self.reasoning_parts.clear()
+        if part is not None:
+            part.text = self._sanitize_streaming_text_for_display(part.text).rstrip()
+            if part.time and part.time.end is None:
+                part.time.end = now
+            await Message.store_part(self.session_id, self.assistant_message.id, part)
+        for reasoning in reasoning_parts:
+            reasoning.text = reasoning.text.strip()
+            if reasoning.time and reasoning.time.end is None:
+                reasoning.time.end = now
+            if reasoning.text:
+                await Message.store_part(self.session_id, self.assistant_message.id, reasoning)
+
+    def _should_run_tool_call_parallel(self, event: ToolCallEvent) -> bool:
+        """Return true for independent foreground subagent tool-calls."""
+        if event.tool_name not in {"delegate_task", "task"}:
+            return False
+        tool_input = event.input if isinstance(event.input, dict) else {}
+        if tool_input.get("run_in_background") is True:
+            return False
+        return bool(
+            tool_input.get("subagent_type")
+            or tool_input.get("category")
+            or tool_input.get("session_id")
+        )
+
+    def owns_current_parallel_tool_call(self) -> bool:
+        """True when the running task is one of *this* processor's siblings.
+
+        A child session inherits the context of the task its delegate_task
+        runs in, so a plain flag would make the child think its own inline
+        tools are parallel and keep its slot while a nested model call waits
+        for one. Comparing the owner keeps the answer local to each stream.
+        """
+        return parallel_tool_call_owner() is self._parallel_owner
+
+    def _parallel_tool_call_gate(self) -> Optional[asyncio.Semaphore]:
+        if self._max_parallel_subagents <= 0:
+            return None
+        if self._parallel_tool_gate is None:
+            self._parallel_tool_gate = asyncio.Semaphore(self._max_parallel_subagents)
+        return self._parallel_tool_gate
+
+    def _start_parallel_tool_call(self, event: ToolCallEvent) -> None:
+        if event.tool_call_id in self._parallel_tool_tasks:
+            return
+
+        gate = self._parallel_tool_call_gate()
+
+        async def _run() -> None:
+            ctx_reset = _PARALLEL_TOOL_CALL_OWNER.set(self._parallel_owner)
+            try:
+                await _run_guarded()
+            finally:
+                _PARALLEL_TOOL_CALL_OWNER.reset(ctx_reset)
+
+        async def _run_guarded() -> None:
+            if gate is None:
+                await self._handle_tool_call(event)
+                return
+            if gate.locked():
+                log.info("stream.parallel_tool_call.queued", {
+                    "session_id": self.session_id,
+                    "tool_call_id": event.tool_call_id,
+                    "tool_name": event.tool_name,
+                    "max_parallel": self._max_parallel_subagents,
+                })
+            try:
+                await gate.acquire()
+            except asyncio.CancelledError:
+                await self._finalize_queued_tool_call_interrupted(event)
+                raise
+            try:
+                if self.abort_event.is_set():
+                    # The turn was stopped while this sibling was still
+                    # waiting for a slot. Siblings that were already running
+                    # get aborted through their child sessions; this one must
+                    # not start a brand-new child session nobody will abort.
+                    await self._finalize_queued_tool_call_interrupted(event)
+                    return
+                await self._handle_tool_call(event)
+            finally:
+                gate.release()
+
+        task = asyncio.create_task(_run(), name=f"tool:{event.tool_name}:{event.tool_call_id}")
+        self._parallel_tool_tasks[event.tool_call_id] = task
+
+        def _cleanup(done_task: asyncio.Task[None]) -> None:
+            try:
+                done_task.result()
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                log.error("stream.parallel_tool_call.error", {
+                    "tool_call_id": event.tool_call_id,
+                    "tool_name": event.tool_name,
+                    "error": str(exc),
+                })
+
+        task.add_done_callback(_cleanup)
+
+    async def _finalize_queued_tool_call_interrupted(self, event: ToolCallEvent) -> None:
+        """Mark a never-started (queued) sibling tool-call as interrupted."""
+        tool_state = self.tool_calls.get(event.tool_call_id)
+        if tool_state is None:
+            tool_state = ToolCallState(
+                id=event.tool_call_id,
+                name=event.tool_name,
+                input=event.input,
+                part_id=Identifier.create("part"),
+                status="pending",
+            )
+            self.tool_calls[event.tool_call_id] = tool_state
+        if tool_state.status in ("completed", "error"):
+            return
+        await self._finalize_interrupted_tool_call(
+            tool_state=tool_state,
+            tool_name=event.tool_name,
+            tool_input=event.input if isinstance(event.input, dict) else {},
+            tool_call_id=event.tool_call_id,
+            tool_start_time=int(datetime.now().timestamp() * 1000),
+        )
+
+    async def _interrupt_deferred_sleep_calls(self, calls: List[ToolCallEvent]) -> None:
+        """Terminalize waits which never entered the tool execution pipeline."""
+        for call in calls:
+            tool_state = self.tool_calls.get(call.tool_call_id)
+            if tool_state is None:
+                tool_state = ToolCallState(
+                    id=call.tool_call_id,
+                    name=call.tool_name,
+                    input=call.input,
+                    part_id=Identifier.create("part"),
+                )
+                self.tool_calls[call.tool_call_id] = tool_state
+            if tool_state.status in ("completed", "error"):
+                continue
+            tool_state.input = call.input
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
+                tool_name=call.tool_name,
+                tool_input=call.input,
+                tool_call_id=call.tool_call_id,
+                tool_start_time=int(datetime.now().timestamp() * 1000),
+            )
+
+    async def drain_parallel_tool_calls(self, *, execute_deferred: bool = True) -> None:
+        """Join started tools; only start deferred waits after a successful stream."""
+        try:
+            if self._parallel_tool_tasks:
+                await asyncio.gather(*self._parallel_tool_tasks.values(), return_exceptions=True)
+        except BaseException:
+            calls, self._sleep_calls = self._sleep_calls, []
+            await self._interrupt_deferred_sleep_calls(calls)
+            raise
+
+        calls, self._sleep_calls = self._sleep_calls, []
+        if not execute_deferred:
+            await self._interrupt_deferred_sleep_calls(calls)
+            return
+
+        self._draining_sleep = True
+        try:
+            for index, call in enumerate(calls):
+                await self._handle_tool_call(call)
+        except BaseException:
+            # The active wait usually finalizes itself; also cover cancellation
+            # between publishing its running state and entering execution.
+            # Later calls were persisted as pending but never got to run.
+            await self._interrupt_deferred_sleep_calls(calls[index:])
+            raise
+        finally:
+            self._draining_sleep = False
+
+    @staticmethod
+    def _compute_visible_delta(previous: str, current: str) -> str:
+        if current.startswith(previous):
+            return current[len(previous):]
+        return current
+
+    @staticmethod
+    def _appended_delta(previous: str, current: str) -> str:
+        """Text to append for a reader that already holds ``previous``.
+
+        Sent text cannot be taken back: when the display text shrinks (a tool
+        tag becomes recognisable), only what follows the shared prefix goes out.
+        """
+        # Plain appends are the common case; scanning the whole history on every
+        # delta would make a long reply quadratic.
+        if current.startswith(previous):
+            return current[len(previous):]
+        return current[len(os.path.commonprefix([previous, current])):]
+
+    _DSML_NAMESPACE_RE = r"(?:(?:\|\s*){1,2}DSML(?:\s*\|){1,2}|(?:｜\s*){1,2}DSML(?:\s*｜){1,2})"
+    _DSML_TAG_RE = re.compile(
+        r"<\s*(/?)\s*" + _DSML_NAMESPACE_RE + r"\s*([A-Za-z_][\w]*)\b([^>]*)>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_COMPLETE_BLOCK_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls|tool_result)\b[^>]*>"
+        r".*?"
+        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls|tool_result)\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_COMPLETE_INVOKE_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*invoke\b[^>]*>"
+        r".*?"
+        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*invoke\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_OPEN_BLOCK_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls|tool_result|invoke)\b",
+        re.IGNORECASE,
+    )
+
+    def _log_dsml_markers(self, text: str, channel: str) -> None:
+        # Only structural spelling is useful for diagnosing new variants.
+        markers = list(dict.fromkeys(re.findall(
+            r"<\s*/?\s*[|｜\s]*DSML[|｜\s]*[A-Za-z_]+",
+            text, re.IGNORECASE,
+        )))[:8]
+        if markers:
+            log.warn("stream.dsml_markup_detected", {
+                "session_id": self.session_id,
+                "channel": channel,
+                "markers": [marker[:120] for marker in markers],
+            })
+
+    @staticmethod
+    def _protect_dsml_literals(text: str) -> tuple[str, dict[str, str]]:
+        """Keep Markdown examples out of both execution and display filtering.
+
+        Unclosed code spans/fences are protected too while streaming. Only
+        spans containing DSML need masking; other fallback formats retain
+        their existing behavior.
+        """
+        prefix = "\x00dsml_literal_"
+        while prefix in text:
+            prefix += "_"
+        literals: dict[str, str] = {}
+        pattern = re.compile(
+            r"(?m:^[ \t]{0,3}(?P<fence>`{3,}|~{3,})[^\n]*\n"
+            r"[\s\S]*?(?:^[ \t]{0,3}(?P=fence)[ \t]*(?:\n|$)|\Z))"
+            r"|(?P<ticks>`+)(?:(?!(?P=ticks))[\s\S])*?(?:(?P=ticks)|\Z)"
+            r"|(?m:^[ \t]*>[^\n]*(?:\n|$))"
+            r"|\\<[^>]*(?:>|$)"
+        )
+
+        def protect(match: re.Match[str]) -> str:
+            literal = match.group()
+            if "DSML" not in literal.upper() and not re.search(r"[|｜]", literal):
+                return literal
+            key = f"{prefix}{len(literals)}\x00"
+            literals[key] = literal
+            return key
+
+        return pattern.sub(protect, text), literals
+
+    @staticmethod
+    def _restore_dsml_literals(text: str, literals: dict[str, str]) -> str:
+        for key, value in literals.items():
+            text = text.replace(key, value)
+        return text
+
+    @classmethod
+    def _restore_dsml_call_inputs(cls, calls: list[dict], literals: dict[str, str]) -> None:
+        # A real write call can contain Markdown examples in its arguments.
+        def restore(value: Any) -> Any:
+            if isinstance(value, str):
+                return cls._restore_dsml_literals(value, literals)
+            if isinstance(value, list):
+                return [restore(item) for item in value]
+            if isinstance(value, dict):
+                return {key: restore(item) for key, item in value.items()}
+            return value
+
+        for call in calls:
+            call["input"] = restore(call["input"])
+
+    def _has_invalid_dsml_block(self, text: str) -> bool:
+        text, _ = self._protect_dsml_literals(text)
+        for pattern in (self._DSML_COMPLETE_BLOCK_RE, self._DSML_COMPLETE_INVOKE_RE):
+            for match in pattern.finditer(text):
+                block = match.group()
+                if self._has_dsml_call_attempt(block) and not self._parse_dsml_text_tool_calls(block):
+                    return True
+        return False
+
+    @classmethod
+    def _dsml_tags_balanced(cls, text: str) -> bool:
+        text, _ = cls._protect_dsml_literals(text)
+        stack: list[str] = []
+        for match in cls._DSML_TAG_RE.finditer(text):
+            name = match.group(2).lower()
+            if match.group(1):
+                if not stack or stack.pop() != name:
+                    return False
+            else:
+                stack.append(name)
+        return not stack and not re.search(
+            r"<\s*/?\s*" + cls._DSML_NAMESPACE_RE + r"[^>]*$", text, re.IGNORECASE
+        )
+
+    @classmethod
+    def _has_dsml_call_attempt(cls, text: str) -> bool:
+        text, _ = cls._protect_dsml_literals(text)
+        if re.search(
+            r"<\s*" + cls._DSML_NAMESPACE_RE + r"\s*invoke\b"
+            r"|(?m:^[ \t]*<\s*" + cls._DSML_NAMESPACE_RE
+            + r"\s*(?:tool_use|tool_calls|calls|tool_call|function_calls)\b)",
+            text, re.IGNORECASE,
+        ):
+            return True
+        normalized = cls._normalize_dsml_tags(text)
+        return bool(re.search(
+            r"<dsml:invoke\b|<dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)\b[^>]*>\s*[\[{]"
+            r"|(?m:^[ \t]*<dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)\b)",
+            normalized, re.IGNORECASE,
+        ))
+
+    @classmethod
+    def _contains_dsml_tool_markup(cls, text: str) -> bool:
+        text, _ = cls._protect_dsml_literals(text)
+        return bool(cls._DSML_OPEN_BLOCK_RE.search(text))
+
+    @classmethod
+    def _normalize_dsml_tags(cls, text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            closing = "/" if match.group(1) else ""
+            tag_name = match.group(2).lower()
+            attrs = "" if closing else match.group(3)
+            return f"<{closing}dsml:{tag_name}{attrs}>"
+
+        return cls._DSML_TAG_RE.sub(replace, text)
+
+    @classmethod
+    def _strip_dsml_blocks(cls, text: str) -> str:
+        text = cls._DSML_COMPLETE_BLOCK_RE.sub("", text)
+        return cls._DSML_COMPLETE_INVOKE_RE.sub("", text)
+
+    @staticmethod
+    def _sanitize_streaming_text_for_display(text: str, *, final: bool = False) -> str:
+        visible, literals = StreamProcessor._protect_dsml_literals(text)
+
+        visible = StreamProcessor._strip_dsml_blocks(visible)
+
+        block_patterns = [
+            re.compile(r"<tool_use>.*?</tool_use>", re.DOTALL),
+            re.compile(r"<tool_result>.*?</tool_result>", re.DOTALL),
+            re.compile(r"<minimax:tool_call>.*?</minimax:tool_call>", re.DOTALL),
+        ]
+        for pattern in block_patterns:
+            visible = pattern.sub("", visible)
+
+        open_blocks = [
+            ("<tool_use>", "</tool_use>"),
+            ("<tool_result>", "</tool_result>"),
+            ("<minimax:tool_call>", "</minimax:tool_call>"),
+        ]
+        truncate_at: Optional[int] = None
+        for start_tag, end_tag in open_blocks:
+            start = visible.find(start_tag)
+            while start != -1:
+                end = visible.find(end_tag, start + len(start_tag))
+                if end == -1:
+                    truncate_at = start if truncate_at is None else min(truncate_at, start)
+                    break
+                start = visible.find(start_tag, end + len(end_tag))
+
+        dsml_start = StreamProcessor._DSML_OPEN_BLOCK_RE.search(visible)
+        if dsml_start and not final:
+            truncate_at = dsml_start.start() if truncate_at is None else min(truncate_at, dsml_start.start())
+
+        if truncate_at is not None:
+            visible = visible[:truncate_at]
+
+        partial = re.search(r"<[^<>]*$", visible)
+        if partial:
+            suffix = partial.group()
+            candidate = re.sub(r"[\s/|｜]", "", suffix[1:]).upper()
+            if not final and (candidate.startswith("DSML") or not candidate or "DSML".startswith(candidate)):
+                visible = visible[:partial.start()]
+
+        visible = re.sub(r"\n{3,}", "\n\n", visible)
+        return StreamProcessor._restore_dsml_literals(visible.rstrip(), literals)
+    
+    def _parse_xml_text_tool_calls(self, text: str) -> tuple[str, list[dict]]:
+        """
+        Detect and extract <tool_use> XML blocks from text content.
+
+        Supports two body formats inside <tool_use>...</tool_use>:
+          - JSON:  {"name": "...", "input": {...}}  (various key aliases)
+          - XML:   <tool_name>...</tool_name> <parameters>...</parameters>
+
+        Returns:
+            (cleaned_text, tool_calls)
+        """
+        text, literals = self._protect_dsml_literals(text)
+        tool_calls: list[dict] = []
+
+        tool_use_re = re.compile(r'<tool_use>(.*?)</tool_use>', re.DOTALL)
+        minimax_tool_call_re = re.compile(
+            r'<minimax:tool_call>(.*?)</minimax:tool_call>',
+            re.DOTALL,
+        )
+        tool_result_re = re.compile(r'<tool_result>.*?</tool_result>', re.DOTALL)
+
+        for match in tool_use_re.finditer(text):
+            body = match.group(1).strip()
+            parsed: dict | None = None
+
+            # Try JSON body first
+            try:
+                data = json.loads(body)
+                name = next(
+                    (data[k] for k in ("name", "tool_name", "tool") if k in data and data[k]),
+                    None,
+                )
+                raw_input = next(
+                    (data[k] for k in ("input", "parameters", "arguments") if k in data),
+                    {},
+                )
+                if isinstance(raw_input, str):
+                    try:
+                        raw_input = json.loads(raw_input)
+                    except Exception:
+                        raw_input = {}
+                if not isinstance(raw_input, dict):
+                    raw_input = {}
+                if name:
+                    parsed = {"name": str(name), "input": raw_input}
+            except (json.JSONDecodeError, ValueError):
+                pass
+
+            # Fall back to XML sub-tags: <tool_name>...</tool_name>
+            if not parsed:
+                name_match = re.search(r'<tool_name>(.*?)</tool_name>', body, re.DOTALL)
+                params_match = re.search(r'<parameters>(.*?)</parameters>', body, re.DOTALL)
+                if name_match:
+                    name = name_match.group(1).strip()
+                    params_raw = params_match.group(1).strip() if params_match else "{}"
+                    try:
+                        raw_input = json.loads(params_raw)
+                    except (json.JSONDecodeError, ValueError):
+                        raw_input = {}
+                    parsed = {"name": name, "input": raw_input}
+
+            if parsed:
+                tool_calls.append({
+                    "id": Identifier.create("call"),
+                    "name": parsed["name"],
+                    "input": parsed["input"],
+                })
+
+        for match in minimax_tool_call_re.finditer(text):
+            body = match.group(1).strip()
+            invoke_match = re.search(r'<invoke\s+name="([^"]+)">(.*?)</invoke>', body, re.DOTALL)
+            if not invoke_match:
+                continue
+
+            name = invoke_match.group(1).strip()
+            invoke_body = invoke_match.group(2)
+            raw_input: dict[str, object] = {}
+
+            for param_match in re.finditer(
+                r'<parameter\s+name="([^"]+)">(.*?)</parameter>',
+                invoke_body,
+                re.DOTALL,
+            ):
+                param_name = param_match.group(1).strip()
+                param_value = param_match.group(2).strip()
+
+                parsed_value: object = param_value
+                if param_value:
+                    try:
+                        parsed_value = json.loads(param_value)
+                    except (json.JSONDecodeError, ValueError):
+                        parsed_value = param_value
+
+                raw_input[param_name] = parsed_value
+
+            if name:
+                tool_calls.append({
+                    "id": Identifier.create("call"),
+                    "name": name,
+                    "input": raw_input,
+                })
+
+        dsml_calls = self._parse_dsml_text_tool_calls(text)
+        tool_calls.extend(dsml_calls)
+
+        # Strip <tool_use> and <tool_result> blocks from visible text
+        cleaned = tool_use_re.sub("", text)
+        cleaned = minimax_tool_call_re.sub("", cleaned)
+        cleaned = tool_result_re.sub("", cleaned)
+        cleaned = self._strip_dsml_blocks(cleaned)
+        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
+
+        self._restore_dsml_call_inputs(tool_calls, literals)
+        return self._restore_dsml_literals(cleaned, literals), tool_calls
+
+    def _parse_dsml_text_tool_calls(self, text: str) -> list[dict]:
+        """Extract tool calls from DeepSeek-style DSML text blocks."""
+        text, literals = self._protect_dsml_literals(text)
+        normalized = self._normalize_dsml_tags(text)
+        tool_calls: list[dict] = []
+
+        for match in re.finditer(
+            r"<dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)\b[^>]*>(.*?)</dsml:(?:tool_use|tool_calls|calls|tool_call|function_calls)>",
+            normalized,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            body = match.group(1).strip()
+            if not body or body[:1] not in "{[":
+                continue
+
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            if isinstance(data, dict):
+                candidates: list[Any] = [data]
+                if isinstance(data.get("tool_calls"), list):
+                    candidates = data["tool_calls"]
+            elif isinstance(data, list):
+                candidates = data
+            else:
+                candidates = []
+
+            for item in candidates:
+                parsed = self._coerce_text_tool_call_dict(item)
+                if parsed:
+                    tool_calls.append(parsed)
+
+        for match in re.finditer(
+            r"<dsml:invoke\b([^>]*)>(.*?)</dsml:invoke>",
+            normalized,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            attrs = self._parse_xml_attrs(match.group(1))
+            name = str(attrs.get("name") or "").strip()
+            if not name:
+                continue
+
+            raw_input: dict[str, Any] = {}
+            invoke_body = match.group(2)
+            for param_match in re.finditer(
+                r"<dsml:parameter\b([^>]*)>(.*?)</dsml:parameter>",
+                invoke_body,
+                re.DOTALL | re.IGNORECASE,
+            ):
+                param_attrs = self._parse_xml_attrs(param_match.group(1))
+                param_name = str(param_attrs.get("name") or "").strip()
+                if not param_name:
+                    continue
+
+                param_value = param_match.group(2).strip()
+                parsed_value: Any = param_value
+                if str(param_attrs.get("string") or "").lower() != "true" and param_value:
+                    try:
+                        parsed_value = json.loads(param_value)
+                    except (json.JSONDecodeError, ValueError):
+                        parsed_value = param_value
+                raw_input[param_name] = parsed_value
+
+            tool_calls.append({
+                "id": Identifier.create("call"),
+                "name": name,
+                "input": raw_input,
+            })
+
+        self._restore_dsml_call_inputs(tool_calls, literals)
+        return tool_calls
+
+    @staticmethod
+    def _parse_xml_attrs(raw_attrs: str) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        for match in re.finditer(r"([A-Za-z_][\w:-]*)\s*=\s*(\"([^\"]*)\"|'([^']*)')", raw_attrs):
+            attrs[match.group(1)] = match.group(3) if match.group(3) is not None else match.group(4)
+        return attrs
+
+    @staticmethod
+    def _coerce_text_tool_call_dict(data: Any) -> Optional[dict]:
+        if not isinstance(data, dict):
+            return None
+
+        function_data = data.get("function") if isinstance(data.get("function"), dict) else {}
+        name = next(
+            (
+                value for value in (
+                    data.get("name"),
+                    data.get("tool_name"),
+                    data.get("tool"),
+                    function_data.get("name"),
+                )
+                if value
+            ),
+            None,
+        )
+        if not isinstance(name, str) or not name.strip():
+            return None
+
+        raw_input = next(
+            (
+                value for value in (
+                    data.get("input"),
+                    data.get("parameters"),
+                    data.get("arguments"),
+                    function_data.get("arguments"),
+                )
+                if value is not None
+            ),
+            {},
+        )
+        if isinstance(raw_input, str):
+            try:
+                raw_input = json.loads(raw_input)
+            except (json.JSONDecodeError, ValueError):
+                raw_input = {}
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+
+        return {
+            "id": Identifier.create("call"),
+            "name": name.strip(),
+            "input": raw_input,
+        }
+
+    def _parse_json_text_tool_calls(self, text: str) -> tuple[str, list[dict]]:
+        """
+        Detect and extract JSON-array tool calls from text content.
+
+        Models sometimes hallucinate tool calls as inline JSON arrays:
+          [{"tool_name": "__mcp_web_search", "parameters": {"keyword": "..."}}]
+
+        Uses bracket-matching to correctly handle nested braces inside
+        parameter objects, then validates each candidate with json.loads.
+
+        Returns:
+            (cleaned_text, tool_calls)
+        """
+        tool_calls: list[dict] = []
+        spans_to_remove: list[tuple[int, int]] = []
+
+        i = 0
+        while i < len(text):
+            start = text.find("[", i)
+            if start == -1:
+                break
+
+            peek_end = min(start + 500, len(text))
+            peek = text[start:peek_end]
+            if not re.search(r'"(?:tool_name|name|tool)"\s*:', peek):
+                i = start + 1
+                continue
+
+            end = self._find_matching_bracket(text, start)
+            if end == -1:
+                i = start + 1
+                continue
+
+            candidate = text[start:end + 1]
+            try:
+                arr = json.loads(candidate)
+            except (json.JSONDecodeError, ValueError):
+                i = end + 1
+                continue
+
+            if not isinstance(arr, list) or not arr:
+                i = end + 1
+                continue
+
+            parsed_calls: list[dict] = []
+            for item in arr:
+                if not isinstance(item, dict):
+                    continue
+                name = next(
+                    (item[k] for k in ("tool_name", "name", "tool") if k in item and item[k]),
+                    None,
+                )
+                if not name or not isinstance(name, str):
+                    continue
+                raw_input = next(
+                    (item[k] for k in ("parameters", "input", "arguments") if k in item),
+                    {},
+                )
+                if isinstance(raw_input, str):
+                    try:
+                        raw_input = json.loads(raw_input)
+                    except Exception:
+                        raw_input = {}
+                if not isinstance(raw_input, dict):
+                    raw_input = {}
+                parsed_calls.append({
+                    "id": Identifier.create("call"),
+                    "name": name,
+                    "input": raw_input,
+                })
+
+            if parsed_calls:
+                tool_calls.extend(parsed_calls)
+                spans_to_remove.append((start, end + 1))
+
+            i = end + 1
+
+        if not spans_to_remove:
+            return text, tool_calls
+
+        result = text
+        for s, e in reversed(spans_to_remove):
+            result = result[:s] + result[e:]
+        result = re.sub(r'\n{3,}', '\n\n', result).strip()
+        return result, tool_calls
+
+    @staticmethod
+    def _find_matching_bracket(text: str, start: int) -> int:
+        """Find the position of ] that closes [ at *start*, respecting strings."""
+        depth = 0
+        in_string = False
+        i = start
+        while i < len(text):
+            ch = text[i]
+            if in_string:
+                if ch == '\\':
+                    i += 2
+                    continue
+                if ch == '"':
+                    in_string = False
+            else:
+                if ch == '"':
+                    in_string = True
+                elif ch == '[':
+                    depth += 1
+                elif ch == ']':
+                    depth -= 1
+                    if depth == 0:
+                        return i
+            i += 1
+        return -1
+
+    def get_text_content(self) -> str:
+        """Get all text content from parts"""
+        text_parts = [p for p in self.parts if isinstance(p, TextPart)]
+        return "".join(p.text for p in text_parts)
+    
+    def get_reasoning_content(self) -> str:
+        """Get all reasoning content from parts"""
+        reasoning_parts = [p for p in self.parts if isinstance(p, ReasoningPart)]
+        return "".join(p.text for p in reasoning_parts)
+    
+    def has_tool_calls(self) -> bool:
+        """Check if there are any tool calls"""
+        return len(self.tool_calls) > 0
+    
+    def get_finish_reason(self) -> str:
+        """Get finish reason"""
+        if self.finish_reason:
+            return self.finish_reason
+        
+        # Infer from state
+        if self.has_tool_calls():
+            return "tool-calls"
+        
+        return "stop"

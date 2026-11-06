@@ -1,0 +1,319 @@
+"""
+Todo management
+
+Manages todo items for sessions.
+Based on AegisOps' ported src/session/todo.ts
+"""
+
+from typing import List, Literal, Optional
+from pydantic import BaseModel, Field
+from aegisops.bus.bus_event import BusEvent
+from aegisops.bus.bus import Bus
+from aegisops.storage.storage import Storage
+from aegisops.utils.log import Log
+
+
+log = Log.create(service="session.todo")
+
+
+# Todo status types
+TodoStatus = Literal["pending", "in_progress", "completed", "cancelled"]
+
+# Todo priority types
+TodoPriority = Literal["high", "medium", "low"]
+
+
+class TodoInfo(BaseModel):
+    """
+    Todo item information
+    
+    Matches TypeScript Todo.Info from todo.ts
+    """
+    id: str = Field(..., description="Unique identifier for the todo item")
+    content: str = Field(..., description="Brief description of the task")
+    activeForm: Optional[str] = Field(
+        None,
+        description="Optional active/progressive form used while the task is in progress",
+    )
+    status: TodoStatus = Field(
+        "pending",
+        description="Current status of the task: pending, in_progress, completed, cancelled"
+    )
+    priority: TodoPriority = Field(
+        "medium",
+        description="Priority level of the task: high, medium, low"
+    )
+
+
+class TodoUpdateEventProps(BaseModel):
+    """Properties for todo.updated event"""
+    session_id: str = Field(..., alias="sessionID")
+    todos: List[TodoInfo]
+
+
+class Todo:
+    """
+    Todo management namespace
+    
+    Mirrors original AegisOps Todo namespace from todo.ts
+    
+    Example:
+        >>> # Create todos
+        >>> todos = [
+        ...     TodoInfo(id="1", content="Implement feature X", status="in_progress"),
+        ...     TodoInfo(id="2", content="Write tests", status="pending"),
+        ... ]
+        >>> 
+        >>> # Update session todos
+        >>> await Todo.update(session_id="abc123", todos=todos)
+        >>> 
+        >>> # Get session todos
+        >>> todos = await Todo.get(session_id="abc123")
+    """
+    
+    # Define event
+    Updated = BusEvent.define("todo.updated", TodoUpdateEventProps)
+    
+    @classmethod
+    async def update(cls, session_id: str, todos: List[TodoInfo]) -> None:
+        """
+        Update todos for a session
+        
+        Matches TypeScript Todo.update()
+        
+        Args:
+            session_id: Session ID
+            todos: List of todo items
+        """
+        # Validate todos
+        validated_todos = [
+            todo if isinstance(todo, TodoInfo) else TodoInfo(**todo)
+            for todo in todos
+        ]
+        
+        await Storage.set(
+            f"todo:{session_id}",
+            [todo.model_dump(exclude_none=True) for todo in validated_todos],
+            "todo",
+        )
+        await Bus.publish(cls.Updated, {
+            "sessionID": session_id,
+            "todos": validated_todos,
+        })
+        try:
+            from aegisops.server.routes.event import publish_event
+
+            await publish_event("todo.updated", {
+                "sessionID": session_id,
+                "todos": [todo.model_dump(exclude_none=True) for todo in validated_todos],
+            })
+        except Exception as exc:
+            log.warn("todo.sse_publish_failed", {
+                "session_id": session_id,
+                "error": str(exc),
+            })
+        log.info("todo.updated", {
+            "session_id": session_id,
+            "count": len(validated_todos),
+        })
+
+    @classmethod
+    async def update_active(
+        cls,
+        session_id: str,
+        todos: List[TodoInfo],
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> None:
+        """Update todos only while the owning session remains active."""
+
+        from aegisops.session.session import Session
+
+        await Session.run_active_write(
+            session_id,
+            lambda: cls.update(session_id, todos),
+            expected_generation=expected_generation,
+        )
+    
+    @staticmethod
+    def has_in_progress(todos: Optional[List[TodoInfo]]) -> bool:
+        return bool(todos) and any(todo.status == "in_progress" for todo in todos)
+
+    @classmethod
+    def settle(
+        cls,
+        todos: Optional[List[TodoInfo]],
+        *,
+        finished: bool,
+    ) -> Optional[List[TodoInfo]]:
+        """The list to keep once the agent's run has ended, or None to leave it.
+
+        Agents often end their turn on the last step without marking it
+        completed, and the progress panel then showed that step as in progress
+        for good.  When the agent finished the work itself and nothing is left
+        pending, its in-progress items were the final steps: they are completed
+        and the now fully closed list is cleared, as the todo tool does.  When
+        work is still pending, or the run stopped short of finishing, they go
+        back to pending so the plan carries over to the next turn.
+        """
+        if not cls.has_in_progress(todos):
+            return None
+        if finished and not any(todo.status == "pending" for todo in todos):
+            return []
+        return [
+            todo.model_copy(update={"status": "pending"})
+            if todo.status == "in_progress"
+            else todo
+            for todo in todos
+        ]
+
+    @classmethod
+    async def get(cls, session_id: str) -> List[TodoInfo]:
+        """
+        Get todos for a session
+        
+        Matches TypeScript Todo.get()
+        
+        Args:
+            session_id: Session ID
+            
+        Returns:
+            List of todo items (empty list if none)
+        """
+        return await cls.get_snapshot(session_id) or []
+
+    @classmethod
+    async def get_snapshot(cls, session_id: str) -> Optional[List[TodoInfo]]:
+        """Read todos, distinguishing an explicit clear from missing legacy state."""
+        try:
+            # Storage.get returns raw dict/list data, not a Pydantic model
+            data = await Storage.get(f"todo:{session_id}")
+            if isinstance(data, list):
+                return [TodoInfo(**item) if isinstance(item, dict) else item for item in data]
+            return None
+        except Exception as e:
+            log.warn("todo.get.error", {
+                "session_id": session_id,
+                "error": str(e),
+            })
+            return None
+    
+    @classmethod
+    async def add(cls, session_id: str, todo: TodoInfo) -> List[TodoInfo]:
+        """
+        Add a single todo to session
+        
+        Args:
+            session_id: Session ID
+            todo: Todo item to add
+            
+        Returns:
+            Updated list of todos
+        """
+        todos = await cls.get(session_id)
+        todos.append(todo)
+        await cls.update(session_id, todos)
+        return todos
+    
+    @classmethod
+    async def remove(cls, session_id: str, todo_id: str) -> List[TodoInfo]:
+        """
+        Remove a todo from session
+        
+        Args:
+            session_id: Session ID
+            todo_id: Todo ID to remove
+            
+        Returns:
+            Updated list of todos
+        """
+        todos = await cls.get(session_id)
+        todos = [t for t in todos if t.id != todo_id]
+        await cls.update(session_id, todos)
+        return todos
+    
+    @classmethod
+    async def update_status(
+        cls,
+        session_id: str,
+        todo_id: str,
+        status: TodoStatus,
+    ) -> Optional[TodoInfo]:
+        """
+        Update status of a specific todo
+        
+        Args:
+            session_id: Session ID
+            todo_id: Todo ID
+            status: New status
+            
+        Returns:
+            Updated todo or None if not found
+        """
+        todos = await cls.get(session_id)
+        
+        for todo in todos:
+            if todo.id == todo_id:
+                todo.status = status
+                await cls.update(session_id, todos)
+                log.info("todo.status_updated", {
+                    "session_id": session_id,
+                    "todo_id": todo_id,
+                    "status": status,
+                })
+                return todo
+        
+        log.warn("todo.not_found", {
+            "session_id": session_id,
+            "todo_id": todo_id,
+        })
+        return None
+    
+    @classmethod
+    async def clear(cls, session_id: str) -> None:
+        """
+        Clear all todos for a session
+        
+        Args:
+            session_id: Session ID
+        """
+        await cls.update(session_id, [])
+        log.info("todo.cleared", {"session_id": session_id})
+    
+    @classmethod
+    async def get_by_status(
+        cls,
+        session_id: str,
+        status: TodoStatus,
+    ) -> List[TodoInfo]:
+        """
+        Get todos filtered by status
+        
+        Args:
+            session_id: Session ID
+            status: Status to filter by
+            
+        Returns:
+            Filtered list of todos
+        """
+        todos = await cls.get(session_id)
+        return [t for t in todos if t.status == status]
+    
+    @classmethod
+    async def get_by_priority(
+        cls,
+        session_id: str,
+        priority: TodoPriority,
+    ) -> List[TodoInfo]:
+        """
+        Get todos filtered by priority
+        
+        Args:
+            session_id: Session ID
+            priority: Priority to filter by
+            
+        Returns:
+            Filtered list of todos
+        """
+        todos = await cls.get(session_id)
+        return [t for t in todos if t.priority == priority]

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>御枢 · AegisOps</title>
+    <script>
+      (function () {
+        try {
+          // Mirrors ThemeContext: an explicit choice wins, otherwise follow the OS.
+          var mode = localStorage.getItem('aegisops_theme_mode');
+          var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+          if (mode === 'dark' || (mode !== 'light' && prefersDark)) {
+            document.documentElement.classList.add('dark');
+            document.documentElement.style.colorScheme = 'dark';
+          } else {
+            document.documentElement.style.colorScheme = 'light';
+          }
+        } catch (error) {
+          document.documentElement.style.colorScheme = 'light';
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

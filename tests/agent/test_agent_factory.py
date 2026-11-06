@@ -1,0 +1,1077 @@
+"""
+Agent Factory 测试
+
+覆盖 aegisops.agent.agent_factory 的核心逻辑：
+1. YAML 加载（load_agent / scan_and_load）
+2. tools / legacy permission 兼容展开
+3. Prompt 解析（prompt.md / prompt_builder.py）
+4. 动态 Prompt 注入（inject_dynamic_prompts）
+5. Plugin YAML CRUD（read / update / delete）
+6. prompt_metadata 解析
+7. 子目录格式 plugin agent（每 agent 一个文件夹）
+"""
+
+from __future__ import annotations
+
+import textwrap
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+import aegisops.agent.agent_factory as _factory_module
+from aegisops.agent.agent_factory import (
+    load_agent,
+    scan_and_load,
+    inject_dynamic_prompts,
+    yaml_to_agent_info,
+    find_yaml_agent,
+    read_yaml_agent,
+    update_yaml_agent,
+    delete_yaml_agent,
+    _parse_prompt_metadata,
+)
+from aegisops.agent.agent import AgentInfo, AgentModel, AgentPromptMetadata
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _write_agent_dir(tmp_path: Path, yaml_text: str, prompt_text: str | None = None) -> Path:
+    """Create a minimal agent folder under tmp_path."""
+    agent_dir = tmp_path / "test_agent"
+    agent_dir.mkdir()
+    (agent_dir / "agent.yaml").write_text(textwrap.dedent(yaml_text), encoding="utf-8")
+    if prompt_text is not None:
+        (agent_dir / "prompt.md").write_text(textwrap.dedent(prompt_text), encoding="utf-8")
+    return agent_dir
+
+
+# ===========================================================================
+# _parse_prompt_metadata
+# ===========================================================================
+
+class TestSystemAgentGroups:
+    def test_all_discoverable_shipped_agents_have_native_nonempty_group(self, monkeypatch):
+        monkeypatch.setattr(_factory_module, "resolve_agent_initial_tools", lambda *args, **kwargs: ([], []))
+        loaded = []
+        for root in _factory_module._SYSTEM_AGENT_ROOTS:
+            for folder in _factory_module._iter_agent_dirs(root):
+                agent = load_agent(folder)
+                if agent is None:
+                    continue
+                loaded.append(agent)
+                assert agent.group, folder
+                assert agent.group_readonly is True, folder
+        assert len(loaded) >= 18
+
+    def test_native_flag_and_yaml_cannot_grant_or_remove_group_lock(self, tmp_path, monkeypatch):
+        folder = _write_agent_dir(tmp_path, "name: custom\ngroup: Custom\ngroup_readonly: true\n")
+        assert load_agent(folder, native=True).group_readonly is False
+        assert yaml_to_agent_info({"name": "custom", "group_readonly": True}, folder / "agent.yaml").group_readonly is False
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (tmp_path,))
+        (folder / "agent.yaml").write_text("name: shipped\ngroup: Fixed\ngroup_readonly: false\n")
+        assert load_agent(folder, native=False).group_readonly is True
+        assert yaml_to_agent_info({"name": "shipped", "group_readonly": False}, folder / "agent.yaml").group_readonly is True
+
+    def test_source_anchor_does_not_follow_cwd_or_discovery_directory(self, tmp_path, monkeypatch):
+        folder = _write_agent_dir(tmp_path, "name: custom\ngroup: Custom\n")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(_factory_module, "_BUILTIN_AGENTS_DIR", tmp_path)
+        assert load_agent(folder, native=True).group_readonly is False
+        package_root = Path(_factory_module.__file__).resolve().parent / "agents"
+        actual = next(package_root.glob("*/agent.yaml"))
+        assert _factory_module.is_system_agent_definition(actual) is True
+
+    def test_selected_user_definition_remains_writable_over_shipped_bundle(self, tmp_path, monkeypatch):
+        project = tmp_path / "installation"
+        shipped = project / ".aegisops" / "plugins" / "agents"
+        user = tmp_path / "user-agents"
+        for root in (shipped, user):
+            folder = root / "shared"
+            folder.mkdir(parents=True)
+            (folder / "agent.yaml").write_text("name: shared\ngroup: Original\n")
+        monkeypatch.setattr(_factory_module, "_BUILTIN_AGENTS_DIR", tmp_path / "absent")
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", user)
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (shipped,))
+        monkeypatch.chdir(project)
+        assert scan_and_load()["shared"].group_readonly is False
+        (user / "shared" / "agent.yaml").unlink()
+        assert scan_and_load()["shared"].group_readonly is True
+
+    @pytest.mark.parametrize("group", ["Changed", "", None])
+    def test_yaml_writer_rejects_locked_group_before_prompt_side_effect(self, tmp_path, monkeypatch, group):
+        folder = _write_agent_dir(tmp_path, "name: test_agent\ngroup: Fixed\n", "Original prompt")
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", tmp_path)
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (tmp_path,))
+        before = {path: path.read_bytes() for path in folder.iterdir()}
+        assert update_yaml_agent("test_agent", {"group": group, "prompt": "Must not write"}) is False
+        assert {path: path.read_bytes() for path in folder.iterdir()} == before
+        assert update_yaml_agent("test_agent", {"group": "Fixed", "description": "Ordinary edit"}) is True
+        assert read_yaml_agent("test_agent")["group"] == "Fixed"
+        assert read_yaml_agent("test_agent")["description"] == "Ordinary edit"
+
+    def test_symlinked_external_source_is_not_shipped(self, tmp_path, monkeypatch):
+        shipped = tmp_path / "shipped"
+        folder = shipped / "alias"
+        folder.mkdir(parents=True)
+        source = tmp_path / "user.yaml"
+        source.write_text("name: custom\ngroup: Custom\n")
+        (folder / "agent.yaml").symlink_to(source)
+        monkeypatch.setattr(_factory_module, "_SYSTEM_AGENT_ROOTS", (shipped,))
+        assert load_agent(folder, native=True).group_readonly is False
+
+
+class TestParsePromptMetadata:
+
+    def test_returns_none_when_missing(self):
+        assert _parse_prompt_metadata({}) is None
+
+    def test_returns_none_when_not_dict(self):
+        assert _parse_prompt_metadata({"prompt_metadata": "bad"}) is None
+
+    def test_basic_metadata(self):
+        raw = {
+            "prompt_metadata": {
+                "category": "security",
+                "cost": "high",
+                "triggers": [
+                    {"domain": "network", "trigger": "IP analysis"},
+                ],
+            }
+        }
+        meta = _parse_prompt_metadata(raw)
+        assert isinstance(meta, AgentPromptMetadata)
+        assert meta.category == "security"
+        assert meta.cost == "high"
+        assert len(meta.triggers) == 1
+        assert meta.triggers[0].domain == "network"
+        assert meta.triggers[0].trigger == "IP analysis"
+
+    def test_defaults_category_and_cost(self):
+        """Minimal metadata dict uses default category and cost."""
+        raw = {"prompt_metadata": {"triggers": []}}
+        meta = _parse_prompt_metadata(raw)
+        assert meta is not None
+        assert meta.category == "plugin"
+        assert meta.cost == "medium"
+
+    def test_optional_fields(self):
+        raw = {
+            "prompt_metadata": {
+                "category": "analysis",
+                "cost": "low",
+                "use_when": ["threat intel needed"],
+                "avoid_when": ["simple tasks"],
+                "dedicated_section": "THREAT INTEL",
+                "key_trigger": "IP lookup",
+            }
+        }
+        meta = _parse_prompt_metadata(raw)
+        assert meta.use_when == ["threat intel needed"]
+        assert meta.avoid_when == ["simple tasks"]
+        assert meta.dedicated_section == "THREAT INTEL"
+        assert meta.key_trigger == "IP lookup"
+
+
+# ===========================================================================
+# load_agent
+# ===========================================================================
+
+class TestLoadAgent:
+
+    def test_loads_basic_agent(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: simple
+            description: A simple agent
+            mode: subagent
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.name == "simple"
+        assert agent.description == "A simple agent"
+        assert agent.mode == "subagent"
+        assert agent.native is False  # default when native not passed by caller
+
+    def test_native_parameter_passed_to_agent_info(self, tmp_path):
+        """native is determined by the caller, not the YAML content."""
+        agent_dir = _write_agent_dir(tmp_path, "name: simple\n")
+        assert load_agent(agent_dir, native=False).native is False
+        assert load_agent(agent_dir, native=True).native is True
+
+    def test_uses_dir_name_when_name_absent(self, tmp_path):
+        agent_dir = tmp_path / "fallback_name"
+        agent_dir.mkdir()
+        (agent_dir / "agent.yaml").write_text("description: no name field\n", encoding="utf-8")
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.name == "fallback_name"
+
+    def test_returns_none_when_no_yaml(self, tmp_path):
+        empty_dir = tmp_path / "empty"
+        empty_dir.mkdir()
+        assert load_agent(empty_dir) is None
+
+    def test_returns_none_on_invalid_yaml(self, tmp_path):
+        agent_dir = tmp_path / "bad_agent"
+        agent_dir.mkdir()
+        (agent_dir / "agent.yaml").write_text(": invalid: yaml: [\n", encoding="utf-8")
+        assert load_agent(agent_dir) is None
+
+    def test_loads_prompt_from_prompt_md(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, "name: has_prompt\n", "You are a helpful agent.")
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.prompt == "You are a helpful agent."
+        assert agent.prompt_builder is None
+
+    def test_detects_prompt_builder_py(self, tmp_path):
+        agent_dir = tmp_path / "builder_agent"
+        agent_dir.mkdir()
+        (agent_dir / "agent.yaml").write_text("name: builder_agent\n", encoding="utf-8")
+        (agent_dir / "prompt_builder.py").write_text("def inject(*a): pass\n", encoding="utf-8")
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.prompt is None
+        assert agent.prompt_builder is not None
+        assert "prompt_builder" in agent.prompt_builder
+        assert ":inject" in agent.prompt_builder
+
+    def test_prompt_md_takes_priority_over_builder(self, tmp_path):
+        """prompt.md wins when both files exist."""
+        agent_dir = tmp_path / "both"
+        agent_dir.mkdir()
+        (agent_dir / "agent.yaml").write_text("name: both\n", encoding="utf-8")
+        (agent_dir / "prompt.md").write_text("Static prompt", encoding="utf-8")
+        (agent_dir / "prompt_builder.py").write_text("def inject(*a): pass\n", encoding="utf-8")
+        agent = load_agent(agent_dir)
+        assert agent.prompt == "Static prompt"
+        assert agent.prompt_builder is None
+
+    def test_tools_list_is_loaded_as_concrete_tools(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: restricted
+            tools:
+              - read
+              - grep
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.tools == ["read", "grep"]
+
+    def test_no_tools_defaults_to_empty_declared_toolset(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, "name: open_agent\n")
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.tools == []
+
+    def test_loads_agent_skills_and_isolated_prompt_profile(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: isolated
+            skills:
+              - secure-review
+              - framework-guide
+            prompt_profile: isolated
+            session_directory: ~/.aegisops/workspace/dedicated-agent/runtime
+            memory_enabled: false
+            require_dedicated_session: true
+        """)
+
+        agent = load_agent(agent_dir)
+
+        assert agent is not None
+        assert agent.skills == ["secure-review", "framework-guide"]
+        assert agent.prompt_profile == "isolated"
+        assert agent.session_directory == "~/.aegisops/workspace/dedicated-agent/runtime"
+        assert agent.memory_enabled is False
+        assert agent.require_dedicated_session is True
+
+    def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "aegisops.agent.toolset.get_all_enabled_builtin_tool_names",
+            lambda: ["read", "bash", "tool_search"],
+        )
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: rex
+            tools: []
+        """)
+
+        agent = load_agent(agent_dir)
+
+        assert agent is not None
+        assert agent.tools == ["read", "bash", "tool_search"]
+
+    def test_loads_model(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: model_agent
+            model:
+              model_id: gpt-4
+              provider_id: openai
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.model is not None
+        assert agent.model.model_id == "gpt-4"
+        assert agent.model.provider_id == "openai"
+
+    def test_returns_none_on_invalid_model_config(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: bad_model_agent
+            model:
+              temperature: 0.3
+        """)
+
+        assert load_agent(agent_dir) is None
+
+    def test_loads_optional_fields(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: full_agent
+            hidden: true
+            color: "#ff0000"
+            steps: 20
+            temperature: 0.3
+            top_p: 0.95
+            delegatable: false
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.hidden is True
+        assert agent.color == "#ff0000"
+        assert agent.steps == 20
+        assert agent.temperature == 0.3
+        assert agent.top_p == 0.95
+        assert agent.delegatable is False
+
+    def test_loads_prompt_metadata(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: meta_agent
+            prompt_metadata:
+              category: security
+              cost: high
+              triggers:
+                - domain: network
+                  trigger: When analyzing IPs
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.prompt_metadata is not None
+        assert agent.prompt_metadata.category == "security"
+
+    def test_permission_dict_deny_all_with_allowlist(self, tmp_path):
+        """load_agent() should expand old-style permission dict to concrete tools."""
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: perm_dict_agent
+            permission:
+              "*": deny
+              read: allow
+              bash: allow
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert "read" in (agent.tools or [])
+        assert "bash" in (agent.tools or [])
+
+    def test_permission_dict_allow_all_with_exceptions(self, tmp_path):
+        """load_agent() should exclude explicitly denied tools after expansion."""
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: allow_all_agent
+            permission:
+              "*": allow
+              delegate_task: deny
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert "delegate_task" not in (agent.tools or [])
+
+    def test_tools_list_takes_priority_over_permission_dict(self, tmp_path):
+        """When both tools list and permission dict exist, tools list wins."""
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: priority_agent
+            tools:
+              - read
+            permission:
+              "*": allow
+        """)
+        agent = load_agent(agent_dir)
+        assert agent is not None
+        assert agent.tools == ["read"]
+
+
+# ===========================================================================
+# scan_and_load
+# ===========================================================================
+
+class TestScanAndLoad:
+
+    def test_scans_builtin_agents(self):
+        """Built-in agents directory must yield at least 10 agents."""
+        from aegisops.agent.agent_factory import _BUILTIN_AGENTS_DIR
+        result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
+        assert len(result) >= 10
+
+    def test_all_builtin_agent_names_present(self):
+        """Every agent shipped with the package must be discoverable and marked native.
+
+        native=True is derived from the loading directory (_BUILTIN_AGENTS_DIR),
+        not from any YAML field.  Passing only _BUILTIN_AGENTS_DIR to scan_and_load
+        ensures the assertion is environment-independent.
+        """
+        from aegisops.agent.agent_factory import _BUILTIN_AGENTS_DIR
+        result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
+        expected = [
+            "rex", "hephaestus", "explore",
+            "oracle", "librarian", "prometheus", "multimodal-looker",
+            "rex-junior",
+        ]
+        for name in expected:
+            assert name in result, f"Built-in agent '{name}' missing from scan"
+            assert result[name].native is True, (
+                f"Agent '{name}' should be native=True when loaded from _BUILTIN_AGENTS_DIR"
+            )
+
+    def test_returns_agent_info_objects(self):
+        result = scan_and_load()
+        for name, agent in result.items():
+            assert isinstance(agent, AgentInfo), f"Agent '{name}' is not AgentInfo"
+
+    def test_scans_extra_dirs(self, tmp_path):
+        """Extra dirs parameter adds additional agents."""
+        extra_dir = tmp_path / "extra"
+        extra_dir.mkdir()
+        agent_subdir = extra_dir / "extra_agent"
+        agent_subdir.mkdir()
+        (agent_subdir / "agent.yaml").write_text("name: extra_agent\n", encoding="utf-8")
+
+        result = scan_and_load(dirs=[extra_dir])
+        assert "extra_agent" in result
+
+    def test_skips_invalid_agent_and_continues_scan(self, tmp_path):
+        """A malformed agent config should not prevent other agents from loading."""
+        extra_dir = tmp_path / "extra"
+        bad_dir = extra_dir / "bad_agent"
+        good_dir = extra_dir / "good_agent"
+        bad_dir.mkdir(parents=True)
+        good_dir.mkdir(parents=True)
+        (bad_dir / "agent.yaml").write_text(
+            textwrap.dedent("""
+                name: bad_agent
+                model:
+                  temperature: 0.3
+            """),
+            encoding="utf-8",
+        )
+        (good_dir / "agent.yaml").write_text("name: good_agent\n", encoding="utf-8")
+
+        result = scan_and_load(dirs=[extra_dir])
+
+        assert "bad_agent" not in result
+        assert "good_agent" in result
+
+    def test_name_conflict_skips_duplicate(self, tmp_path):
+        """When two dirs have the same agent name, first wins."""
+        first = tmp_path / "first"
+        second = tmp_path / "second"
+        for d in (first, second):
+            subdir = d / "conflict_agent"
+            subdir.mkdir(parents=True)
+            (subdir / "agent.yaml").write_text(f"name: conflict_agent\ndescription: from {d.name}\n", encoding="utf-8")
+
+        result = scan_and_load(dirs=[first, second])
+        assert result["conflict_agent"].description == f"from first"
+
+    def test_skips_dirs_starting_with_underscore(self, tmp_path):
+        extra = tmp_path / "extra"
+        extra.mkdir()
+        private = extra / "_private_agent"
+        private.mkdir()
+        (private / "agent.yaml").write_text("name: _private_agent\n", encoding="utf-8")
+
+        result = scan_and_load(dirs=[extra])
+        assert "_private_agent" not in result
+
+
+# ===========================================================================
+# inject_dynamic_prompts
+# ===========================================================================
+
+class TestInjectDynamicPrompts:
+
+    def test_inject_sets_prompt_on_agent(self):
+        """Agent with a valid prompt_builder module gets its prompt set."""
+        agent = AgentInfo(name="dyn", mode="subagent", native=False)
+        agent.prompt_builder = "tests.agent._helpers.sample_builder:inject"
+
+        # Write a temporary helper module for this test
+        helper_path = Path(__file__).parent / "_helpers" / "sample_builder.py"
+        helper_path.parent.mkdir(exist_ok=True)
+        if not helper_path.exists():
+            helper_path.write_text(
+                "def inject(agent_info, *args, **kwargs):\n    agent_info.prompt = 'injected'\n",
+                encoding="utf-8",
+            )
+            (helper_path.parent / "__init__.py").touch()
+
+        agents = {"dyn": agent}
+        inject_dynamic_prompts(agents, [], [], [])
+        assert agent.prompt == "injected"
+
+    def test_inject_handles_import_error_gracefully(self):
+        """Broken prompt_builder should not crash; agent prompt stays None."""
+        agent = AgentInfo(name="broken", mode="subagent", native=False)
+        agent.prompt_builder = "nonexistent.module.path:inject"
+        agents = {"broken": agent}
+        inject_dynamic_prompts(agents, [], [], [])  # Should not raise
+        assert agent.prompt is None
+
+    def test_inject_skips_agents_without_builder(self):
+        agent = AgentInfo(name="static", mode="subagent", native=False, prompt="static prompt")
+        agents = {"static": agent}
+        inject_dynamic_prompts(agents, [], [], [])
+        assert agent.prompt == "static prompt"
+
+    @pytest.mark.asyncio
+    async def test_rex_gets_injected_prompt(self):
+        """Rex agent must receive a dynamic prompt after full load."""
+        from aegisops.agent.registry import Agent
+        rex = await Agent.get("rex")
+        assert rex is not None
+        assert rex.prompt is not None
+        assert len(rex.prompt) > 100, "Rex prompt should be non-trivially long"
+
+    @pytest.mark.asyncio
+    async def test_hephaestus_gets_injected_prompt(self):
+        """Hephaestus agent must receive a dynamic prompt after full load."""
+        from aegisops.agent.registry import Agent
+        heph = await Agent.get("hephaestus")
+        assert heph is not None
+        assert heph.prompt is not None
+        assert len(heph.prompt) > 100
+
+    @pytest.mark.asyncio
+    async def test_librarian_gets_injected_prompt(self):
+        from aegisops.agent.registry import Agent
+        lib = await Agent.get("librarian")
+        assert lib is not None
+        assert lib.prompt is not None
+        assert len(lib.prompt) > 50
+
+    @pytest.mark.asyncio
+    async def test_rex_junior_gets_injected_prompt(self):
+        from aegisops.agent.registry import Agent
+        jr = await Agent.get("rex-junior")
+        assert jr is not None
+        assert jr.prompt is not None
+        assert len(jr.prompt) > 50
+        assert "Execute implementation tasks directly." in jr.prompt
+        assert "NEVER delegate or spawn other agents" not in jr.prompt
+        assert "for read-only research only" in jr.prompt
+
+    @pytest.mark.asyncio
+    async def test_static_prompt_agents(self):
+        """Built-in agents with prompt.md should have non-empty prompts."""
+        from aegisops.agent.registry import Agent
+        # Only built-in agents (native=True) — not dependent on local plugin installation
+        for name in ["explore", "oracle", "prometheus", "multimodal-looker"]:
+            agent = await Agent.get(name)
+            assert agent is not None, f"Agent '{name}' not found"
+            assert agent.prompt is not None, f"Agent '{name}' should have a prompt from prompt.md"
+            assert len(agent.prompt) > 20, f"Agent '{name}' prompt is suspiciously short"
+
+    @pytest.mark.asyncio
+    async def test_plugin_agent_has_prompt_if_installed(self):
+        """Plugin agents installed in ~/.aegisops/plugins/agents/ should load their prompt."""
+        from aegisops.agent.registry import Agent
+        for name in ["host-forensics", "host-forensics-fast"]:
+            agent = await Agent.get(name)
+            if agent is None:
+                pytest.skip(f"{name} plugin not installed in this environment")
+            assert agent.prompt is not None, f"{name} should have a prompt.md"
+            assert len(agent.prompt) > 20
+
+    @pytest.mark.parametrize("native", [False, True])
+    def test_agent_without_prompt_sources_stays_promptless(self, tmp_path, native):
+        """Promptless definitions are valid without relying on the retired plan agent."""
+        agent_dir = _write_agent_dir(tmp_path, "name: promptless\ntools: []\n")
+        agent = load_agent(agent_dir, native=native)
+        assert agent is not None
+        assert agent.prompt is None
+        assert agent.prompt_builder is None
+        inject_dynamic_prompts({agent.name: agent}, [], [], [])
+        assert agent.prompt is None
+
+    @pytest.mark.asyncio
+    async def test_self_improve_gets_dream_prompt(self):
+        """The hidden Dream worker must receive its dedicated dynamic prompt."""
+        from aegisops.agent.registry import Agent
+        from aegisops.memory.evolution.dream import DREAM_SYSTEM_PROMPT
+
+        agent = await Agent.get("self-improve")
+        assert agent is not None
+        assert agent.prompt == DREAM_SYSTEM_PROMPT
+        assert agent.prompt
+        assert agent.prompt_builder == "aegisops.agent.agents.self_improve.prompt_builder:inject"
+
+
+# ===========================================================================
+# yaml_to_agent_info  (Plugin loader entry point)
+# ===========================================================================
+
+class TestYamlToAgentInfo:
+
+    def _make_yaml_path(self, tmp_path: Path) -> Path:
+        p = tmp_path / "plugin" / "agent.yaml"
+        p.parent.mkdir(parents=True)
+        return p
+
+    def test_basic_plugin_agent(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {"name": "plugin_a", "description": "Plugin A", "mode": "subagent"}
+        agent = yaml_to_agent_info(raw, yaml_path)
+        assert agent.name == "plugin_a"
+        assert agent.native is False
+        assert agent.mode == "subagent"
+
+    def test_raises_on_missing_name(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        with pytest.raises(ValueError, match="missing required 'name'"):
+            yaml_to_agent_info({}, yaml_path)
+
+    def test_inline_prompt(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {"name": "inline", "prompt": "You are inline."}
+        agent = yaml_to_agent_info(raw, yaml_path)
+        assert agent.prompt == "You are inline."
+
+    def test_prompt_file_resolution(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        prompt_file = yaml_path.parent / "custom_prompt.md"
+        prompt_file.write_text("Loaded from file.", encoding="utf-8")
+        raw = {"name": "file_prompt", "prompt_file": "custom_prompt.md"}
+        agent = yaml_to_agent_info(raw, yaml_path)
+        assert agent.prompt == "Loaded from file."
+
+    def test_tools_list_permission(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {"name": "restricted", "tools": ["read", "grep"]}
+        agent = yaml_to_agent_info(raw, yaml_path)
+        assert agent.tools == ["read", "grep"]
+
+    def test_old_permission_dict_fallback(self, tmp_path):
+        """Plugin agents with permission dict (not tools list) are handled."""
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {"name": "old_perm", "permission": {"*": "allow", "bash": "deny"}}
+        agent = yaml_to_agent_info(raw, yaml_path)
+        assert "bash" not in (agent.tools or [])
+
+    def test_missing_tools_defaults_to_empty_declared_toolset(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        agent = yaml_to_agent_info({"name": "no_tools"}, yaml_path)
+        assert agent.tools == []
+
+    def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "aegisops.agent.toolset.get_all_enabled_builtin_tool_names",
+            lambda: ["read", "bash", "tool_search"],
+        )
+        yaml_path = self._make_yaml_path(tmp_path)
+
+        agent = yaml_to_agent_info({"name": "rex", "tools": []}, yaml_path)
+
+        assert agent.tools == ["read", "bash", "tool_search"]
+
+    def test_model_parsed(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {
+            "name": "model_plugin",
+            "model": {"model_id": "claude-3", "provider_id": "anthropic"},
+        }
+        agent = yaml_to_agent_info(raw, yaml_path)
+        assert agent.model is not None
+        assert agent.model.model_id == "claude-3"
+
+    def test_isolation_policy_parsed(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {
+            "name": "isolated_plugin",
+            "prompt_profile": "isolated",
+            "session_directory": "~/.aegisops/workspace/runtime",
+            "memory_enabled": False,
+            "require_dedicated_session": True,
+        }
+
+        agent = yaml_to_agent_info(raw, yaml_path)
+
+        assert agent.prompt_profile == "isolated"
+        assert agent.session_directory == "~/.aegisops/workspace/runtime"
+        assert agent.memory_enabled is False
+        assert agent.require_dedicated_session is True
+
+    def test_description_cn_snake_and_camel(self, tmp_path):
+        yaml_path = self._make_yaml_path(tmp_path)
+        raw = {
+            "name": "bilingual",
+            "description": "English",
+            "description_cn": "中文",
+        }
+        agent = yaml_to_agent_info(raw, yaml_path)
+        assert agent.description == "English"
+        assert agent.description_cn == "中文"
+
+        raw2 = {"name": "bilingual2", "descriptionCn": "界面"}
+        agent2 = yaml_to_agent_info(raw2, yaml_path)
+        assert agent2.description_cn == "界面"
+
+
+# ===========================================================================
+# Agent config overrides  (cfg.agent integration)
+# ===========================================================================
+
+class TestAgentConfigOverrides:
+
+    @pytest.mark.asyncio
+    async def test_agent_alias_sisyphus_resolves_to_rex(self):
+        from aegisops.agent.registry import Agent
+        rex = await Agent.get("rex")
+        alias = await Agent.get("sisyphus")
+        assert alias is not None
+        assert alias.name == rex.name
+
+    @pytest.mark.asyncio
+    async def test_agent_refresh_invalidates_cache(self):
+        from aegisops.agent.registry import Agent
+        agents_before = await Agent.state()
+        Agent.register("tmp_refresh_test", AgentInfo(name="tmp_refresh_test", mode="subagent", native=False))
+        await Agent.refresh()
+        agents_after = await Agent.state()
+        # After refresh, custom agent should still appear (it's in _custom_agents)
+        assert "tmp_refresh_test" in agents_after
+        Agent.unregister("tmp_refresh_test")
+        await Agent.refresh()
+
+    @pytest.mark.asyncio
+    async def test_enabled_agents_whitelist(self):
+        """enabled_agents config limits visible agents (tested via scan)."""
+        from aegisops.agent.agent_factory import scan_and_load
+        result = scan_and_load()
+        # All 13 built-ins should be present without a whitelist
+        assert len(result) >= 10
+
+    def test_enabled_agents_whitelist_applies_after_runtime_merge(self):
+        from aegisops.agent.registry import _apply_enabled_agents
+
+        agents = {
+            "rex": AgentInfo(name="rex"),
+            "runtime-security": AgentInfo(name="runtime-security"),
+        }
+        _apply_enabled_agents(agents, ["rex"])
+
+        assert set(agents) == {"rex"}
+
+
+# ===========================================================================
+# Available agent list builder
+# ===========================================================================
+
+class TestBuildAvailableAgents:
+
+    def test_primary_agents_excluded(self):
+        from aegisops.agent.registry import _build_available_agents
+        agents = {
+            "rex": AgentInfo(name="rex", mode="primary", delegatable=False, native=True),
+            "explore": AgentInfo(name="explore", mode="subagent", delegatable=True, native=True),
+        }
+        available = _build_available_agents(agents)
+        names = [a.name for a in available]
+        assert "rex" not in names
+        assert "explore" in names
+
+    def test_hidden_agents_excluded(self):
+        from aegisops.agent.registry import _build_available_agents
+        agents = {
+            "plan": AgentInfo(name="plan", mode="subagent", hidden=True, delegatable=False, native=True),
+            "oracle": AgentInfo(name="oracle", mode="subagent", hidden=False, delegatable=True, native=True),
+        }
+        available = _build_available_agents(agents)
+        names = [a.name for a in available]
+        assert "plan" not in names
+        assert "oracle" in names
+
+    def test_non_delegatable_agents_excluded(self):
+        from aegisops.agent.registry import _build_available_agents
+        agents = {
+            "rex-junior": AgentInfo(name="rex-junior", mode="subagent", hidden=False, delegatable=False, native=True),
+            "hephaestus": AgentInfo(name="hephaestus", mode="subagent", hidden=False, delegatable=True, native=True),
+        }
+        available = _build_available_agents(agents)
+        names = [a.name for a in available]
+        assert "rex-junior" not in names
+        assert "hephaestus" in names
+
+    def test_default_metadata_generated_for_agent_without_prompt_metadata(self):
+        from aegisops.agent.registry import _build_available_agents, _make_default_prompt_metadata
+        agent = AgentInfo(
+            name="plugin_x",
+            description="Does X",
+            mode="subagent",
+            delegatable=True,
+            native=False,
+        )
+        agents = {"plugin_x": agent}
+        available = _build_available_agents(agents)
+        assert len(available) == 1
+        assert available[0].metadata.category == "plugin"
+        assert available[0].metadata.cost == "medium"
+
+
+# ===========================================================================
+# Project-level plugin agent scanning
+# ===========================================================================
+
+class TestProjectLevelAgentScan:
+    """scan_and_load() should discover agents from <cwd>/.aegisops/plugins/agents/."""
+
+    def _write_agent(self, agents_dir: Path, name: str) -> None:
+        agent_dir = agents_dir / name
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "agent.yaml").write_text(
+            textwrap.dedent(f"""\
+                name: {name}
+                description: Project-level test agent {name}
+                mode: subagent
+            """),
+            encoding="utf-8",
+        )
+
+    def test_project_plugin_agents_are_discovered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Agents placed in <cwd>/.aegisops/plugins/agents/ are loaded by scan_and_load()."""
+        project_agents_dir = tmp_path / ".aegisops" / "plugins" / "agents"
+        self._write_agent(project_agents_dir, "proj-agent")
+
+        monkeypatch.chdir(tmp_path)
+        result = scan_and_load()
+
+        assert "proj-agent" in result
+        assert result["proj-agent"].name == "proj-agent"
+
+    def test_project_agent_does_not_override_builtin(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """A project-level agent with a built-in name is skipped (first wins)."""
+        project_agents_dir = tmp_path / ".aegisops" / "plugins" / "agents"
+        self._write_agent(project_agents_dir, "rex")
+
+        monkeypatch.chdir(tmp_path)
+        result = scan_and_load()
+
+        # Built-in rex should be retained, project-level duplicate skipped
+        assert result["rex"].native is True
+
+    def test_project_plugin_agent_is_native(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Agents in <cwd>/.aegisops/plugins/agents/ are marked native=True."""
+        project_agents_dir = tmp_path / ".aegisops" / "plugins" / "agents"
+        self._write_agent(project_agents_dir, "proj-native")
+
+        monkeypatch.chdir(tmp_path)
+        result = scan_and_load()
+
+        assert "proj-native" in result
+        assert result["proj-native"].native is True
+
+    def test_project_agent_pack_nested_agents_are_discovered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Agent packs can expose one-level nested AegisOps agent directories."""
+        pack_dir = tmp_path / ".aegisops" / "plugins" / "agents" / "pentest-ai-agents"
+        self._write_agent(pack_dir.parent, "pentest-ai-agents")
+        self._write_agent(pack_dir, "web-hunter")
+        self._write_agent(pack_dir, "cloud-security")
+
+        monkeypatch.chdir(tmp_path)
+        result = scan_and_load()
+
+        assert "pentest-ai-agents" in result
+        assert "web-hunter" in result
+        assert "cloud-security" in result
+        assert result["web-hunter"].native is True
+
+    def test_user_plugin_agent_is_not_native(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Agents in ~/.aegisops/plugins/agents/ are marked native=False."""
+        import aegisops.agent.agent_factory as _fac
+        user_plugin_dir = tmp_path / "user_plugins" / "agents"
+        user_plugin_dir.mkdir(parents=True)
+        self._write_agent(user_plugin_dir, "custom-agent")
+
+        monkeypatch.setattr(_fac, "_PLUGIN_AGENTS_DIR", user_plugin_dir)
+        # Use a different cwd so project-level dir doesn't exist
+        other_project = tmp_path / "some_other_project"
+        other_project.mkdir(exist_ok=True)
+        monkeypatch.chdir(other_project)
+
+        result = scan_and_load()
+
+        assert "custom-agent" in result
+        assert result["custom-agent"].native is False
+
+    def test_user_plugin_agent_wins_over_project_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        user_agents_dir = tmp_path / "user_plugins" / "agents"
+        project_dir = tmp_path / "project"
+        project_agents_dir = project_dir / ".aegisops" / "plugins" / "agents"
+        self._write_agent(user_agents_dir, "shared-agent")
+        self._write_agent(project_agents_dir, "shared-agent")
+        (user_agents_dir / "shared-agent" / "agent.yaml").write_text(
+            "name: shared-agent\ndescription: user customization\nmode: subagent\n",
+            encoding="utf-8",
+        )
+        (project_agents_dir / "shared-agent" / "agent.yaml").write_text(
+            "name: shared-agent\ndescription: project bundle\nmode: subagent\n",
+            encoding="utf-8",
+        )
+
+        info_log = MagicMock()
+        warn_log = MagicMock()
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", user_agents_dir)
+        monkeypatch.setattr(_factory_module.log, "info", info_log)
+        monkeypatch.setattr(_factory_module.log, "warn", warn_log)
+        monkeypatch.chdir(project_dir)
+
+        result = scan_and_load()
+
+        assert result["shared-agent"].description == "user customization"
+        assert any(
+            call.args and call.args[0] == "agent.factory.lower_priority_skipped"
+            for call in info_log.call_args_list
+        )
+        assert not any(
+            call.args and call.args[0] == "agent.factory.name_conflict"
+            and call.args[1].get("name") == "shared-agent"
+            for call in warn_log.call_args_list
+        )
+
+
+# ===========================================================================
+# Project-level plugin agent CRUD
+# ===========================================================================
+
+class TestProjectLevelYamlCrud:
+    """Project-level plugin agents should be readable and updatable."""
+
+    def _write_project_agent(self, root: Path, name: str) -> Path:
+        agent_dir = root / ".aegisops" / "plugins" / "agents" / name
+        agent_dir.mkdir(parents=True)
+        yaml_path = agent_dir / "agent.yaml"
+        yaml_path.write_text(
+            textwrap.dedent(f"""\
+                name: {name}
+                description: Project agent {name}
+                mode: subagent
+                delegatable: true
+            """),
+            encoding="utf-8",
+        )
+        return yaml_path
+
+    def test_find_and_read_project_level_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        yaml_path = self._write_project_agent(tmp_path, "proj-editable")
+        monkeypatch.chdir(tmp_path)
+
+        assert find_yaml_agent("proj-editable") == yaml_path
+        raw = read_yaml_agent("proj-editable")
+        assert raw is not None
+        assert raw["name"] == "proj-editable"
+        assert raw["delegatable"] is True
+
+    def test_update_project_level_agent_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        yaml_path = self._write_project_agent(tmp_path, "proj-toggle")
+        monkeypatch.chdir(tmp_path)
+
+        result = update_yaml_agent("proj-toggle", {"delegatable": False, "temperature": 0.2})
+
+        assert result is True
+        updated = yaml_path.read_text(encoding="utf-8")
+        assert "delegatable: false" in updated
+        assert "temperature: 0.2" in updated
+
+
+# ===========================================================================
+# delete_yaml_agent — subdirectory layout
+# ===========================================================================
+
+class TestDeleteYamlAgent:
+    """delete_yaml_agent() should remove the entire folder for subdirectory-layout agents."""
+
+    def _setup_plugin_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        """Create a fake plugin agents directory and patch _PLUGIN_AGENTS_DIR."""
+        plugin_dir = tmp_path / "plugin_agents"
+        plugin_dir.mkdir()
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", plugin_dir)
+        return plugin_dir
+
+    def test_delete_subdir_agent_removes_entire_folder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Subdirectory-layout agent: delete_yaml_agent() removes the whole folder."""
+        plugin_dir = self._setup_plugin_dir(tmp_path, monkeypatch)
+
+        agent_dir = plugin_dir / "my-agent"
+        agent_dir.mkdir()
+        (agent_dir / "agent.yaml").write_text("name: my-agent\n", encoding="utf-8")
+        (agent_dir / "prompt.md").write_text("Prompt text", encoding="utf-8")
+
+        result = delete_yaml_agent("my-agent")
+
+        assert result is True
+        assert not agent_dir.exists(), "Agent folder should be removed"
+
+    def test_delete_subdir_agent_with_scripts_folder(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Entire agent folder including subdirectories is removed."""
+        plugin_dir = self._setup_plugin_dir(tmp_path, monkeypatch)
+
+        agent_dir = plugin_dir / "forensics"
+        scripts_dir = agent_dir / "scripts"
+        scripts_dir.mkdir(parents=True)
+        (agent_dir / "agent.yaml").write_text("name: forensics\n", encoding="utf-8")
+        (scripts_dir / "triage.sh").write_text("#!/bin/bash\necho ok\n", encoding="utf-8")
+
+        result = delete_yaml_agent("forensics")
+
+        assert result is True
+        assert not agent_dir.exists()
+
+    def test_delete_flat_file_agent_removes_yaml_and_prompt(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Legacy flat-file layout: only the YAML and sibling prompt file are removed."""
+        plugin_dir = self._setup_plugin_dir(tmp_path, monkeypatch)
+
+        yaml_file = plugin_dir / "legacy-agent.yaml"
+        prompt_file = plugin_dir / "legacy-agent.prompt.md"
+        yaml_file.write_text("name: legacy-agent\n", encoding="utf-8")
+        prompt_file.write_text("Old prompt", encoding="utf-8")
+
+        result = delete_yaml_agent("legacy-agent")
+
+        assert result is True
+        assert not yaml_file.exists()
+        assert not prompt_file.exists()
+        assert plugin_dir.exists(), "Plugin dir itself should NOT be removed"
+
+    def test_delete_returns_false_when_not_found(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        self._setup_plugin_dir(tmp_path, monkeypatch)
+        assert delete_yaml_agent("nonexistent-agent") is False

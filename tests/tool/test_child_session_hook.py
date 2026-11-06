@@ -1,0 +1,72 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from aegisops.hooks.pipeline import HookBase, HookPipeline
+from aegisops.storage.storage import Storage
+from aegisops.tool.agent.delegate_task import delegate_task_tool
+from aegisops.tool.registry import ToolContext, ToolResult
+from aegisops.workflow.store import WorkflowStore
+
+
+@pytest.fixture(autouse=True)
+def reset_pipeline() -> None:
+    HookPipeline.reset()
+    HookPipeline._initialized = True
+    yield
+    HookPipeline.reset()
+
+
+@pytest.mark.asyncio
+async def test_delegation_emits_child_lifecycle_with_parent_and_child_ids() -> None:
+    observed: list[tuple[str, dict]] = []
+
+    class ChildLifecycle(HookBase):
+        async def subagent_before(self, ctx):
+            observed.append((ctx.stage, dict(ctx.input)))
+
+        async def subagent_after(self, ctx):
+            observed.append((ctx.stage, dict(ctx.input)))
+
+    HookPipeline.register("child-lifecycle", ChildLifecycle())
+    parent = SimpleNamespace(id="parent-1", project_id="project-1", directory="/tmp/project")
+    child = SimpleNamespace(id="child-1")
+    forwarder = SimpleNamespace(
+        final_metadata={},
+        build_callbacks=lambda **_kwargs: SimpleNamespace(),
+    )
+    context = ToolContext(session_id="parent-1", message_id="message-1", agent="rex")
+
+    try:
+        with (
+            patch("aegisops.tool.agent.delegate_task.is_delegatable", return_value=True),
+            patch("aegisops.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent)),
+            patch("aegisops.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child)),
+            patch("aegisops.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch("aegisops.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(action="stop"))),
+            patch("aegisops.session.features.activity_forwarder.ActivityForwarder", return_value=forwarder),
+            patch(
+                "aegisops.tool.agent.delegate_task.format_sync_subagent_result",
+                AsyncMock(return_value=ToolResult(success=True, output="complete")),
+            ),
+        ):
+            result = await delegate_task_tool(
+                context,
+                subagent_type="asset-survey",
+                prompt="Inspect the workspace",
+            )
+
+        assert result.success is True
+        assert [stage for stage, _payload in observed] == [
+            "subagent.before",
+            "subagent.after",
+        ]
+        assert observed[0][1]["parent_session_id"] == "parent-1"
+        assert observed[0][1]["child_session_id"] is None
+        assert observed[1][1]["child_session_id"] == "child-1"
+    finally:
+        await WorkflowStore.close()
+        await Storage.shutdown()

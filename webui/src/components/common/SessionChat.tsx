@@ -1,0 +1,7559 @@
+import SchedulingModePicker, { type SchedulingMode } from './SchedulingModePicker';
+/**
+ * SessionChat — shared Agent Session conversation component.
+ *
+ * Use this component anywhere the product needs an AI conversation surface:
+ * - Main Session page (compact=false)
+ * - Workflow edit chat panel
+ * - Task execution detail panel
+ * - ChatDialog modal
+ * - EntitySheet Atlas chat tab
+ *
+ * Capabilities:
+ * - Load and render the complete conversation for a session
+ * - Stream live updates over SSE
+ * - Render text, reasoning, and tool parts
+ * - Provide a follow-up composer that can be hidden with hideInput
+ * - Support optional copy actions, timestamps, and related affordances
+ */
+
+import { createPortal } from 'react-dom';
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, memo, type RefObject } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
+import {
+  AlertCircle,
+  ArrowUp,
+  BookOpen,
+  Bot,
+  Brain,
+  CheckCircle2,
+  ChevronDown,
+  Clock,
+  Copy,
+  Download,
+  Eye,
+  FileText,
+  ImageIcon,
+  ListTree,
+  Loader2,
+  Paperclip,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Save,
+  Send,
+  Square,
+  Trash2,
+  User,
+  Workflow as WorkflowIcon,
+  X,
+  XCircle,
+} from 'lucide-react';
+import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
+import { useTranslation } from 'react-i18next';
+import LoadingSpinner from './LoadingSpinner';
+import ChatAvatar from './ChatAvatar';
+import ExtensionSlot from '@/components/extensions/ExtensionSlot';
+import { QuestionTool, type QuestionItem } from './QuestionTool';
+import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
+import DelegateTaskCard, { extractDelegateInfo, isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import { ReaToolPart } from '@/features/rea/ReaCards';
+import {
+  ReaChatContext,
+  findLatestReaCardPartId,
+  isReaCardPart,
+  type ReaChatContextValue,
+} from '@/features/rea/reaChat';
+import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
+import ImageLightbox from './ImageLightbox';
+import { TodoList, buildTodoSummary, pickTodoEntries } from './TodoList';
+export { buildTodoSummary } from './TodoList';
+import { useSessionMessages } from '@/hooks/useSessions';
+import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
+import { useReasoningToggle } from '@/hooks/useReasoningToggle';
+import { sessionApi, type ContextUsageSnapshot, type QueuedPrompt } from '@/api/session';
+import { permissionApi, type PendingPermission } from '@/api/permission';
+import client, { getApiBase } from '@/api/client';
+import type { Command } from '@/api/skill';
+import type { Agent } from '@/api/agent';
+import { useToast } from './Toast';
+import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
+import { getFileOperationDisplayName, redactToolInput, resolveToolPresentation } from './toolPresentation';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
+import SessionCacheUsage from './SessionCacheUsage';
+import { areCacheUsageCallsEqual, getMessageCacheUsageCall, type CacheUsageCall } from '@/features/session-chat/cacheUsage';
+import { workspaceAPI } from '@/api/workspace';
+import { formatSmartTime } from '@/utils/time';
+import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { copyText } from '@/utils/clipboard';
+import { createMessageId } from '@/utils/messageId';
+import {
+  FILE_INPUT_ACCEPT_IMAGES,
+  batchCompressOptions,
+  buildPromptParts,
+  compressImageFile,
+  getFileExtension,
+  isImageFile,
+  readFileAsDataUrl,
+  type FilePartData,
+  type ImagePartData,
+} from '@/utils/imageUpload';
+import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
+import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
+import {
+  buildInstructionDisplayText,
+  fetchSessionChatCommands,
+  getQueuedPromptText,
+  parseInstructionDisplayText,
+  readSessionRetryStatus,
+  resolveSessionChatSSEAction,
+  shouldForwardSSEEventToParent,
+  stripTaskMetadata,
+  type CompactionStage,
+  type SessionRetryStatus,
+  usePendingQuestions,
+  useSessionContextUsage,
+  useSessionPromptQueue,
+  type PendingQuestion,
+  type PromptDisplayOptions,
+  type SSEChatEvent,
+  type SessionChatDisplay,
+} from '@/features/session-chat';
+
+export { formatSmartTime };
+export type { SSEConnectionStatus };
+export {
+  buildInstructionDisplayText,
+  parseInstructionDisplayText,
+  shouldForwardSSEEventToParent,
+  type PromptDisplayOptions,
+  type SSEChatEvent,
+  type SessionChatDisplay,
+} from '@/features/session-chat';
+
+// ============================================================================
+// Types
+// ============================================================================
+
+export type MergedMessage = Message & { _merged?: boolean; _cacheUsageCalls?: CacheUsageCall[] };
+
+function getChatCacheUsageCalls(message: MergedMessage): CacheUsageCall[] {
+  if (message._cacheUsageCalls) return message._cacheUsageCalls;
+  const call = getMessageCacheUsageCall(message);
+  return call ? [call] : [];
+}
+
+/**
+ * Whether a permission request belongs in this chat: its own, or one from a
+ * subagent it delegated to (the user is waiting here, not in the subagent's
+ * session). The backend names the delegating sessions on the request.
+ */
+export function isPermissionRequestForSession(
+  requestSessionID: string,
+  metadata: Record<string, unknown> | undefined,
+  sessionId: string | null | undefined,
+): boolean {
+  if (!sessionId || !requestSessionID) return false;
+  if (requestSessionID === sessionId) return true;
+  const chain = metadata?.delegationChain;
+  return Array.isArray(chain) && chain.includes(sessionId);
+}
+
+/** Node reference shown above the chat input as a dismissible chip */
+export interface NodeRef {
+  id: string;
+  type: string;
+  description?: string;
+}
+
+type GoalBannerStatus = 'active' | 'completed' | 'blocked' | 'paused';
+
+interface GoalBannerState {
+  objective: string;
+  status: GoalBannerStatus;
+  reason?: string;
+}
+
+export interface ConversationBottomSlotActions {
+  sendPrompt: (text: string, options?: PromptDisplayOptions) => void;
+  setInput: (text: string) => void;
+  focusInput: () => void;
+  sending: boolean;
+  streaming: boolean;
+  sessionId?: string | null;
+  hasMessages: boolean;
+}
+
+/** Sends a shortcut through the current chat; false means no prompt was accepted. */
+export type SendWelcomePrompt = (
+  text: string,
+  options?: PromptDisplayOptions & { agent?: string; executionMode?: SessionExecutionMode },
+) => Promise<boolean>;
+
+export interface ComposerAddMenuActions {
+  closeMenu: () => void;
+  insertMention: (agentName: string) => void;
+  insertReference: (value: string, kind: 'workflow' | 'skill') => void;
+}
+
+type ComposerReferenceKind = 'subagent' | 'skill' | 'workflow';
+
+interface ComposerReference {
+  kind: ComposerReferenceKind;
+  value: string;
+}
+
+
+function getAgentSender(parts: MessagePart[]) {
+  for (const part of parts) {
+    const sender = part.synthetic && part.metadata?.communication;
+    if (sender?.source_type === 'agent' && typeof sender.source_agent === 'string'
+      && typeof sender.source_session_id === 'string') return sender;
+  }
+  return undefined;
+}
+
+function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
+  const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
+  const displayText = typeof metadataDisplayText === 'string' && metadataDisplayText
+    ? metadataDisplayText
+    : part.text || '';
+  return hideTaskMetadata ? stripTaskMetadata(displayText) : displayText;
+}
+
+export interface SessionChatProps {
+  /** Domain-authorized transport; shares the workbench UI without generic session writes. */
+  transport?: { messages?: Message[]; disabled?: boolean; send: (text: string) => Promise<unknown>; stop?: () => Promise<unknown> };
+  draftKey?: string;
+  renderMessageFooter?: (message: Message) => React.ReactNode;
+
+  /** When null/undefined, only welcomeContent + input are rendered (lazy session). */
+  sessionId?: string | null;
+  /** Subscribe to SSE for live streaming updates */
+  live?: boolean;
+  /** Placeholder text for the follow-up input */
+  placeholder?: string;
+  /** Hide the follow-up input box */
+  hideInput?: boolean;
+  /** Extra class for the outer wrapper (which is a flex-col container) */
+  className?: string;
+  /** Displayed when there are no messages yet (ignored if welcomeContent is set) */
+  emptyText?: string;
+  /** Suggested prompts shown above the input before the user sends any message */
+  suggestions?: string[];
+  /** Node-reference chip above the input */
+  nodeRef?: NodeRef | null;
+  /** Called when the user dismisses the node chip */
+  onNodeRefDismiss?: () => void;
+  /** Called once each time the assistant finishes a streaming response */
+  onStreamingDone?: () => void;
+  /** Auto-send this message on mount via prompt_async */
+  initialMessage?: string | null;
+  /** Optional short display text for the auto-sent initialMessage bubble. */
+  initialDisplayText?: string | null;
+  /** Called immediately after initialMessage has been consumed (sent) */
+  onInitialMessageConsumed?: () => void;
+  /** Optimistic first message created while the parent is creating a session. */
+  initialOptimisticMessage?: Message | null;
+  /** Called after initialOptimisticMessage has been seeded into local history. */
+  onInitialOptimisticMessageConsumed?: (messageId: string) => void;
+  /** Scroll to this existing message after messages load. */
+  focusMessageId?: string | null;
+  /** Called after focusMessageId is consumed. */
+  onFocusMessageConsumed?: () => void;
+  /** Open one message file in the parent Session Context preview. */
+  onOpenContextFile?: (resourceId: string) => void;
+  /** Open the parent Session Context panel. */
+  onOpenContext?: () => void;
+  /** Agent name to include in prompt_async requests */
+  agentName?: string;
+  /** Model override to include in prompt_async requests */
+  model?: { providerID: string; modelID: string } | null;
+  /** Execution mode to include in prompt and queue requests. */
+  executionMode?: SessionExecutionMode;
+  /** Called after a prompt using the current execution mode is accepted. */
+  onExecutionModeAccepted?: (mode: SessionExecutionMode) => void;
+  /** Persist Auto failover before sending through an existing session. */
+  modelAuto?: boolean;
+  /** Agents available for one-turn @mention routing. */
+  mentionAgents?: Agent[];
+  /** Display configuration (compact, showActions, showTimestamp) */
+  display?: SessionChatDisplay;
+  /** Custom welcome content with composer input and current-session sending actions. */
+  welcomeContent?: React.ReactNode | ((setInput: (text: string) => void, sendPrompt: SendWelcomePrompt) => React.ReactNode);
+  /** Extra content rendered below the conversation area and above the composer. */
+  conversationBottomSlot?: React.ReactNode | ((actions: ConversationBottomSlotActions) => React.ReactNode);
+  /** Content above the messages that scrolls with them, e.g. the run a follow-up chat is about. */
+  conversationTopSlot?: React.ReactNode;
+  /** Called when SSE connection status changes */
+  onSseStatusChange?: (status: SSEConnectionStatus) => void;
+  /** Forward SSE events with properties to parent (global events like session.updated) */
+  onSSEEvent?: (event: SSEChatEvent) => void;
+  /** Called on session errors from SSE */
+  onError?: (message: string) => void;
+  /** Extra content injected into the left side of the composer toolbar */
+  toolbarSlot?: React.ReactNode;
+  /** Extra actions shown below the file picker in the composer's Add menu. */
+  composerAddMenuSlot?: React.ReactNode | ((actions: ComposerAddMenuActions) => React.ReactNode);
+  /** Called when the composer's Add menu opens or closes. */
+  onComposerAddMenuOpenChange?: (open: boolean) => void;
+  /** Minimum textarea height in px. Defaults to the compact single-line composer height. */
+  composerTextareaMinHeight?: number;
+  /** Maximum textarea height in px. Defaults to the existing compact/full-page values. */
+  composerTextareaMaxHeight?: number;
+  /** Extra content injected between left toolbar controls and right actions */
+  centerToolbarSlot?: React.ReactNode;
+  /** Render live cache usage in the context panel. Null hides it while the panel is closed. */
+  cacheUsageContainer?: HTMLElement | null;
+  /** Context window size for the current model; enables composer usage ring. */
+  contextWindowTokens?: number | null;
+  /**
+   * Called when the user sends a message but sessionId is not yet available.
+   * The parent should create a session and dispatch the prompt (with the
+   * provided text and any file attachments) to the new session.
+   *
+   * `fileParts` carries inline image data URLs or staged document upload IDs.
+   * Completion must mean the prompt was accepted, not just the session created.
+   * Propagate explicit non-acceptance errors with their original response status;
+   * timeouts and server errors are treated as unknown acceptance for upload cleanup.
+   *
+   * The return value is intentionally typed as ``unknown`` so callers can
+   * pass ``useSessionChat().createAndSend`` (which resolves to the new
+   * session id) directly without an empty ``async (..) => { await ... }``
+   * shim.
+   */
+  onCreateAndSend?: (
+    text: string,
+    fileParts?: FilePartData[],
+    agentOverride?: string,
+    modelOverride?: { providerID: string; modelID: string } | null,
+    options?: PromptDisplayOptions,
+    executionModeOverride?: SessionExecutionMode,
+  ) => Promise<unknown> | unknown;
+  /** Called when the user sends "/new" to create a new session */
+  onCreateNewSession?: () => Promise<void> | void;
+  /**
+   * Whether the current model supports vision/image analysis.
+   * true = allow images; false = block images with a UI warning; null/undefined = allow (unknown).
+   */
+  supportsVision?: boolean | null;
+  /**
+   * Attach files of any type, not only documents and images (reverse-engineering
+   * samples once the REA plugin is installed; the server applies the same rule).
+   */
+  allowAnyUpload?: boolean;
+  /**
+   * Text to put into the message box once per ``id`` (the REA entry's guide):
+   * the user edits and sends it, nothing is sent here.
+   */
+  composerPrefill?: ComposerPrefill | null;
+  /** Called with the ``id`` once ``composerPrefill`` is in the message box. */
+  onComposerPrefillApplied?: (id: string) => void;
+}
+
+export interface ComposerPrefill {
+  id: string;
+  text: string;
+}
+
+type AttachmentStatus = 'uploading' | 'success' | 'error';
+type UploadOwnership = 'draft' | 'submitting' | 'submitted' | 'unknown';
+
+interface UploadSubmission {
+  start: () => void;
+  accept: () => void;
+  reject: (error: unknown) => void;
+}
+
+interface ComposerAttachment {
+  id: string;
+  file: File;
+  name: string;
+  status: AttachmentStatus;
+  /** For document attachments: the opaque staging ID returned by chat upload. */
+  uploadID?: string;
+  /** MIME type returned by the server for a staged document. */
+  mime?: string;
+  /** For image attachments: the base64 data URL (no server upload needed) */
+  dataUrl?: string;
+  /** True if this attachment is an image file */
+  isImage?: boolean;
+  error?: string;
+}
+
+const APPROX_CHARS_PER_TOKEN = 4;
+// Mirrors SessionPrompt.count_tokens: CJK characters cost about one token each.
+const CJK_CHAR_RE = /[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]/g;
+
+function countTokensLikeCompaction(text: string | null | undefined): number {
+  if (!text) return 0;
+  const cjkChars = text.match(CJK_CHAR_RE)?.length ?? 0;
+  return cjkChars + Math.floor((text.length - cjkChars) / APPROX_CHARS_PER_TOKEN);
+}
+
+const INSIGNIFICANT_THINKING_TEXT_RE = /^[\p{P}\p{S}]+$/u;
+
+export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text' | 'thinking'>): string {
+  if (part.type !== 'reasoning' && part.type !== 'thinking') return '';
+  const text = (part.text || part.thinking || '').trim();
+  if (!text || INSIGNIFICANT_THINKING_TEXT_RE.test(text)) return '';
+  return text;
+}
+
+const NON_TERMINAL_PERIOD_TOKENS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'no', 'fig',
+]);
+const CONTEXTUAL_PERIOD_TOKENS = new Set([
+  'etc', 'inc', 'ltd',
+]);
+
+function isNonTerminalPeriod(line: string, index: number): boolean {
+  const before = line.slice(0, index).trimEnd();
+  const after = line.slice(index + 1).trimStart();
+  if (after && /(?:^|[:：]\s*)(?:\d+|[A-Za-z])$/.test(before)) return true;
+  const token = before.match(/(?:^|\s)([A-Za-z.]+)$/)?.[1].toLowerCase();
+  if (!token) return false;
+  if (NON_TERMINAL_PERIOD_TOKENS.has(token) || /^(?:[a-z]\.)+[a-z]$/.test(token)) {
+    return true;
+  }
+  return CONTEXTUAL_PERIOD_TOKENS.has(token) && /^[a-z\d]/.test(after);
+}
+
+export function getThinkingFirstSentence(text: string): string {
+  const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
+  for (const match of firstLine.matchAll(/[。！？!?]|\.(?=\s|$)/g)) {
+    const sentenceEnd = match.index;
+    if (match[0] === '.' && isNonTerminalPeriod(firstLine, sentenceEnd)) continue;
+    return firstLine.slice(0, sentenceEnd + 1);
+  }
+  return firstLine;
+}
+
+function getProcessPartTime(part: MessagePart): { start: number; end?: number } | undefined {
+  return part.type === 'tool' ? part.state?.time : part.time;
+}
+
+type ProcessTimeInterval = {
+  start: number;
+  end: number;
+};
+
+function getProcessPartInterval(part: MessagePart, activeNowMs?: number): ProcessTimeInterval | null {
+  const time = getProcessPartTime(part);
+  if (!time || !Number.isFinite(time.start)) return null;
+
+  const end = Number.isFinite(time.end) ? time.end : activeNowMs;
+  if (end === undefined || !Number.isFinite(end) || end < time.start) return null;
+
+  return { start: time.start, end };
+}
+
+function isModelActivityPart(part: MessagePart): boolean {
+  return part.type === 'step-start' && !!part.time && Number.isFinite(part.time.start);
+}
+
+export function getProcessGroupDurationMs(
+  parts: readonly MessagePart[],
+  activeNowMs?: number,
+  startedAtMs?: number,
+): number | null {
+  const intervals = parts.map((part) => getProcessPartInterval(part, activeNowMs))
+    .filter((interval): interval is ProcessTimeInterval => interval !== null);
+  // Measure the user's elapsed wait, including gaps and retry backoff.
+  const start = typeof startedAtMs === 'number' && Number.isFinite(startedAtMs) && startedAtMs > 0
+    ? startedAtMs
+    : Math.min(...intervals.map((interval) => interval.start));
+  const end = Math.max(activeNowMs ?? -Infinity, ...intervals.map((interval) => interval.end));
+  return Number.isFinite(start) && Number.isFinite(end) ? Math.max(0, end - start) : null;
+}
+
+export function formatProcessDuration(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.floor(durationMs / 1_000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}m${totalSeconds % 60}s`;
+}
+
+function readObservedProcessEnd(storageKey: string): number | undefined {
+  try {
+    const value = Number(window.sessionStorage.getItem(storageKey));
+    return Number.isFinite(value) && value > 0 ? value : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function useProcessElapsedClock(enabled: boolean, storageKey: string): number | undefined {
+  const [clock, setClock] = useState(() => ({
+    key: storageKey,
+    value: enabled ? Date.now() : readObservedProcessEnd(storageKey),
+  }));
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    const tick = () => {
+      const value = Date.now();
+      setClock({ key: storageKey, value });
+      // Keep the last displayed end across Stop, timeline remounts and tab reloads.
+      // This is only a local lower bound; later recorded part ends still win.
+      try { window.sessionStorage.setItem(storageKey, String(value)); } catch { /* Storage may be disabled. */ }
+    };
+    tick();
+    const timer = window.setInterval(tick, 1_000);
+    return () => window.clearInterval(timer);
+  }, [enabled, storageKey]);
+
+  return clock.key === storageKey ? clock.value : readObservedProcessEnd(storageKey);
+}
+
+const StreamingReasoningText = memo(function StreamingReasoningText({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming: boolean;
+}) {
+  const displayContent = useStreamingContent(content, isStreaming);
+  return <>{displayContent}</>;
+});
+
+function stringifyToolPayload(value: unknown): string {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function estimatePartTokens(part: MessagePart): number {
+  if (part.ignored) return 0;
+  if (part.type === 'text') {
+    return countTokensLikeCompaction(part.text);
+  }
+  if (part.type === 'reasoning' || part.type === 'thinking') {
+    return countTokensLikeCompaction(part.text);
+  }
+  if (part.type === 'tool' && part.state) {
+    const inputTokens = countTokensLikeCompaction(stringifyToolPayload(part.state.input));
+    const isCompacted = Boolean((part.state.time as { compacted?: boolean } | undefined)?.compacted);
+    const outputTokens = isCompacted
+      ? 10
+      : countTokensLikeCompaction(stringifyToolPayload(part.state.output));
+    return inputTokens + outputTokens;
+  }
+  return 0;
+}
+
+export interface ContextUsageBreakdownSegment {
+  key:
+    | 'systemPrompt'
+    | 'toolDefinitions'
+    | 'tools'
+    | 'skillLoad'
+    | 'agentDelegation'
+    | 'conversation'
+    | 'reasoning'
+    | 'draft'
+    | 'compactedHistory';
+  tokens: number;
+  colorClass: string;
+  included: boolean;
+}
+
+export interface ContextUsageBreakdown {
+  usedTokens: number;
+  compactedTokens: number;
+  segments: ContextUsageBreakdownSegment[];
+  excludedSegments: ContextUsageBreakdownSegment[];
+}
+
+interface ContextUsageBreakdownOptions {
+  includeSnapshotUsage?: boolean;
+  pendingTokenDeltas?: ContextUsageTokenDeltas;
+  useLocalMessageUsage?: boolean;
+}
+
+type ContextUsageTokenDeltas = Partial<Record<ContextUsageBreakdownSegment['key'], number>>;
+
+interface PendingContextUsageEntry {
+  snapshotTokenDeltas: ContextUsageTokenDeltas;
+  localTokenDeltas: ContextUsageTokenDeltas;
+}
+
+interface PendingContextUsageState {
+  sessionId: string | null;
+  baselineSnapshot: ContextUsageSnapshot | null;
+  entries: Record<string, PendingContextUsageEntry>;
+}
+
+const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string> = {
+  systemPrompt: 'aegis-context-system',
+  toolDefinitions: 'aegis-context-definitions',
+  tools: 'aegis-context-tools',
+  skillLoad: 'aegis-context-skills',
+  agentDelegation: 'aegis-context-agents',
+  conversation: 'aegis-context-conversation',
+  reasoning: 'aegis-context-reasoning',
+  draft: 'aegis-context-draft',
+  compactedHistory: 'aegis-context-compacted',
+};
+
+const CONTEXT_SEGMENT_KEYS = new Set(Object.keys(CONTEXT_SEGMENT_COLORS));
+const CONTEXT_USAGE_FIXED_SEGMENT_KEYS = [
+  'systemPrompt',
+  'toolDefinitions',
+  'conversation',
+  'reasoning',
+  'tools',
+  'skillLoad',
+  'agentDelegation',
+] as const satisfies readonly ContextUsageBreakdownSegment['key'][];
+const CONTEXT_USAGE_FIXED_SEGMENT_KEY_SET = new Set<ContextUsageBreakdownSegment['key']>(
+  CONTEXT_USAGE_FIXED_SEGMENT_KEYS,
+);
+
+function estimateMessageTokens(message: Message): number {
+  return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
+}
+
+function isModelInvocationMessage(message: Message): boolean {
+  if (message.role === 'user') {
+    return Boolean(message.model)
+      && message.parts.some((part) => part.ignored !== true);
+  }
+  return message.role === 'assistant'
+    && message.providerID !== 'builtin'
+    && message.modelID !== 'command'
+    && Boolean(message.providerID || message.modelID);
+}
+
+function estimateActiveMessageBreakdown(messages: Message[]): Pick<ContextUsageBreakdown, 'segments' | 'usedTokens'> {
+  let conversationTokens = 0;
+  let reasoningTokens = 0;
+  let toolTokens = 0;
+  let skillLoadTokens = 0;
+  let agentDelegationTokens = 0;
+
+  messages.forEach((message) => {
+    if (message.compacted) return;
+    message.parts.forEach((part) => {
+      const tokens = estimatePartTokens(part);
+      if (part.type === 'reasoning' || part.type === 'thinking') {
+        reasoningTokens += tokens;
+      } else if (part.type === 'tool') {
+        if (part.tool === 'skill_load') {
+          skillLoadTokens += tokens;
+        } else if (isDelegateTool(part.tool || '')) {
+          agentDelegationTokens += tokens;
+        } else {
+          toolTokens += tokens;
+        }
+      } else {
+        conversationTokens += tokens;
+      }
+    });
+  });
+
+  const segments: ContextUsageBreakdownSegment[] = [];
+  if (conversationTokens > 0) {
+    segments.push({
+      key: 'conversation',
+      tokens: conversationTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.conversation,
+      included: true,
+    });
+  }
+  if (reasoningTokens > 0) {
+    segments.push({
+      key: 'reasoning',
+      tokens: reasoningTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.reasoning,
+      included: true,
+    });
+  }
+  if (toolTokens > 0) {
+    segments.push({
+      key: 'tools',
+      tokens: toolTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.tools,
+      included: true,
+    });
+  }
+  if (skillLoadTokens > 0) {
+    segments.push({
+      key: 'skillLoad',
+      tokens: skillLoadTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.skillLoad,
+      included: true,
+    });
+  }
+  if (agentDelegationTokens > 0) {
+    segments.push({
+      key: 'agentDelegation',
+      tokens: agentDelegationTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.agentDelegation,
+      included: true,
+    });
+  }
+
+  return {
+    usedTokens: conversationTokens
+      + reasoningTokens
+      + toolTokens
+      + skillLoadTokens
+      + agentDelegationTokens,
+    segments,
+  };
+}
+
+function addContextTokenDelta(
+  deltas: ContextUsageTokenDeltas,
+  key: ContextUsageBreakdownSegment['key'],
+  tokenDelta: number,
+): void {
+  if (tokenDelta === 0) return;
+  deltas[key] = (deltas[key] || 0) + tokenDelta;
+}
+
+function normalizeContextSegment(segment: {
+  key: string;
+  tokens: number;
+  included?: boolean;
+}): ContextUsageBreakdownSegment | null {
+  const rawKey = segment.key === 'otherContext' ? 'conversation' : segment.key;
+  if (!CONTEXT_SEGMENT_KEYS.has(rawKey)) {
+    return null;
+  }
+  const key = rawKey as ContextUsageBreakdownSegment['key'];
+  return {
+    key,
+    tokens: Math.max(0, Math.round(segment.tokens || 0)),
+    colorClass: CONTEXT_SEGMENT_COLORS[key],
+    included: segment.included !== false,
+  };
+}
+
+function addContextSegmentTokens(
+  segments: ContextUsageBreakdownSegment[],
+  key: ContextUsageBreakdownSegment['key'],
+  tokens: number,
+): void {
+  if (tokens <= 0) return;
+  const existing = segments.find((segment) => segment.key === key);
+  if (existing) {
+    existing.tokens += tokens;
+    return;
+  }
+  segments.push({
+    key,
+    tokens,
+    colorClass: CONTEXT_SEGMENT_COLORS[key],
+    included: true,
+  });
+}
+
+function adjustContextSegmentTokens(
+  segments: ContextUsageBreakdownSegment[],
+  key: ContextUsageBreakdownSegment['key'],
+  tokenDelta: number,
+): number {
+  if (tokenDelta === 0) return 0;
+  const existing = segments.find((segment) => segment.key === key);
+  if (existing) {
+    const previousTokens = existing.tokens;
+    existing.tokens = Math.max(0, previousTokens + tokenDelta);
+    return existing.tokens - previousTokens;
+  } else if (tokenDelta > 0) {
+    addContextSegmentTokens(segments, key, tokenDelta);
+    return tokenDelta;
+  }
+  return 0;
+}
+
+// Rows are estimates; the total is what the provider reported. The backend
+// folds an observed surplus into "conversation", but most of it is tokenizer
+// drift that belongs to every row (a two-message chat is not 3K tokens of
+// conversation), so take it back out and scale all rows to the total instead.
+// An estimate above the total (uncounted history reasoning) scales down.
+function scaleContextSegmentsToObservedTotal(
+  segments: ContextUsageBreakdownSegment[],
+  estimatedTokens: number,
+  usedTokens: number,
+): void {
+  if (usedTokens <= 0 || usedTokens === estimatedTokens) return;
+  if (usedTokens > estimatedTokens) {
+    adjustContextSegmentTokens(segments, 'conversation', -(usedTokens - estimatedTokens));
+  }
+  const counted = segments.filter((segment) => segment.included && segment.tokens > 0);
+  const countedTokens = counted.reduce((total, segment) => total + segment.tokens, 0);
+  if (countedTokens <= 0 || countedTokens === usedTokens) return;
+  let assigned = 0;
+  let largest = counted[0];
+  counted.forEach((segment) => {
+    segment.tokens = Math.floor((segment.tokens * usedTokens) / countedTokens);
+    assigned += segment.tokens;
+    if (segment.tokens > largest.tokens) largest = segment;
+  });
+  largest.tokens += usedTokens - assigned;
+}
+
+function normalizeFixedContextSegments(
+  segments: ContextUsageBreakdownSegment[],
+): ContextUsageBreakdownSegment[] {
+  const byKey = new Map<ContextUsageBreakdownSegment['key'], ContextUsageBreakdownSegment>();
+  for (const segment of segments) {
+    if (!CONTEXT_USAGE_FIXED_SEGMENT_KEY_SET.has(segment.key)) {
+      continue;
+    }
+    const existing = byKey.get(segment.key);
+    if (existing) {
+      existing.tokens += segment.tokens;
+    } else {
+      byKey.set(segment.key, { ...segment, included: true });
+    }
+  }
+
+  return CONTEXT_USAGE_FIXED_SEGMENT_KEYS.map((key) => {
+    const segment = byKey.get(key);
+    if (segment) {
+      return segment;
+    }
+    return {
+      key,
+      tokens: 0,
+      colorClass: CONTEXT_SEGMENT_COLORS[key],
+      included: true,
+    };
+  });
+}
+
+export function buildContextUsageBreakdown(
+  messages: Message[],
+  draft: string,
+  snapshot?: ContextUsageSnapshot | null,
+  options?: ContextUsageBreakdownOptions,
+): ContextUsageBreakdown {
+  const compactedTokens = messages.reduce((total, message) => (
+    message.compacted ? total + estimateMessageTokens(message) : total
+  ), 0);
+  const draftTokens = countTokensLikeCompaction(draft);
+
+  if (snapshot) {
+    const serverSegments = (snapshot.segments || [])
+      .map(normalizeContextSegment)
+      .filter((segment): segment is ContextUsageBreakdownSegment => Boolean(segment));
+    const includeSnapshotUsage = options?.includeSnapshotUsage !== false;
+    const useLocalMessageUsage = includeSnapshotUsage && options?.useLocalMessageUsage === true;
+    const activeBreakdown = useLocalMessageUsage
+      ? estimateActiveMessageBreakdown(messages)
+      : null;
+    const segments = includeSnapshotUsage
+      ? useLocalMessageUsage
+        ? serverSegments.filter((segment) => (
+            segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+          ))
+        : [...serverSegments]
+      : serverSegments.filter((segment) => segment.key === 'systemPrompt');
+    activeBreakdown?.segments.forEach((segment) => {
+      addContextSegmentTokens(segments, segment.key, segment.tokens);
+    });
+    const includedSystemPromptTokens = serverSegments.reduce((total, segment) => (
+      segment.key === 'systemPrompt' && segment.included ? total + segment.tokens : total
+    ), 0);
+    const includedToolDefinitionTokens = serverSegments.reduce((total, segment) => (
+      segment.key === 'toolDefinitions' && segment.included ? total + segment.tokens : total
+    ), 0);
+    // ``usedTokens`` is the figure the backend compares against the
+    // compaction threshold (provider-reported usage, including the system
+    // prompt and tool definitions), so the meter reaches that threshold when
+    // compaction actually starts.
+    const snapshotUsedTokens = snapshot.usedTokens > 0
+      ? snapshot.usedTokens
+      : snapshot.estimatedTokens || 0;
+    if (includeSnapshotUsage && !useLocalMessageUsage && snapshot.estimatedTokens > 0) {
+      scaleContextSegmentsToObservedTotal(segments, snapshot.estimatedTokens, snapshotUsedTokens);
+    }
+    const pendingTokenDeltas = includeSnapshotUsage ? options?.pendingTokenDeltas || {} : {};
+    const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
+      (total, [key, tokenDelta]) => total + adjustContextSegmentTokens(
+        segments,
+        key as ContextUsageBreakdownSegment['key'],
+        tokenDelta || 0,
+      ),
+      0,
+    );
+
+    addContextSegmentTokens(segments, 'conversation', draftTokens);
+
+    return {
+      usedTokens: (
+        includeSnapshotUsage
+          ? Math.max(
+              0,
+              (
+                useLocalMessageUsage
+                  ? includedSystemPromptTokens
+                    + includedToolDefinitionTokens
+                    + (activeBreakdown?.usedTokens || 0)
+                  : snapshotUsedTokens
+              ) + pendingTokenDeltaTotal,
+            )
+          : 0
+      ) + draftTokens,
+      compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
+      // Before the first model call nothing is sent yet, so the fixed
+      // prompt costs are listed but not counted.
+      segments: normalizeFixedContextSegments(segments).map((segment) => (
+        !includeSnapshotUsage
+          && (segment.key === 'systemPrompt' || segment.key === 'toolDefinitions')
+          ? { ...segment, included: false }
+          : segment
+      )),
+      excludedSegments: [],
+    };
+  }
+
+  const activeBreakdown = estimateActiveMessageBreakdown(messages);
+  const segments: ContextUsageBreakdownSegment[] = [...activeBreakdown.segments];
+  const pendingTokenDeltas = options?.pendingTokenDeltas || {};
+  const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
+    (total, [key, tokenDelta]) => total + adjustContextSegmentTokens(
+      segments,
+      key as ContextUsageBreakdownSegment['key'],
+      tokenDelta || 0,
+    ),
+    0,
+  );
+
+  addContextSegmentTokens(segments, 'conversation', draftTokens);
+
+  return {
+    usedTokens: Math.max(0, activeBreakdown.usedTokens + pendingTokenDeltaTotal) + draftTokens,
+    compactedTokens,
+    segments: normalizeFixedContextSegments(segments).map((segment) => (
+      segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+        ? { ...segment, included: false }
+        : segment
+    )),
+    excludedSegments: [],
+  };
+}
+
+function formatTokenCount(tokens: number): string {
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(tokens >= 10000000 ? 0 : 1)}M`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens >= 10000 ? 0 : 1)}K`;
+  return String(tokens);
+}
+
+function getContextUsageLabel(
+  t: ReturnType<typeof useTranslation>['t'],
+  key: ContextUsageBreakdownSegment['key'],
+): string {
+  const fallback: Record<ContextUsageBreakdownSegment['key'], string> = {
+    systemPrompt: 'System prompt',
+    toolDefinitions: 'Tool definitions',
+    tools: 'Tool calls',
+    skillLoad: 'Skill loads',
+    agentDelegation: 'Agent delegation',
+    conversation: 'Conversation',
+    reasoning: 'Reasoning',
+    draft: 'Current draft',
+    compactedHistory: 'Compacted history',
+  };
+  const i18nKey = `chat.contextUsage.breakdown.${key}`;
+  const label = t(i18nKey);
+  return label === i18nKey ? fallback[key] : label;
+}
+
+function ContextUsageRing({
+  percent,
+  title,
+  usedTokens,
+  totalTokens,
+  breakdown,
+}: {
+  percent: number;
+  title: string;
+  usedTokens: number;
+  totalTokens: number;
+  breakdown: ContextUsageBreakdown;
+}) {
+  const { t } = useTranslation('session');
+  const [open, setOpen] = useState(false);
+  const wrapperRef = useRef<HTMLDivElement>(null);
+  const clamped = Math.max(0, Math.min(100, percent));
+  const radius = 9;
+  const circumference = 2 * Math.PI * radius;
+  const strokeDashoffset = circumference * (1 - clamped / 100);
+  const strokeClass = clamped >= 90
+    ? 'stroke-red-500'
+    : clamped >= 75
+      ? 'stroke-amber-500'
+      : clamped >= 50
+        ? 'stroke-sky-500'
+        : 'stroke-zinc-400';
+  // Fixed prompt costs are only counted once the model has been called.
+  const rows = breakdown.segments.filter((segment) => (
+    segment.included || (segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions')
+  ));
+  const activeSegments = breakdown.segments.filter((segment) => segment.included && segment.tokens > 0);
+
+  useEffect(() => {
+    if (!open) return undefined;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!wrapperRef.current?.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+    };
+  }, [open]);
+
+  return (
+    <div
+      ref={wrapperRef}
+      onKeyDown={(event) => {
+        if (open && event.key === 'Escape') {
+          // Consume the nested menu action before the containing modal's
+          // document listener sees it, and return focus to this trigger.
+          event.preventDefault();
+          event.stopPropagation();
+          setOpen(false);
+          wrapperRef.current?.querySelector('button')?.focus();
+        }
+      }}
+      onBlur={(event) => {
+        if (event.relatedTarget instanceof Node && !event.currentTarget.contains(event.relatedTarget)) {
+          setOpen(false);
+        }
+      }}
+      className="relative inline-flex h-6 shrink-0 items-center justify-center"
+    >
+      <button
+        type="button"
+        className="relative inline-flex h-6 items-center gap-1 rounded-md px-1 text-[10px] font-medium tabular-nums text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+        title={title}
+        aria-label={title}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((value) => !value)}
+      >
+        <svg className="h-5 w-5 shrink-0 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200 dark:stroke-zinc-800" />
+          <circle
+            cx="12"
+            cy="12"
+            r={radius}
+            fill="none"
+            strokeWidth="2"
+            strokeLinecap="round"
+            className={strokeClass}
+            strokeDasharray={circumference}
+            strokeDashoffset={strokeDashoffset}
+          />
+        </svg>
+        <span aria-hidden="true">{clamped}%</span>
+      </button>
+
+      {open && (
+        <div
+          role="menu"
+          aria-label={t('chat.contextUsage.title')}
+          className="aegis-context-popover absolute bottom-full right-0 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white text-zinc-800 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:shadow-xl dark:shadow-black/30 z-50"
+        >
+          <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
+            <div className="flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100 truncate">{t('chat.contextUsage.title')}</div>
+                <div className="text-[10px] text-zinc-400 dark:text-zinc-500 truncate">
+                  {t('chat.contextUsage.tokens', {
+                    used: formatTokenCount(usedTokens),
+                    total: formatTokenCount(totalTokens),
+                  })}
+                </div>
+              </div>
+              <span className="rounded bg-zinc-50 px-1.5 py-0.5 text-[10px] font-medium text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300 shrink-0">
+                {t('chat.contextUsage.full', { percent: clamped })}
+              </span>
+            </div>
+            <div className="mt-1.5 h-1 rounded-full bg-zinc-100 dark:bg-zinc-800 overflow-hidden">
+              <div
+                className="flex h-full overflow-hidden rounded-full"
+                style={{ width: `${clamped}%` }}
+              >
+                {activeSegments.map((segment) => (
+                  <div
+                    key={segment.key}
+                    className={segment.colorClass}
+                    style={{
+                      flex: '0 0 auto',
+                      width: `${Math.min(100, (segment.tokens / Math.max(1, usedTokens)) * 100)}%`,
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <div className="aegis-context-rows max-h-[13.5rem] space-y-0.5 overflow-y-auto p-1.5">
+            {rows.map((segment) => (
+              <div
+                key={segment.key}
+                role="menuitem"
+                className="flex items-center justify-between gap-3 rounded-md px-2 py-1.5 text-xs text-zinc-700 dark:text-zinc-300 min-w-0"
+              >
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className={`h-3 w-3 rounded-[3px] shrink-0 ${segment.colorClass}`} />
+                  <span className="font-medium text-zinc-800 dark:text-zinc-100 truncate">
+                    {getContextUsageLabel(t, segment.key)}
+                  </span>
+                </div>
+                <span className={segment.included ? 'text-zinc-600 dark:text-zinc-300 shrink-0' : 'text-zinc-400 dark:text-zinc-500 shrink-0'}>
+                  {formatTokenCount(segment.included ? segment.tokens : 0)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Composer drafts are persisted to ``localStorage`` so navigating away from
+// the page (e.g. clicking the sidebar to open Agents / Workflows) and coming
+// back doesn't lose the half-typed message. Keyed per session so two sessions
+// don't share a draft, and namespaced to avoid colliding with other features.
+import { readChatDraft, writeChatDraft } from '@/utils/chatDraft';
+
+interface CompactionStageEntry {
+  stage: CompactionStage;
+  data: Record<string, unknown>;
+  ts: number;
+}
+
+/**
+ * Render a single human-readable line for one compaction stage event.
+ *
+ * Kept i18n-aware (caller passes ``t``) and total-aware so e.g.
+ * ``chunk_done`` shows ``2 / 5``.  Numbers are rendered defensively —
+ * the SSE payload is untyped JSON, so we type-narrow before formatting.
+ *
+ * Returns ``null`` if the stage is unknown so the caller can ``filter
+ * Boolean`` the list without printing raw event names to end users.
+ */
+function describeCompactionStage(
+  entry: CompactionStageEntry,
+  t: (key: string, options?: Record<string, unknown>) => string,
+): string | null {
+  const data = entry.data;
+  const num = (k: string): number | undefined =>
+    typeof data[k] === 'number' ? (data[k] as number) : undefined;
+  switch (entry.stage) {
+    case 'load': {
+      const count = num('message_count');
+      return t('chat.compactionStage.load', { count: count ?? '?' });
+    }
+    case 'strategy': {
+      const decision = typeof data.decision === 'string' ? data.decision : 'single_pass';
+      const chunks = num('chunks');
+      if (chunks && chunks > 1) {
+        return t('chat.compactionStage.strategyChunked', { count: chunks });
+      }
+      return t(`chat.compactionStage.strategy_${decision}`, {
+        defaultValue: t('chat.compactionStage.strategyGeneric'),
+      });
+    }
+    case 'chunk_done':
+      // Per-chunk events drive the percentage bar but are intentionally
+      // hidden from the milestone list — users asked for a single
+      // overall progress signal rather than N noisy "chunk X/N done"
+      // lines that arrive out of order under ``asyncio.gather``.
+      return null;
+    case 'merge_started':
+      return t('chat.compactionStage.mergeStarted', { count: num('chunks_merged') ?? '?' });
+    case 'merge_done': {
+      const ok = data.ok !== false;
+      const ms = num('duration_ms');
+      return ok
+        ? t('chat.compactionStage.mergeDone', {
+            seconds: ms !== undefined ? (ms / 1000).toFixed(1) : '?',
+          })
+        : t('chat.compactionStage.mergeFailed');
+    }
+    case 'summarize_done':
+      return t('chat.compactionStage.summarizeDone', { chars: num('summary_chars') ?? 0 });
+    case 'complete':
+      return t('chat.compactionStage.complete');
+    default:
+      return null;
+  }
+}
+
+// ============================================================================
+// Utilities
+// ============================================================================
+
+/**
+ * Merge consecutive assistant messages into single display items.
+ * Summary messages (finish === 'summary') and compacted messages are kept as-is.
+ */
+export function mergeConsecutiveAssistantMessages(messages: Message[]): MergedMessage[] {
+  const result: MergedMessage[] = [];
+
+  for (const msg of messages) {
+    if (msg.finish === 'summary') {
+      result.push({ ...msg, parts: [...msg.parts], _merged: false });
+      continue;
+    }
+
+    if (msg.role !== 'assistant' || getAgentSender(msg.parts)) {
+      result.push(msg);
+      continue;
+    }
+
+    const last = result[result.length - 1];
+    const cacheUsageCalls = getChatCacheUsageCalls(msg);
+    if (
+      last &&
+      last.role === 'assistant' &&
+      !getAgentSender(last.parts) &&
+      last._merged &&
+      last.finish !== 'summary' &&
+      last.parentID === msg.parentID &&
+      !!last.compacted === !!msg.compacted
+    ) {
+      last.parts = [...last.parts, ...msg.parts];
+      last._cacheUsageCalls = [...(last._cacheUsageCalls || []), ...cacheUsageCalls];
+      // The last constituent message owns the live state, including an unset
+      // finish and the error that stopped the turn.
+      last.finish = msg.finish;
+      last.error = msg.error;
+    } else {
+      result.push({ ...msg, parts: [...msg.parts], _merged: true, _cacheUsageCalls: cacheUsageCalls });
+    }
+  }
+
+  return result;
+}
+
+export function getMessageBubbleClassName({
+  compact,
+  isUser,
+  isEditing,
+}: {
+  compact: boolean;
+  isUser: boolean;
+  isEditing: boolean;
+}): string {
+  if (!isUser) {
+    const typographyClass = compact ? 'text-sm' : 'text-base';
+
+    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-ui-text break-words`;
+  }
+
+  if (compact) {
+    const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
+
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[18px] text-sm break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
+  }
+
+  const widthClass = isEditing ? 'w-full' : 'w-auto';
+
+  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-base break-words border border-ui-border/60 bg-ui-subtle text-ui-text`;
+}
+
+export function getInstructionDisplayBubbleClassName(compact: boolean): string {
+  return `${compact ? 'px-2.5 py-1.5' : 'px-3 py-2'} rounded-lg border border-rose-100 bg-rose-50/80 text-sm text-rose-700 shadow-none dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200`;
+}
+
+export function getMessageGroupClassName({
+  compact,
+  isUser,
+  isEditing,
+}: {
+  compact: boolean;
+  isUser: boolean;
+  isEditing: boolean;
+}): string {
+  if (!isUser) {
+    return compact ? 'w-full max-w-full' : 'w-full';
+  }
+
+  if (compact) {
+    return isEditing ? 'w-full max-w-[90%]' : 'w-fit max-w-[90%]';
+  }
+
+  return isEditing ? 'w-full max-w-full' : 'w-fit max-w-[88%]';
+}
+
+export function getCompactionDividerClassName(compact: boolean, inset = true): string {
+  // Inset into the assistant content column; bodies drawn without an avatar have none.
+  const messageInset = !inset ? 'pl-0' : compact ? 'pl-[38px]' : 'pl-[42px]';
+  return `${compact ? 'my-3' : 'my-4'} flex w-full min-w-0 items-center gap-3 ${messageInset} pr-1 text-xs text-zinc-500`;
+}
+
+export function getRegenerateTruncateTarget(
+  messages: Message[],
+  messageId: string,
+): { messageId: string; includeTarget?: boolean } {
+  const targetMessage = messages.find((message) => message.id === messageId);
+  if (targetMessage?.role === 'assistant' && targetMessage.parentID) {
+    return { messageId: targetMessage.parentID };
+  }
+  return { messageId, includeTarget: true };
+}
+
+export function shouldRefetchFinishedMessage({
+  finishedMessageId,
+  abortedMessageId,
+}: {
+  finishedMessageId?: string | null;
+  abortedMessageId?: string | null;
+}): boolean {
+  return !finishedMessageId || !abortedMessageId || finishedMessageId !== abortedMessageId;
+}
+
+export function isActiveToolPart(part?: Pick<MessagePart, 'type' | 'state'> | null): boolean {
+  return (
+    (part?.type === 'tool' || part?.type === 'toolCall') &&
+    (part.state?.status === 'pending' || part.state?.status === 'running')
+  );
+}
+
+export function hasActiveToolPart(parts?: Array<Pick<MessagePart, 'type' | 'state'>> | null): boolean {
+  return parts?.some(isActiveToolPart) ?? false;
+}
+
+type FetchedMessageWithParts = {
+  info?: {
+    id?: string;
+    role?: string;
+    parentID?: string | null;
+    finish?: string | null;
+    time?: { completed?: number | null };
+  };
+  parts?: MessagePart[];
+};
+
+function getCurrentTurnAssistantMessages(
+  messages: FetchedMessageWithParts[],
+): FetchedMessageWithParts[] | null {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.info?.role === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+
+  let turnParentID = latestUserIndex >= 0
+    ? messages[latestUserIndex]?.info?.id
+    : undefined;
+  let turnStartIndex = latestUserIndex + 1;
+
+  // A single tool-heavy turn can exceed the latest-message page. If its user
+  // message is outside the page, recover the turn from the newest assistant's
+  // parent instead of falling back to every historical tool in the page.
+  if (!turnParentID) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const info = messages[index]?.info;
+      if (info?.role === 'assistant' && info.parentID) {
+        turnParentID = info.parentID;
+        turnStartIndex = 0;
+        break;
+      }
+    }
+  }
+
+  if (!turnParentID) return null;
+  return messages.slice(turnStartIndex).filter((message) => (
+    message.info?.role === 'assistant'
+    && message.info.parentID === turnParentID
+  ));
+}
+
+export function isActiveSessionStatus(status?: { type?: string } | null): boolean {
+  return status?.type === 'busy'
+    || status?.type === 'compacting'
+    || status?.type === 'dreaming'
+    || status?.type === 'retry';
+}
+
+export function getEditingActionBarClassName(): string {
+  return 'mt-3 flex w-full items-center justify-end gap-1.5';
+}
+
+export function getStandaloneThinkingBubbleClassName(compact: boolean): string {
+  return getMessageBubbleClassName({ compact, isUser: false, isEditing: false });
+}
+
+export function getRenderableFileUrl(url: string): string {
+  if (!url.startsWith('file://')) {
+    return url;
+  }
+
+  try {
+    const parsed = new URL(url);
+    let path = decodeURIComponent(parsed.pathname);
+    if (/^\/[A-Za-z]:\//.test(path)) {
+      path = path.slice(1);
+    } else if (parsed.hostname) {
+      path = `//${parsed.hostname}${path}`;
+    }
+    return `${getApiBase()}/api/file/download?path=${encodeURIComponent(path)}`;
+  } catch {
+    return url;
+  }
+}
+
+export function shouldRenderMessage(
+  message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>,
+  options?: { isActive?: boolean },
+): boolean {
+  const visibleParts = message.parts?.filter((part) => !isModelActivityPart(part));
+  if (
+    message.role === 'assistant' &&
+    (visibleParts?.length ?? 0) === 0 &&
+    message.finish !== 'summary' &&
+    !message.error &&
+    !options?.isActive
+  ) {
+    return false;
+  }
+  if (
+    message.role === 'assistant' &&
+    (visibleParts?.length ?? 0) === 0 &&
+    message.finish === 'stop' &&
+    !message.error
+  ) {
+    return false;
+  }
+  if (
+    message.role === 'assistant' &&
+    message.finish === 'stop' &&
+    !message.error &&
+    visibleParts?.length &&
+    visibleParts.every((part) => {
+      if (part.type === 'text') return !(part.text || '').trim();
+      if (part.type === 'reasoning' || part.type === 'thinking') return !getRenderableThinkingText(part);
+      return false;
+    })
+  ) {
+    return false;
+  }
+  return true;
+}
+
+export interface ChatTimelineItem {
+  message: MergedMessage;
+  isActive: boolean;
+}
+
+export function buildChatTimelineItems({
+  messages,
+  skipIndices,
+  isStreaming,
+}: {
+  messages: MergedMessage[];
+  skipIndices: Set<number>;
+  isStreaming: boolean;
+}): ChatTimelineItem[] {
+  const items: ChatTimelineItem[] = [];
+  for (let index = 0; index < messages.length; index++) {
+    if (skipIndices.has(index)) continue;
+    const message = messages[index];
+    const isActive =
+      isStreaming &&
+      index === messages.length - 1 &&
+      message.role === 'assistant' &&
+      !message.finish;
+    if (!shouldRenderMessage(message, { isActive })) continue;
+    items.push({ message, isActive });
+  }
+  return items;
+}
+
+export function areChatTimelineItemsRenderEqual(
+  prevItems: ChatTimelineItem[],
+  nextItems: ChatTimelineItem[],
+): boolean {
+  if (prevItems.length !== nextItems.length) return false;
+
+  for (let index = 0; index < prevItems.length; index++) {
+    const prev = prevItems[index];
+    const next = nextItems[index];
+    if (prev.isActive !== next.isActive) return false;
+
+    const prevMessage = prev.message;
+    const nextMessage = next.message;
+    if (prevMessage === nextMessage) continue;
+    if (prevMessage.id !== nextMessage.id) return false;
+    if (prevMessage.role !== nextMessage.role) return false;
+    if (prevMessage.finish !== nextMessage.finish) return false;
+    if (prevMessage.error !== nextMessage.error) return false;
+    if (prevMessage.agent !== nextMessage.agent) return false;
+    if (prevMessage.timestamp !== nextMessage.timestamp) return false;
+    if (prevMessage.compacted !== nextMessage.compacted) return false;
+    if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prevMessage), getChatCacheUsageCalls(nextMessage))) return false;
+    if (!areChatMessagePartsRenderEqual(prevMessage.parts, nextMessage.parts)) return false;
+  }
+
+  return true;
+}
+
+function useStableChatTimelineSegments(items: ChatTimelineItem[]): {
+  historyItems: ChatTimelineItem[];
+  tailItems: ChatTimelineItem[];
+} {
+  const previousRef = useRef<{
+    historyItems: ChatTimelineItem[];
+    tailItems: ChatTimelineItem[];
+  } | null>(null);
+
+  return useMemo(() => {
+    const tailStart = items.length > 0 && items[items.length - 1].isActive
+      ? items.length - 1
+      : items.length;
+    const nextHistoryItems = tailStart === items.length ? items : items.slice(0, tailStart);
+    const nextTailItems = tailStart === items.length ? [] : items.slice(tailStart);
+    const previous = previousRef.current;
+
+    const historyItems = previous && areChatTimelineItemsRenderEqual(previous.historyItems, nextHistoryItems)
+      ? previous.historyItems
+      : nextHistoryItems;
+    const tailItems = previous && areChatTimelineItemsRenderEqual(previous.tailItems, nextTailItems)
+      ? previous.tailItems
+      : nextTailItems;
+    const next = { historyItems, tailItems };
+    previousRef.current = next;
+    return next;
+  }, [items]);
+}
+
+export function getMessageErrorText(message: Pick<Message, 'error'>): string {
+  const error = message.error as any;
+  if (!error) return '';
+  if (typeof error === 'string') return error;
+  if (typeof error.data?.displayMessage === 'string' && error.data.displayMessage.trim()) {
+    return error.data.displayMessage;
+  }
+  if (typeof error.message === 'string' && error.message.trim()) return error.message;
+  if (typeof error.data?.message === 'string' && error.data.message.trim()) {
+    return error.data.message;
+  }
+  if (typeof error.code === 'string' && error.code.trim()) return error.code;
+  if (typeof error.name === 'string' && error.name.trim()) return error.name;
+  return 'Message failed';
+}
+
+/** Translation key explaining why a retryable error still stopped the turn, if recorded. */
+export function getMessageErrorNoteKey(message: Pick<Message, 'error'>): string | null {
+  const error = message.error as any;
+  if (error?.data?.retrySuppressed === 'tool_execution_started') return 'chat.stopReason.toolExecuted';
+  return null;
+}
+
+export function getUserAvatarContainerClassName(compact: boolean): string {
+  return `pointer-events-none flex flex-shrink-0 items-start justify-center pt-1 ${
+    compact ? 'h-7' : 'h-8'
+  }`;
+}
+
+export function getUserAvatarSpacerClassName(_compact: boolean): string {
+  return 'h-0';
+}
+
+// ============================================================================
+// Main component
+// ============================================================================
+
+const ABORT_SSE_SETTLE_DELAY = 2000;
+const SCROLL_BOTTOM_THRESHOLD_PX = 80;
+const FALLBACK_POLL_MS = 5_000;
+const PENDING_QUESTION_RECONCILE_MS = 2_000;
+const WORKSPACE_UPLOAD_DEST = 'uploads';
+const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx,.zip';
+const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
+const ALLOWED_UPLOAD_EXTENSIONS = new Set([
+  'txt', 'md', 'json', 'yaml', 'yml', 'xml', 'csv', 'pdf', 'doc', 'docx',
+  'html', 'htm', 'ppt', 'pptx', 'xls', 'xlsx', 'zip',
+]);
+
+function isAllowedUploadFile(file: File): boolean {
+  return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
+}
+
+function getGoalBannerKey(goal: GoalBannerState | null): string {
+  return goal ? `${goal.status}:${goal.objective}` : '';
+}
+
+function getDismissedGoalStorageKey(sessionId?: string | null): string | null {
+  return sessionId ? `aegisops:session:${sessionId}:dismissedGoal` : null;
+}
+
+function readDismissedGoalKey(sessionId?: string | null): string {
+  const storageKey = getDismissedGoalStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(storageKey) || '';
+  } catch {
+    return '';
+  }
+}
+
+function writeDismissedGoalKey(sessionId: string | null | undefined, goalKey: string): void {
+  const storageKey = getDismissedGoalStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return;
+  try {
+    if (goalKey) {
+      window.localStorage.setItem(storageKey, goalKey);
+    } else {
+      window.localStorage.removeItem(storageKey);
+    }
+  } catch {
+    // Ignore unavailable storage; dismissal still works for the current mount.
+  }
+}
+
+export type ProcessGroupOpenState = Record<string, boolean>;
+
+function getProcessGroupOpenStorageKey(sessionId?: string | null): string | null {
+  return sessionId ? `aegisops:session:${sessionId}:processGroupsOpen` : null;
+}
+
+function readProcessGroupOpenState(sessionId?: string | null): ProcessGroupOpenState {
+  const storageKey = getProcessGroupOpenStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return {};
+  try {
+    const raw = window.localStorage.getItem(storageKey);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, boolean] => (
+        typeof entry[0] === 'string' && typeof entry[1] === 'boolean'
+      )),
+    );
+  } catch {
+    return {};
+  }
+}
+
+function writeProcessGroupOpenState(sessionId: string | null | undefined, state: ProcessGroupOpenState): void {
+  const storageKey = getProcessGroupOpenStorageKey(sessionId);
+  if (!storageKey || typeof window === 'undefined') return;
+  try {
+    if (Object.keys(state).length > 0) {
+      window.localStorage.setItem(storageKey, JSON.stringify(state));
+    } else {
+      window.localStorage.removeItem(storageKey);
+    }
+  } catch {
+    // Ignore unavailable storage; process groups still work for this render.
+  }
+}
+
+function toGoalBannerState(goal: SessionGoalState | null | undefined): GoalBannerState | null {
+  const objective = typeof goal?.objective === 'string' ? goal.objective.trim() : '';
+  const status = typeof goal?.status === 'string' ? goal.status : '';
+  if (!objective || !['active', 'completed', 'blocked', 'paused'].includes(status)) {
+    return null;
+  }
+  return {
+    objective,
+    status: status as GoalBannerStatus,
+    reason: typeof goal?.reason === 'string' ? goal.reason : undefined,
+  };
+}
+
+function getGoalStatusLabel(t: ReturnType<typeof useTranslation>['t'], status: GoalBannerStatus): string {
+  const fallback: Record<GoalBannerStatus, string> = {
+    active: 'Goal',
+    completed: 'Completed',
+    blocked: 'Blocked',
+    paused: 'Paused',
+  };
+  const key = `chat.goal.status.${status}`;
+  const label = t(key);
+  return label === key ? fallback[status] : label;
+}
+
+function getGoalBannerTone(status: GoalBannerStatus): {
+  root: string;
+  dot: string;
+  icon: React.ReactNode;
+} {
+  if (status === 'completed') {
+    return {
+      root: 'border-emerald-200 bg-emerald-50 text-emerald-900',
+      dot: 'bg-emerald-500',
+      icon: <CheckCircle2 aria-hidden="true" className="h-3.5 w-3.5 text-emerald-600" />,
+    };
+  }
+  if (status === 'blocked') {
+    return {
+      root: 'border-red-200 bg-red-50 text-red-900',
+      dot: 'bg-red-500',
+      icon: <AlertCircle aria-hidden="true" className="h-3.5 w-3.5 text-red-600" />,
+    };
+  }
+  if (status === 'paused') {
+    return {
+      root: 'border-amber-200 bg-amber-50 text-amber-900',
+      dot: 'bg-amber-500',
+      icon: <Clock aria-hidden="true" className="h-3.5 w-3.5 text-amber-600" />,
+    };
+  }
+  return {
+    root: 'border-sky-200 bg-sky-50 text-sky-950',
+    dot: 'bg-sky-500',
+    icon: <ListTree aria-hidden="true" className="h-3.5 w-3.5 text-sky-600" />,
+  };
+}
+
+function GoalBanner({
+  goal,
+  t,
+  onDismiss,
+}: {
+  goal: GoalBannerState;
+  t: ReturnType<typeof useTranslation>['t'];
+  onDismiss: () => void;
+}) {
+  const tone = getGoalBannerTone(goal.status);
+  const statusLabel = getGoalStatusLabel(t, goal.status);
+  return (
+    <div className={`mb-2 flex min-w-0 items-center gap-2 rounded-lg border px-3 py-2 text-xs shadow-sm ${tone.root}`}>
+      <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${tone.dot}`} />
+      <span className="shrink-0">{tone.icon}</span>
+      <span className="shrink-0 font-semibold">{statusLabel}</span>
+      <span className="min-w-0 flex-1 truncate font-medium">{goal.objective}</span>
+      {goal.reason && goal.status !== 'active' && (
+        <span className="text-[11px] opacity-70 hidden min-w-0 max-w-[35%] truncate sm:inline">
+          {goal.reason}
+        </span>
+      )}
+      <button
+        type="button"
+        onClick={onDismiss}
+        className="ml-1 inline-flex h-6 w-6 items-center justify-center rounded-md text-current opacity-60 transition hover:bg-black/5 hover:opacity-100 shrink-0"
+        title={t('chat.goal.dismiss')}
+        aria-label={t('chat.goal.dismiss')}
+      >
+        <X aria-hidden="true" className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+interface QueuedPromptPanelProps {
+  items: QueuedPrompt[];
+  expanded: boolean;
+  editingId: string | null;
+  editingText: string;
+  actionId: string | null;
+  t: ReturnType<typeof useTranslation>['t'];
+  onToggle: () => void;
+  onEditStart: (item: QueuedPrompt) => void;
+  onEditChange: (text: string) => void;
+  onEditCancel: () => void;
+  onEditSave: (item: QueuedPrompt) => void;
+  onRemove: (item: QueuedPrompt) => void;
+  onRunNow: (item: QueuedPrompt) => void;
+}
+
+function QueuedPromptPanel({
+  items,
+  expanded,
+  editingId,
+  editingText,
+  actionId,
+  t,
+  onToggle,
+  onEditStart,
+  onEditChange,
+  onEditCancel,
+  onEditSave,
+  onRemove,
+  onRunNow,
+}: QueuedPromptPanelProps) {
+  if (items.length === 0) return null;
+
+  return (
+    <div className="mb-2 rounded-xl border border-zinc-200 bg-zinc-950/[0.02] dark:border-zinc-800 dark:bg-zinc-900/60 overflow-hidden">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs font-medium text-zinc-600 transition-colors hover:bg-zinc-100/70 dark:text-zinc-300 dark:hover:bg-zinc-800"
+      >
+        <ChevronDown aria-hidden="true" className={`h-3.5 w-3.5 transition-transform ${expanded ? '' : '-rotate-90'}`} />
+        <span>{t('chat.queue.count', { count: items.length })}</span>
+      </button>
+      {expanded && (
+        <div className="max-h-40 border-t border-zinc-200 dark:border-zinc-800 overflow-y-auto">
+          {items.map((item) => {
+            const isEditing = editingId === item.id;
+            const isBusy = actionId === item.id || item.status === 'executing';
+            const text = getQueuedPromptText(item);
+            const instructionLabel = parseInstructionDisplayText(text);
+            return (
+              <div key={item.id} className="flex items-start gap-2 border-b border-zinc-100 px-3 py-2 last:border-b-0 dark:border-zinc-800">
+                <div className="mt-1 h-2 w-2 rounded-full border border-zinc-400 dark:border-zinc-500 flex-shrink-0" />
+                <div className="min-w-0 flex-1">
+                  {isEditing ? (
+                    <textarea
+                      value={editingText}
+                      onChange={(event) => onEditChange(event.target.value)}
+                      className="w-full resize-none rounded-lg border border-zinc-200 bg-white px-2 py-1.5 text-xs text-zinc-800 outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-100 dark:focus:border-zinc-700 dark:focus:ring-zinc-800/70"
+                      rows={2}
+                    />
+                  ) : (
+                    instructionLabel ? (
+                      <span className="inline-flex items-center rounded-md border border-rose-100 bg-rose-50 px-2 py-1 text-xs font-semibold leading-none text-rose-700 dark:border-rose-500/30 dark:bg-rose-950/30 dark:text-rose-200 max-w-full truncate">
+                        {instructionLabel}
+                      </span>
+                    ) : (
+                      <div className="text-xs text-zinc-700 dark:text-zinc-300 line-clamp-2">{text || t('chat.queue.attachmentOnly')}</div>
+                    )
+                  )}
+                </div>
+                <div className="flex flex-shrink-0 items-center gap-1">
+                  {isEditing ? (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onEditSave(item)}
+                        disabled={isBusy || !editingText.trim()}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                        title={t('chat.save')}
+                      >
+                        <Save aria-hidden="true" className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onEditCancel}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                        title={t('chat.cancel')}
+                      >
+                        <X aria-hidden="true" className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => onEditStart(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                        title={t('chat.queue.edit')}
+                      >
+                        <Pencil aria-hidden="true" className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRunNow(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-zinc-200 hover:text-zinc-800 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                        title={t('chat.queue.runNow')}
+                      >
+                        <ArrowUp aria-hidden="true" className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => onRemove(item)}
+                        disabled={isBusy}
+                        className="rounded p-1 text-zinc-500 hover:bg-red-50 hover:text-red-600 disabled:opacity-40 dark:text-zinc-400 dark:hover:bg-red-950/40 dark:hover:text-red-300"
+                        title={t('chat.queue.remove')}
+                      >
+                        <Trash2 aria-hidden="true" className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function formatAgentName(name: string): string {
+  if (name === 'rex') return 'Atlas';
+  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function findMentionTrigger(text: string, cursor: number): { start: number; end: number; query: string } | null {
+  const beforeCursor = text.slice(0, cursor);
+  const match = beforeCursor.match(/(^|\s)@([^\s@]*)$/);
+  if (!match) return null;
+  const query = match[2] ?? '';
+  return {
+    start: beforeCursor.length - query.length - 1,
+    end: cursor,
+    query,
+  };
+}
+
+function resolveReferencedAgentName(text: string, agents: Agent[]): string | null {
+  const sorted = [...agents].sort((a, b) => b.name.length - a.name.length);
+  for (const agent of sorted) {
+    const pattern = new RegExp(`(^|\\s)subagent:${escapeRegExp(agent.name)}(?=$|\\s|[,.!?;，。！？；])`, 'i');
+    if (pattern.test(text)) return agent.name;
+  }
+  return null;
+}
+
+function formatComposerReference(reference: ComposerReference): string {
+  return `${reference.kind}:${reference.value}`;
+}
+
+export default function SessionChat({
+  transport,
+  draftKey,
+  renderMessageFooter,
+  sessionId,
+  live = false,
+  placeholder,
+  hideInput = false,
+  className = '',
+  emptyText,
+  suggestions,
+  nodeRef,
+  onNodeRefDismiss,
+  onStreamingDone,
+  initialMessage,
+  initialDisplayText,
+  initialOptimisticMessage,
+  agentName,
+  model,
+  executionMode = 'build',
+  onExecutionModeAccepted,
+  modelAuto = false,
+  display,
+  welcomeContent,
+  conversationBottomSlot,
+  conversationTopSlot,
+  onSseStatusChange,
+  onSSEEvent,
+  onError,
+  onCreateAndSend,
+  onCreateNewSession,
+  onInitialMessageConsumed,
+  onInitialOptimisticMessageConsumed,
+  focusMessageId,
+  onFocusMessageConsumed,
+  onOpenContextFile,
+  onOpenContext,
+  supportsVision,
+  allowAnyUpload = false,
+  composerPrefill,
+  onComposerPrefillApplied,
+  toolbarSlot,
+  composerAddMenuSlot,
+  onComposerAddMenuOpenChange,
+  composerTextareaMinHeight,
+  composerTextareaMaxHeight,
+  centerToolbarSlot,
+  contextWindowTokens,
+  cacheUsageContainer,
+  mentionAgents = [],
+}: SessionChatProps) {
+  const { t, i18n } = useTranslation('session');
+  const toast = useToast();
+  const compact = display?.compact ?? true;
+  const fullWidth = display?.fullWidth ?? false;
+  const pageCanvas = display?.pageCanvas ?? false;
+  const showActions = display?.showActions ?? false;
+  const showTimestamp = display?.showTimestamp ?? false;
+  const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
+  const processGroupsDefaultOpen = display?.processGroupsDefaultOpen ?? false;
+  const processGroupsOpenWhileActive = display?.processGroupsOpenWhileActive ?? false;
+  const effectiveComposerTextareaMinHeight = composerTextareaMinHeight ?? 24;
+  const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
+  const effectivePlaceholder = placeholder ?? t('chat.placeholder');
+  const effectiveEmptyText = emptyText ?? t('chat.emptyText');
+  const autoModelSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!modelAuto) autoModelSessionRef.current = null;
+  }, [modelAuto]);
+  const ensureAutoModelSession = useCallback(async () => {
+    if (!sessionId || !modelAuto || autoModelSessionRef.current === sessionId) return;
+    await sessionApi.update(sessionId, {
+      model_auto: true,
+      model_pinned: false,
+    });
+    autoModelSessionRef.current = sessionId;
+  }, [modelAuto, sessionId]);
+  // Restore any persisted draft on first mount so navigating away (e.g.
+  // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
+  // message. Subsequent session changes are re-hydrated by the effect below.
+  const [input, setInput] = useState<string>(() => readChatDraft(draftKey ?? sessionId));
+  const composerBusyOwners = useRef(new Set<string>());
+  const [composerBusy, setComposerBusy] = useState(false);
+  const setComposerExtensionBusy = useCallback((owner: string, busy: boolean) => {
+    if (busy) composerBusyOwners.current.add(owner);
+    else composerBusyOwners.current.delete(owner);
+    setComposerBusy(composerBusyOwners.current.size > 0);
+  }, []);
+  const [submittedModelPromptSessionId, setSubmittedModelPromptSessionId] = useState<string | null>(null);
+  const [pendingContextUsage, setPendingContextUsage] = useState<PendingContextUsageState>({
+    sessionId: null,
+    baselineSnapshot: null,
+    entries: {},
+  });
+  const pendingContextUsageRef = useRef(pendingContextUsage);
+  pendingContextUsageRef.current = pendingContextUsage;
+  const pendingContextSnapshotKeysRef = useRef<{
+    sessionId: string;
+    keys: string[];
+  } | null>(null);
+  const updatePendingContextUsage = useCallback((
+    updater: (current: PendingContextUsageState) => PendingContextUsageState,
+  ) => {
+    const next = updater(pendingContextUsageRef.current);
+    pendingContextUsageRef.current = next;
+    setPendingContextUsage(next);
+  }, []);
+  const [composerReferences, setComposerReferences] = useState<ComposerReference[]>([]);
+  const [sending, setSending] = useState(false);
+  const [isStreaming, setIsStreaming] = useState(false);
+  const activeToolPartIdsRef = useRef<Set<string>>(new Set());
+  const [attachments, setAttachmentState] = useState<ComposerAttachment[]>([]);
+  const attachmentsRef = useRef<ComposerAttachment[]>([]);
+  const attachmentsMountedRef = useRef(true);
+  const attachmentScopeRef = useRef(0);
+  const uploadOwnershipRef = useRef(new Map<string, UploadOwnership>());
+  // Update the live draft synchronously, not on the next render. Upload responses,
+  // cancellation and unmount can all run before React commits the tray update.
+  const setAttachments = useCallback((next: ComposerAttachment[] | ((current: ComposerAttachment[]) => ComposerAttachment[])) => {
+    attachmentsRef.current = typeof next === 'function' ? next(attachmentsRef.current) : next;
+    if (attachmentsMountedRef.current) setAttachmentState(attachmentsRef.current);
+  }, []);
+  const disposeUpload = useCallback((uploadID: string) => {
+    if (uploadOwnershipRef.current.get(uploadID) !== 'draft') return;
+    uploadOwnershipRef.current.delete(uploadID);
+    void workspaceAPI.removeChatUpload(uploadID).catch(() => undefined);
+  }, []);
+  const discardAttachments = useCallback(() => {
+    setAttachments([]);
+    uploadOwnershipRef.current.forEach((_ownership, uploadID) => disposeUpload(uploadID));
+  }, [disposeUpload, setAttachments]);
+  const beginUploadSubmission = useCallback((documents: ComposerAttachment[]): UploadSubmission => {
+    const previous = documents.map(({ uploadID }) => [uploadID!, uploadOwnershipRef.current.get(uploadID!)] as const);
+    previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitting'));
+    let started = false;
+    let accepted = false;
+    return {
+      start: () => { started = true; },
+      accept: () => {
+        accepted = true;
+        previous.forEach(([uploadID]) => uploadOwnershipRef.current.set(uploadID, 'submitted'));
+      },
+      reject: (error) => {
+        if (accepted) return;
+        const status = (error as { response?: { status?: number } })?.response?.status;
+        // Timeouts (including gateway/client timeouts) and 5xx do not prove that
+        // the backend rejected the prompt. A later retry cannot undo that doubt.
+        const notAccepted = !started || (typeof status === 'number'
+          && status >= 400 && status < 500 && status !== 408 && status !== 499);
+        previous.forEach(([uploadID, ownership]) => {
+          uploadOwnershipRef.current.set(uploadID, notAccepted && ownership !== 'unknown' ? 'draft' : 'unknown');
+          if (!attachmentsMountedRef.current || !attachmentsRef.current.some((item) => item.uploadID === uploadID)) {
+            disposeUpload(uploadID);
+          }
+        });
+      },
+    };
+  }, [disposeUpload]);
+  const [isDragOver, setIsDragOver] = useState(false);
+  const [showComposerAddMenu, setShowComposerAddMenu] = useState(false);
+  // Lightbox preview for composer thumbnails. Shares the same overlay
+  // component used by message bubbles so the click-to-enlarge gesture is
+  // consistent across the upload tray and the rendered chat history.
+  const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
+  const [isCompacting, setIsCompacting] = useState(false);
+  const [compactingMessage, setCompactingMessage] = useState('');
+  const [isDreaming, setIsDreaming] = useState(false);
+  const [dreamingMessage, setDreamingMessage] = useState('');
+  // Backend retry state (provider 429 / 5xx). Without this the chat only shows
+  // the generic thinking dots for the whole backoff window.
+  const [retryStatus, setRetryStatus] = useState<SessionRetryStatus | null>(null);
+  const [retryCountdownSeconds, setRetryCountdownSeconds] = useState<number | null>(null);
+  const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
+  const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
+  useEffect(() => {
+    attachmentsMountedRef.current = true;
+    return () => {
+      attachmentsMountedRef.current = false;
+      attachmentScopeRef.current += 1;
+      discardAttachments();
+    };
+  }, [discardAttachments]);
+  const {
+    items: queuedPrompts,
+    expanded: queueExpanded,
+    setExpanded: setQueueExpanded,
+    editingId: editingQueueId,
+    editingText: editingQueueText,
+    setEditingText: setEditingQueueText,
+    actionId: queueActionId,
+    refresh: fetchPromptQueue,
+    applyItems: applyPromptQueueItems,
+    startEdit: startQueuedEdit,
+    cancelEdit: cancelQueuedEdit,
+    saveEdit: saveQueuedEdit,
+    remove: removeQueuedPrompt,
+    runNow: runQueuedPromptNow,
+  } = useSessionPromptQueue(sessionId);
+  const [pendingPermissions, setPendingPermissions] = useState<PendingPermission[]>([]);
+  const [permissionSubmitting, setPermissionSubmitting] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const activePermissionSessionRef = useRef<string | null>(sessionId ?? null);
+  activePermissionSessionRef.current = sessionId ?? null;
+  const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
+    readProcessGroupOpenState(sessionId)
+  ));
+
+  // Seconds until the backend's next provider attempt, refreshed while the
+  // retry notice is visible so the user can see the wait shrinking.
+  useEffect(() => {
+    const nextAt = retryStatus?.next;
+    if (!retryStatus || typeof nextAt !== 'number') {
+      setRetryCountdownSeconds(null);
+      return undefined;
+    }
+    const update = () => {
+      setRetryCountdownSeconds(Math.max(0, Math.ceil((nextAt - Date.now()) / 1000)));
+    };
+    update();
+    const timer = window.setInterval(update, 500);
+    return () => window.clearInterval(timer);
+  }, [retryStatus]);
+
+  const retryNoticeText = useMemo(() => {
+    if (!retryStatus) return '';
+    const attempt = retryStatus.maxAttempts
+      ? `${retryStatus.attempt}/${retryStatus.maxAttempts}`
+      : `${retryStatus.attempt}`;
+    // Provider SDKs put the whole JSON error body in the message; keep the
+    // notice to one line.
+    const rawReason = (retryStatus.message || '').trim();
+    const reason = rawReason.length > 120 ? `${rawReason.slice(0, 117)}…` : rawReason;
+    const base = retryStatus.rateLimited
+      ? t('chat.retryNotice.rateLimited', { attempt })
+      : t('chat.retryNotice.transient', {
+        attempt,
+        reason: reason || t('chat.retryNotice.unknownReason'),
+      });
+    if (retryCountdownSeconds !== null && retryCountdownSeconds > 0) {
+      return `${base}${t('chat.retryNotice.countdown', { seconds: retryCountdownSeconds })}`;
+    }
+    return base;
+  }, [retryStatus, retryCountdownSeconds, t]);
+
+  // Live compaction progress, populated by ``session.compaction_progress`` SSE
+  // events emitted by the backend. ``chunk_done`` arrivals are non-deterministic
+  // (parallel ``asyncio.gather``) so we deduplicate by ``data.chunk`` index.
+  // The chunk progress bar (``done/total``) is *derived* from this single
+  // source via useMemo below — keeping a parallel state would risk drift if
+  // either updater missed an event (and earlier did: a stale closure read
+  // froze ``done`` at 1 for multi-chunk runs).
+  const [compactionStages, setCompactionStages] = useState<CompactionStageEntry[]>([]);
+  // Single weighted progress percentage (0–100) covering the whole
+  // compaction pipeline. Per-chunk events drive the parallel-summary
+  // band (10–70%); merge owns 70–95%; summary write + completion
+  // close the last 5%. Single-pass runs skip the chunk band entirely
+  // and jump strategy → summarize_done (20% → 95%).
+  //
+  // Why fixed weights instead of timing-based progress:
+  //  - Chunks finish in non-deterministic order so a time-linear bar
+  //    would jitter or stall whenever the slowest chunk dominates.
+  //  - The user only needs "where am I in the pipeline", not real-time
+  //    estimation; phase advancement gives a credible signal of life.
+  const compactionPercent = useMemo<number | null>(() => {
+    if (compactionStages.length === 0) return null;
+    const seenStage = new Set(compactionStages.map((e) => e.stage));
+    if (seenStage.has('complete')) return 100;
+
+    const strategyEvent = compactionStages.find((e) => e.stage === 'strategy');
+    const useChunked = strategyEvent
+      ? Boolean((strategyEvent.data as { use_chunked?: boolean }).use_chunked)
+      : false;
+
+    if (useChunked) {
+      if (seenStage.has('summarize_done')) return 97;
+      if (seenStage.has('merge_done')) return 95;
+      if (seenStage.has('merge_started')) return 75;
+      let total = 0;
+      const seenChunks = new Set<number>();
+      for (const entry of compactionStages) {
+        if (entry.stage !== 'chunk_done') continue;
+        const d = entry.data as { chunk?: number; total?: number };
+        if (typeof d.chunk === 'number') seenChunks.add(d.chunk);
+        if (typeof d.total === 'number' && d.total > total) total = d.total;
+      }
+      if (total > 0) {
+        return Math.min(70, 10 + Math.round((seenChunks.size / total) * 60));
+      }
+      if (seenStage.has('strategy')) return 10;
+      if (seenStage.has('load')) return 5;
+      return 1;
+    }
+
+    if (seenStage.has('summarize_done')) return 95;
+    if (seenStage.has('strategy')) return 20;
+    if (seenStage.has('load')) return 10;
+    return 1;
+  }, [compactionStages]);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingPartId, setEditingPartId] = useState<string | null>(null);
+  const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
+  const [editingText, setEditingText] = useState('');
+  const [actionMessageId, setActionMessageId] = useState<string | null>(null);
+  const {
+    snapshot: contextUsageSnapshot,
+    refreshing: contextUsageRefreshing,
+    contextWindowTokens: contextUsageWindowTokens,
+    refresh: refreshContextUsage,
+    applyPushSnapshot: applyContextUsagePushSnapshot,
+    stopRefreshing: stopContextUsageRefreshing,
+  } = useSessionContextUsage(sessionId);
+  const activeContextUsageSnapshot = contextUsageSnapshot?.sessionID === sessionId
+    ? contextUsageSnapshot
+    : null;
+  const beginPendingContextUsage = useCallback((
+    key: string,
+    snapshotTokenDeltas: ContextUsageTokenDeltas,
+    baselineSnapshot: ContextUsageSnapshot | null = activeContextUsageSnapshot,
+    localTokenDeltas: ContextUsageTokenDeltas = {},
+  ) => {
+    updatePendingContextUsage((current) => {
+      const continueCurrent = current.sessionId === sessionId
+        && Object.keys(current.entries).length > 0;
+      return {
+        sessionId: sessionId || null,
+        baselineSnapshot: continueCurrent ? current.baselineSnapshot : baselineSnapshot,
+        entries: {
+          ...(continueCurrent ? current.entries : {}),
+          [key]: { snapshotTokenDeltas, localTokenDeltas },
+        },
+      };
+    });
+  }, [activeContextUsageSnapshot, sessionId, updatePendingContextUsage]);
+  const resolvePendingContextUsage = useCallback((
+    keys: string[],
+    expectedSessionId: string,
+    nextBaselineSnapshot?: ContextUsageSnapshot | null,
+  ) => {
+    if (keys.length === 0) return;
+    updatePendingContextUsage((current) => {
+      if (current.sessionId !== expectedSessionId) return current;
+      const entries = { ...current.entries };
+      keys.forEach((key) => delete entries[key]);
+      const hasEntries = Object.keys(entries).length > 0;
+      return {
+        sessionId: hasEntries ? current.sessionId : null,
+        baselineSnapshot: hasEntries
+          ? nextBaselineSnapshot ?? current.baselineSnapshot
+          : null,
+        entries,
+      };
+    });
+  }, [updatePendingContextUsage]);
+  const removePendingContextUsage = useCallback((key: string) => {
+    resolvePendingContextUsage([key], sessionId || '');
+  }, [resolvePendingContextUsage, sessionId]);
+  const clearPendingContextUsage = useCallback(() => {
+    pendingContextSnapshotKeysRef.current = null;
+    updatePendingContextUsage(() => ({ sessionId: null, baselineSnapshot: null, entries: {} }));
+  }, [updatePendingContextUsage]);
+  const refreshContextUsageAfterTurn = useCallback((options?: Parameters<typeof refreshContextUsage>[0]) => {
+    if (!sessionId) return;
+    const pendingAtStart = pendingContextUsageRef.current;
+    const pendingKeys = pendingAtStart.sessionId === sessionId
+      ? Object.keys(pendingAtStart.entries)
+      : [];
+    const capturedPending = pendingKeys.length > 0
+      ? { sessionId, keys: pendingKeys }
+      : null;
+    if (capturedPending) pendingContextSnapshotKeysRef.current = capturedPending;
+    const request = refreshContextUsage({ ...options, force: true });
+    if (request) {
+      void request.then((snapshot) => {
+        if (!snapshot || !capturedPending) return;
+        resolvePendingContextUsage(
+          capturedPending.keys,
+          capturedPending.sessionId,
+          snapshot,
+        );
+        if (pendingContextSnapshotKeysRef.current === capturedPending) {
+          pendingContextSnapshotKeysRef.current = null;
+        }
+      });
+    }
+  }, [refreshContextUsage, resolvePendingContextUsage, sessionId]);
+  // Prompts the latest snapshot already counts no longer need their
+  // optimistic estimate. Without this the meter stayed on the pre-send
+  // baseline for the whole turn and only jumped once the turn ended (or the
+  // page was reloaded), even though the backend pushes usage between steps.
+  useEffect(() => {
+    const includedUserMessageIds = activeContextUsageSnapshot?.recentUserMessageIDs;
+    if (!sessionId || !activeContextUsageSnapshot || !includedUserMessageIds?.length) return;
+    const pending = pendingContextUsageRef.current;
+    if (pending.sessionId !== sessionId) return;
+    const coveredKeys = Object.keys(pending.entries)
+      .filter((key) => includedUserMessageIds.includes(key));
+    resolvePendingContextUsage(coveredKeys, sessionId, activeContextUsageSnapshot);
+  }, [activeContextUsageSnapshot, resolvePendingContextUsage, sessionId]);
+  const isCompactingRef = useRef(false);
+  const prevStreamingRef = useRef(false);
+  // Tracks "sessionId::message" key to prevent double-send in React StrictMode
+  const initialMessageSentRef = useRef('');
+  const abortingRef = useRef(false);
+  const sessionBusyRef = useRef(false);
+  const sessionStatusRevisionRef = useRef(0);
+  const goalHydrationVersionRef = useRef(0);
+  // ID of the assistant message that was aborted; used to ignore its finish event
+  const abortedMessageIdRef = useRef<string | null>(null);
+  const suppressStreamingUntilIdleRef = useRef(false);
+  const statusCheckedRef = useRef<string | null>(null);
+  const {
+    pendingQuestions,
+    handleQuestionAsked,
+    submitAnswer,
+    submitReject,
+    removeByRequestId,
+    fetchPendingQuestions,
+    clearAll: clearPendingQuestions,
+  } = usePendingQuestions();
+  const messagesContentRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const focusedMessageRef = useRef('');
+  const isAtBottomRef = useRef(true);
+  const historyScrollLockRef = useRef(false);
+  const scrollToBottomRafRef = useRef<number | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerAddMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const isComposingRef = useRef(false);
+
+  const closeComposerAddMenu = useCallback(() => {
+    setShowComposerAddMenu(false);
+    onComposerAddMenuOpenChange?.(false);
+  }, [onComposerAddMenuOpenChange]);
+
+  const openComposerAddMenu = useCallback(() => {
+    setShowComposerAddMenu(true);
+    onComposerAddMenuOpenChange?.(true);
+  }, [onComposerAddMenuOpenChange]);
+
+  const toggleComposerAddMenu = useCallback(() => {
+    setShowComposerAddMenu((open) => {
+      const nextOpen = !open;
+      onComposerAddMenuOpenChange?.(nextOpen);
+      return nextOpen;
+    });
+  }, [onComposerAddMenuOpenChange]);
+
+  useEffect(() => {
+    if (!showComposerAddMenu) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('[data-composer-add-menu]')) closeComposerAddMenu();
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+    };
+  }, [closeComposerAddMenu, showComposerAddMenu]);
+
+  useEffect(() => {
+    if (sending && showComposerAddMenu) closeComposerAddMenu();
+  }, [closeComposerAddMenu, sending, showComposerAddMenu]);
+
+  // Slash command autocomplete state
+  const [commands, setCommands] = useState<Command[]>([]);
+  const [showCommandDropdown, setShowCommandDropdown] = useState(false);
+  const [commandQuery, setCommandQuery] = useState('');
+  const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const commandsLoadedAtRef = useRef(0);
+  const commandsLoadingRef = useRef(false);
+  const [mentionQuery, setMentionQuery] = useState('');
+  const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
+  const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
+  const [pendingAgentName, setPendingAgentName] = useState(agentName || 'rex');
+  const [schedulingMode, setSchedulingMode] = useState<SchedulingMode>('legacy');
+  const [schedulingSaving, setSchedulingSaving] = useState(false);
+  useEffect(() => {
+    let active = true;
+    setSchedulingMode('legacy');
+    if (sessionId) sessionApi.get(sessionId).then(session => {
+      if (active) setSchedulingMode(session.scheduling_mode === 'superagent' ? 'superagent' : 'legacy');
+    }).catch(() => {});
+    return () => { active = false; };
+  }, [sessionId]);
+  const changeSchedulingMode = async (mode: SchedulingMode) => {
+    setSchedulingSaving(true);
+    try {
+      if (sessionId) await sessionApi.update(sessionId, { scheduling_mode: mode });
+      setSchedulingMode(mode);
+    } catch (error) {
+      console.warn('Unable to switch scheduling mode', error);
+      toast.error(i18n.language.startsWith('zh') ? '调度模式切换失败，请等待当前回合结束后重试' : 'Unable to switch. Wait for the current turn to finish.');
+    } finally { setSchedulingSaving(false); }
+  };
+
+  const successfulDocAttachments = useMemo(
+    () => attachments.filter((a) => a.status === 'success' && a.uploadID && !a.isImage),
+    [attachments],
+  );
+  const successfulImageAttachments = useMemo(
+    () => attachments.filter((a) => a.status === 'success' && a.isImage && a.dataUrl),
+    [attachments],
+  );
+  // Keep backward-compat alias (used in slash-command guard)
+  const successfulAttachments = useMemo(
+    () => [...successfulDocAttachments, ...successfulImageAttachments],
+    [successfulDocAttachments, successfulImageAttachments],
+  );
+  const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
+  const canSend = !transport?.disabled && !sending && !schedulingSaving && !hasUploadingFiles &&
+    (
+      !!input.trim()
+      || composerReferences.length > 0
+      || successfulDocAttachments.length > 0
+      || successfulImageAttachments.length > 0
+    );
+  const filteredMentionAgents = useMemo(() => {
+    const q = mentionQuery.trim().toLowerCase();
+    return mentionAgents
+      .filter((agent) => !q || agent.name.toLowerCase().startsWith(q))
+      .slice(0, 12);
+  }, [mentionAgents, mentionQuery]);
+
+  const scrollToBottom = useCallback(() => {
+    if (!isAtBottomRef.current || historyScrollLockRef.current) return;
+    if (scrollToBottomRafRef.current !== null) return;
+    scrollToBottomRafRef.current = requestAnimationFrame(() => {
+      scrollToBottomRafRef.current = null;
+      if (!isAtBottomRef.current || historyScrollLockRef.current) return;
+      // Scroll the message list only. scrollIntoView would also scroll every
+      // scrollable ancestor, so a page that embeds this chat (the code audit
+      // project page) would be pushed down past its own header.
+      const el = scrollContainerRef.current;
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  }, []);
+
+  useEffect(() => () => {
+    if (scrollToBottomRafRef.current !== null) {
+      cancelAnimationFrame(scrollToBottomRafRef.current);
+      scrollToBottomRafRef.current = null;
+    }
+  }, []);
+
+  const rafScheduledRef = useRef(false);
+  const handleScroll = useCallback(() => {
+    if (rafScheduledRef.current) return;
+    rafScheduledRef.current = true;
+    requestAnimationFrame(() => {
+      const el = scrollContainerRef.current;
+      if (el && !historyScrollLockRef.current) {
+        isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
+      }
+      rafScheduledRef.current = false;
+    });
+  }, []);
+
+
+  const {
+    messages: sessionMessages,
+    loading,
+    error: messagesError,
+    refetch,
+    addMessage,
+    updateMessage,
+    updateMessagePart,
+    removeMessage,
+    clearMessages,
+    replaceMessageText,
+    markMessageStopped,
+    truncateAfterMessage,
+    hasOlder = false,
+    hasNewer = false,
+    loadingOlder = false,
+    loadingNewer = false,
+    loadOlder,
+    loadNewer,
+    loadLatest,
+    focusMessage,
+  } =
+    useSessionMessages(sessionId || undefined);
+  const messages = transport?.messages ?? sessionMessages;
+
+  const loadHistoryPage = useCallback(async (direction: 'older' | 'newer') => {
+    historyScrollLockRef.current = true;
+    isAtBottomRef.current = false;
+    try {
+      await (direction === 'older' ? loadOlder?.() : loadNewer?.());
+    } finally {
+      // Keep the scroll listener from re-enabling tail-follow while React and
+      // the virtualizer measure the newly appended/prepended rows.
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        historyScrollLockRef.current = false;
+      }));
+    }
+  }, [loadOlder, loadNewer]);
+
+
+  // A historical receipt describes the submission, not the child's *current*
+  // activity. Receipts identify direct children; runtime ancestry also includes
+  // grandchildren and descendants whose receipts are outside the loaded page.
+  const childSessionIds = useMemo(() => [...new Set(messages.flatMap((message) => (
+    message.sessionID === sessionId && message.role === 'assistant'
+      ? message.parts.flatMap((part) => {
+          if ((part.type !== 'tool' && part.type !== 'toolCall') || !shouldRenderDelegateTaskCard(part)) return [];
+          const childId = extractDelegateInfo(part.state || {}, '').childSessionId;
+          return childId && childId !== sessionId ? [childId] : [];
+        })
+      : []
+  )))].sort(), [messages, sessionId]);
+  const childStatusScope = JSON.stringify([sessionId, childSessionIds]);
+  const childSessionIdsRef = useRef(childSessionIds);
+  childSessionIdsRef.current = childSessionIds;
+  const currentChildStatusScopeRef = useRef(childStatusScope);
+  currentChildStatusScopeRef.current = childStatusScope;
+  const descendantSessionIdsRef = useRef(new Set<string>());
+  const childStatusRequestRef = useRef(0);
+  const childStatusRevisionRef = useRef<Record<string, number>>({});
+  const [childStatuses, setChildStatuses] = useState<{
+    scope: string;
+    active: Record<string, boolean>;
+  }>({ scope: childStatusScope, active: {} });
+  const hasRunningDelegates = childStatuses.scope === childStatusScope
+    && Object.values(childStatuses.active).some(Boolean);
+  const canStop = Boolean(sessionId) && (isStreaming || hasRunningDelegates);
+
+  const refreshChildStatuses = useCallback(async () => {
+    const ids = childSessionIdsRef.current;
+    if (!sessionId) return;
+    const request = ++childStatusRequestRef.current;
+    const revisions = { ...childStatusRevisionRef.current };
+    try {
+      const response = await client.get('/api/session/status');
+      if (request !== childStatusRequestRef.current || currentChildStatusScopeRef.current !== childStatusScope) return;
+      const tracked = new Set([...ids, ...descendantSessionIdsRef.current]);
+      for (const [id, status] of Object.entries(response.data || {})) {
+        const ancestors = (status as { ancestorSessionIDs?: string[] })?.ancestorSessionIDs;
+        if (Array.isArray(ancestors) && ancestors.includes(sessionId)) {
+          tracked.add(id);
+          descendantSessionIdsRef.current.add(id);
+        }
+      }
+      setChildStatuses((current) => {
+        const active = current.scope === childStatusScope ? { ...current.active } : {};
+        for (const id of tracked) {
+          // An SSE update received during the request is newer than its snapshot.
+          if ((childStatusRevisionRef.current[id] || 0) !== (revisions[id] || 0)) continue;
+          active[id] = isActiveSessionStatus(response.data?.[id]);
+        }
+        return { scope: childStatusScope, active };
+      });
+    } catch {
+      // Keep the last known activity until the next status event or reconnect.
+    }
+  }, [childStatusScope, sessionId]);
+
+  useEffect(() => {
+    childStatusRequestRef.current += 1;
+    childStatusRevisionRef.current = {};
+    descendantSessionIdsRef.current = new Set();
+    setChildStatuses((current) => current.scope === childStatusScope
+      ? current : { scope: childStatusScope, active: {} });
+    void refreshChildStatuses();
+    return () => { childStatusRequestRef.current += 1; };
+  }, [childStatusScope, refreshChildStatuses]);
+
+  useEffect(() => {
+    setSubmittedModelPromptSessionId(null);
+    clearPendingContextUsage();
+  }, [sessionId, clearPendingContextUsage]);
+
+  const seededOptimisticMessageIdRef = useRef('');
+  useEffect(() => {
+    if (
+      !initialOptimisticMessage
+      || initialOptimisticMessage.sessionID !== sessionId
+      || seededOptimisticMessageIdRef.current === initialOptimisticMessage.id
+    ) return;
+
+    seededOptimisticMessageIdRef.current = initialOptimisticMessage.id;
+    setSubmittedModelPromptSessionId(sessionId || null);
+    beginPendingContextUsage(
+      initialOptimisticMessage.id,
+      { conversation: estimateMessageTokens(initialOptimisticMessage) },
+      null,
+    );
+    addMessage(initialOptimisticMessage);
+    onInitialOptimisticMessageConsumed?.(initialOptimisticMessage.id);
+  }, [
+    addMessage,
+    beginPendingContextUsage,
+    initialOptimisticMessage,
+    onInitialOptimisticMessageConsumed,
+    sessionId,
+  ]);
+
+  useEffect(() => {
+    const targetId = String(focusMessageId || '').trim();
+    if (!targetId) {
+      focusedMessageRef.current = '';
+      return;
+    }
+    if (focusedMessageRef.current === targetId) return;
+    if (loading) return;
+    isAtBottomRef.current = false;
+    const loadedMessage = messages.find(message => message.id === targetId || message.parts.some(part => part.messageID === targetId));
+    const target = messagesContentRef.current?.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(loadedMessage?.id || targetId)}"]`,
+    );
+    if (!target) {
+      // A virtualized row can be loaded without having a DOM node. Its
+      // timeline scrolls it into the viewport; only fetch if it is absent.
+      if (loadedMessage) return;
+      if (focusMessage) {
+        focusedMessageRef.current = targetId;
+        void focusMessage(targetId).then(success => {
+          focusedMessageRef.current = '';
+          if (success === false) onFocusMessageConsumed?.();
+        });
+      } else {
+        focusedMessageRef.current = targetId;
+        onFocusMessageConsumed?.();
+      }
+      return;
+    }
+    focusedMessageRef.current = targetId;
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    target.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    window.setTimeout(() => {
+      target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    }, 1800);
+    onFocusMessageConsumed?.();
+  }, [focusMessageId, loading, messages, focusMessage, onFocusMessageConsumed]);
+
+  const sessionMessagesForContextUsage = useMemo(
+    () => messages.filter((message) => !message.sessionID || message.sessionID === sessionId),
+    [messages, sessionId],
+  );
+  const sessionCacheUsageCalls = useMemo(
+    () => !cacheUsageContainer ? [] : sessionMessagesForContextUsage.flatMap(getChatCacheUsageCalls),
+    [sessionMessagesForContextUsage, cacheUsageContainer],
+  );
+  const hasUserMessage = useMemo(
+    () => sessionMessagesForContextUsage.some((message) => message.role === 'user'),
+    [sessionMessagesForContextUsage],
+  );
+  const hasPersistedModelInvocation = useMemo(
+    () => sessionMessagesForContextUsage.some(isModelInvocationMessage),
+    [sessionMessagesForContextUsage],
+  );
+  const pendingContextSnapshotTokenDeltas = useMemo(
+    () => Object.values(pendingContextUsage.entries).reduce<ContextUsageTokenDeltas>(
+      (totals, entry) => {
+        Object.entries(entry.snapshotTokenDeltas).forEach(([key, tokenDelta]) => {
+          addContextTokenDelta(
+            totals,
+            key as ContextUsageBreakdownSegment['key'],
+            tokenDelta || 0,
+          );
+        });
+        return totals;
+      },
+      {},
+    ),
+    [pendingContextUsage.entries],
+  );
+  const pendingContextLocalTokenDeltas = useMemo(
+    () => Object.values(pendingContextUsage.entries).reduce<ContextUsageTokenDeltas>(
+      (totals, entry) => {
+        Object.entries(entry.localTokenDeltas).forEach(([key, tokenDelta]) => {
+          addContextTokenDelta(
+            totals,
+            key as ContextUsageBreakdownSegment['key'],
+            tokenDelta || 0,
+          );
+        });
+        return totals;
+      },
+      {},
+    ),
+    [pendingContextUsage.entries],
+  );
+  const hasPendingContextUsage = pendingContextUsage.sessionId === sessionId
+    && Object.keys(pendingContextUsage.entries).length > 0;
+  const hasModelInvocation = submittedModelPromptSessionId === sessionId
+    || hasPersistedModelInvocation
+    || hasPendingContextUsage;
+  const canReconcilePendingWithLiveSnapshot = hasPendingContextUsage
+    && !pendingContextUsage.baselineSnapshot
+    && Boolean(activeContextUsageSnapshot);
+  const contextUsageSnapshotForBreakdown = hasPendingContextUsage
+    ? canReconcilePendingWithLiveSnapshot
+      ? activeContextUsageSnapshot
+      : pendingContextUsage.baselineSnapshot
+    : activeContextUsageSnapshot;
+  const pendingTokenDeltasForBreakdown = canReconcilePendingWithLiveSnapshot
+    ? pendingContextLocalTokenDeltas
+    : hasPendingContextUsage
+      ? pendingContextUsage.baselineSnapshot
+        ? pendingContextSnapshotTokenDeltas
+        : pendingContextLocalTokenDeltas
+      : {};
+  const contextUsageMessages = !hasModelInvocation
+    ? []
+    : contextUsageRefreshing && !contextUsageSnapshotForBreakdown && !hasPendingContextUsage
+      ? []
+      : sessionMessagesForContextUsage;
+  const contextUsageBreakdown = useMemo(
+    () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshotForBreakdown, {
+      includeSnapshotUsage: hasModelInvocation,
+      pendingTokenDeltas: pendingTokenDeltasForBreakdown,
+      useLocalMessageUsage: canReconcilePendingWithLiveSnapshot,
+    }),
+    [
+      contextUsageMessages,
+      contextUsageSnapshotForBreakdown,
+      hasModelInvocation,
+      input,
+      pendingTokenDeltasForBreakdown,
+      canReconcilePendingWithLiveSnapshot,
+    ],
+  );
+  const estimatedContextTokens = contextUsageBreakdown.usedTokens;
+  const resolvedContextWindowTokens = activeContextUsageSnapshot?.contextWindow && activeContextUsageSnapshot.contextWindow > 0
+    ? activeContextUsageSnapshot.contextWindow
+    : activeContextUsageSnapshot && contextUsageWindowTokens > 0
+      ? contextUsageWindowTokens
+    : (contextWindowTokens || 0);
+  const contextUsagePercent = resolvedContextWindowTokens > 0
+    ? Math.min(100, Math.round((estimatedContextTokens / resolvedContextWindowTokens) * 100))
+    : 0;
+  const contextUsageTitle = resolvedContextWindowTokens > 0
+    ? t('chat.contextUsageTitle', {
+        used: formatTokenCount(estimatedContextTokens),
+        total: formatTokenCount(resolvedContextWindowTokens),
+        percent: contextUsagePercent,
+      })
+    : t('chat.contextUsageUnknown');
+
+  // Keep a ref to latest messages so handleAbort can read it without stale closure
+  const messagesRef = useRef(messages);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const pendingQuestionsRef = useRef(pendingQuestions);
+  useEffect(() => { pendingQuestionsRef.current = pendingQuestions; }, [pendingQuestions]);
+
+  // A list response can be overtaken by events: a request settled meanwhile
+  // must not come back, one announced meanwhile must not be dropped, and
+  // anything the list leaves out that was known before it is stale.
+  const settledPermissionIdsRef = useRef(new Set<string>());
+  const permissionChangeSeqRef = useRef(0);
+  const permissionAnnouncedAtRef = useRef(new Map<string, number>());
+  const permissionFetchSeqRef = useRef(0);
+  const permissionAppliedSeqRef = useRef(0);
+  const permissionSessionGenerationRef = useRef(0);
+
+  const addPendingPermission = useCallback((request: PendingPermission) => {
+    permissionChangeSeqRef.current += 1;
+    if (settledPermissionIdsRef.current.has(request.id)) return;
+    permissionAnnouncedAtRef.current.set(request.id, permissionChangeSeqRef.current);
+    setPendingPermissions((previous) => (
+      previous.some((item) => item.id === request.id)
+        ? previous
+        : [...previous, request]
+    ));
+  }, []);
+
+  const settlePendingPermission = useCallback((requestId: string) => {
+    permissionChangeSeqRef.current += 1;
+    settledPermissionIdsRef.current.add(requestId);
+    permissionAnnouncedAtRef.current.delete(requestId);
+    setPendingPermissions((previous) => previous.filter((item) => item.id !== requestId));
+  }, []);
+
+  const fetchPendingPermissions = useCallback(async () => {
+    if (!sessionId) {
+      setPendingPermissions([]);
+      return;
+    }
+    const targetSessionId = sessionId;
+    const sessionGeneration = permissionSessionGenerationRef.current;
+    const fetchSeq = ++permissionFetchSeqRef.current;
+    const changeSeq = permissionChangeSeqRef.current;
+    const requests = await permissionApi.list();
+    // A newer answer already shown, or a switch to another session (even one
+    // coming back to this session), makes this answer stale. While a newer
+    // request is still out (or has failed) this one is the best there is.
+    if (
+      fetchSeq <= permissionAppliedSeqRef.current
+      || sessionGeneration !== permissionSessionGenerationRef.current
+      || activePermissionSessionRef.current !== targetSessionId
+    ) return;
+    permissionAppliedSeqRef.current = fetchSeq;
+    const settled = settledPermissionIdsRef.current;
+    const fetched = requests.filter((item) => (
+      isPermissionRequestForSession(item.sessionID, item.metadata, targetSessionId)
+      && !settled.has(item.id)
+    ));
+    const fetchedIds = new Set(fetched.map((item) => item.id));
+    // Only requests announced after this list was asked for are newer than it.
+    setPendingPermissions((previous) => [
+      ...fetched,
+      ...previous.filter((item) => (
+        !fetchedIds.has(item.id)
+        && !settled.has(item.id)
+        && (permissionAnnouncedAtRef.current.get(item.id) ?? 0) > changeSeq
+      )),
+    ]);
+  }, [sessionId]);
+
+  const handlePermissionReply = useCallback(async (decision: PermissionDecision) => {
+    const request = pendingPermissions[0];
+    if (!request || permissionSubmitting) return;
+
+    setPermissionSubmitting(true);
+    setPermissionError(null);
+    try {
+      if (decision === 'trust_tool_network') {
+        await permissionApi.reply(request.id, { allow: true, response: 'trust_tool_network' });
+      } else if (decision === 'trust_network_target') {
+        await permissionApi.reply(request.id, { allow: true, response: 'trust_network_target' });
+      } else {
+        await permissionApi.reply(request.id, {
+          allow: decision !== 'deny',
+          always: decision === 'always',
+        });
+      }
+      settlePendingPermission(request.id);
+    } catch (error: unknown) {
+      if ((error as { response?: { status?: number } })?.response?.status === 404) {
+        // Answered elsewhere (the subagent's own chat) or no longer awaited:
+        // drop it so it does not hold up the requests behind it.
+        settlePendingPermission(request.id);
+        void fetchPendingPermissions().catch(() => {});
+        return;
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      setPermissionError(message || t('chat.permission.replyFailed'));
+    } finally {
+      setPermissionSubmitting(false);
+    }
+  }, [pendingPermissions, permissionSubmitting, fetchPendingPermissions, settlePendingPermission, t]);
+
+  const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
+
+  useEffect(() => {
+    goalHydrationVersionRef.current += 1;
+    const hydrationVersion = goalHydrationVersionRef.current;
+
+    if (!sessionId) {
+      setGoalBanner(null);
+      setDismissedGoalKey('');
+      return;
+    }
+
+    setGoalBanner(null);
+    setDismissedGoalKey(readDismissedGoalKey(sessionId));
+
+    sessionApi.get(sessionId).then((session) => {
+      if (goalHydrationVersionRef.current !== hydrationVersion) return;
+      setGoalBanner(toGoalBannerState(session.goal));
+      setDismissedGoalKey(readDismissedGoalKey(sessionId));
+    }).catch((err) => {
+      if (goalHydrationVersionRef.current !== hydrationVersion) return;
+      setGoalBanner(null);
+      setDismissedGoalKey(readDismissedGoalKey(sessionId));
+      console.warn('[SessionChat] Failed to fetch session goal:', err);
+    });
+  }, [sessionId]);
+
+  const handleSSEEvent = useCallback(
+    (event: SSEChatEvent) => {
+      // The same SSE connection also carries child activity. Do not route child
+      // events through the parent's message/streaming action reducer.
+      const childId = event.properties?.sessionID;
+      if (
+        event.type === 'session.status'
+        && typeof childId === 'string'
+        && childId !== sessionId
+        && (childSessionIdsRef.current.includes(childId)
+          || descendantSessionIdsRef.current.has(childId)
+          || (sessionId && Array.isArray(event.properties?.ancestorSessionIDs)
+            && event.properties.ancestorSessionIDs.includes(sessionId)))
+        && typeof event.properties?.status?.type === 'string'
+      ) {
+        descendantSessionIdsRef.current.add(childId);
+        childStatusRevisionRef.current[childId] = (childStatusRevisionRef.current[childId] || 0) + 1;
+        setChildStatuses((current) => ({
+          scope: childStatusScope,
+          active: {
+            ...(current.scope === childStatusScope ? current.active : {}),
+            [childId]: isActiveSessionStatus(event.properties?.status),
+          },
+        }));
+      }
+      // Forward only global events or events relevant to this chat. The global
+      // stream can be very noisy when multiple sessions run in parallel.
+      if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
+
+      const properties = event.properties;
+      const requestSessionID = typeof properties?.sessionID === 'string' ? properties.sessionID : '';
+      const requestMetadata = properties?.metadata && typeof properties.metadata === 'object'
+        ? properties.metadata as Record<string, unknown>
+        : {};
+      if (
+        event.type === 'permission.request'
+        && properties
+        && isPermissionRequestForSession(requestSessionID, requestMetadata, sessionId)
+      ) {
+        const requestID = typeof properties.requestID === 'string' ? properties.requestID : '';
+        if (requestID) {
+          addPendingPermission({
+            id: requestID,
+            sessionID: requestSessionID,
+            messageID: typeof properties.messageID === 'string' ? properties.messageID : '',
+            toolID: typeof properties.tool?.name === 'string'
+              ? properties.tool.name
+              : typeof properties.permission === 'string'
+                ? properties.permission
+                : '',
+            permission: typeof properties.permission === 'string' ? properties.permission : '',
+            patterns: Array.isArray(properties.patterns)
+              ? properties.patterns.filter((pattern): pattern is string => typeof pattern === 'string')
+              : [],
+            always: Array.isArray(properties.always)
+              ? properties.always.filter((pattern): pattern is string => typeof pattern === 'string')
+              : [],
+            metadata: requestMetadata,
+            time: { created: Date.now() },
+          });
+          setPermissionError(null);
+        }
+      }
+      // A request is settled once for every chat showing it (the subagent's
+      // own and the ones that delegated to it).
+      if (event.type === 'permission.replied' && typeof properties?.requestID === 'string') {
+        settlePendingPermission(properties.requestID);
+      }
+
+      const action = resolveSessionChatSSEAction(event, sessionId);
+
+      switch (action.kind) {
+        case 'ignore':
+          return;
+        case 'session-cleared':
+          sessionStatusRevisionRef.current += 1;
+          abortingRef.current = false;
+          sessionBusyRef.current = false;
+          activeToolPartIdsRef.current.clear();
+          abortedMessageIdRef.current = null;
+          suppressStreamingUntilIdleRef.current = false;
+          setIsStreaming(false);
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setRetryStatus(null);
+          setGoalBanner(null);
+          setDismissedGoalKey('');
+          setSubmittedModelPromptSessionId(null);
+          clearPendingContextUsage();
+          clearMessages();
+          void refreshContextUsage({ clear: true });
+          return;
+        case 'session-status':
+          sessionStatusRevisionRef.current += 1;
+          if (action.statusType === 'busy') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setIsDreaming(false);
+            setDreamingMessage('');
+            setRetryStatus(null);
+          } else if (action.statusType === 'retry') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setIsDreaming(false);
+            setDreamingMessage('');
+            setRetryStatus(action.retry ?? { attempt: 1, message: action.message });
+          } else if (action.statusType === 'compacting') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(true);
+            isCompactingRef.current = true;
+            setIsDreaming(false);
+            setDreamingMessage('');
+            setCompactingMessage(action.message || t('chat.compacting'));
+            // Reset progress state on each new compaction cycle so a stale
+            // run's stages do not leak into a fresh "Compacting..." panel.
+            setCompactionStages([]);
+          } else if (action.statusType === 'dreaming') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setIsDreaming(true);
+            setDreamingMessage(action.message || t('chat.dreaming'));
+          } else if (action.statusType === 'idle') {
+            sessionBusyRef.current = false;
+            suppressStreamingUntilIdleRef.current = false;
+            activeToolPartIdsRef.current.clear();
+            setIsStreaming(false);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setCompactingMessage('');
+            setIsDreaming(false);
+            setDreamingMessage('');
+            setRetryStatus(null);
+            setCompactionStages([]);
+            refetch();
+            refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
+          }
+          return;
+        case 'message-updated': {
+          sessionStatusRevisionRef.current += 1;
+          const { info } = action;
+          updateMessage(info);
+          if (
+            info.role === 'assistant' &&
+            (abortingRef.current || suppressStreamingUntilIdleRef.current)
+          ) {
+            if (info.id) {
+              abortedMessageIdRef.current = info.id;
+              markMessageStopped(info.id);
+            }
+            setIsStreaming(false);
+            setSending(false);
+            if (info.finish || info.time?.completed) {
+              refreshContextUsageAfterTurn();
+            }
+          } else if (info.finish || info.time?.completed) {
+            const shouldRefetch = shouldRefetchFinishedMessage({
+              finishedMessageId: info.id,
+              abortedMessageId: abortedMessageIdRef.current,
+            });
+            // Preserve locally streamed partial text when the user aborts. The
+            // backend never persists in-flight text chunks, so refetching here
+            // would replace the visible partial response with an empty message.
+            if (shouldRefetch) {
+              refetch();
+              if (!sessionBusyRef.current && activeToolPartIdsRef.current.size === 0) {
+                setIsStreaming(false);
+              }
+            }
+            refreshContextUsageAfterTurn();
+            abortingRef.current = false;
+            abortedMessageIdRef.current = null;
+          } else if (
+            info.role === 'assistant' &&
+            !info.finish &&
+            !abortingRef.current
+          ) {
+            setIsStreaming(true);
+          }
+          return;
+        }
+        case 'message-removed': {
+          sessionStatusRevisionRef.current += 1;
+          const removedMessage = messagesRef.current.find((message) => message.id === action.messageID);
+          removedMessage?.parts.forEach((part) => {
+            if (part.id) activeToolPartIdsRef.current.delete(part.id);
+          });
+          if (abortedMessageIdRef.current === action.messageID) {
+            abortedMessageIdRef.current = null;
+          }
+          removePendingContextUsage(action.messageID);
+          removePendingContextUsage(`edit:${action.messageID}`);
+          removeMessage(action.messageID);
+          return;
+        }
+        case 'message-part-updated': {
+          sessionStatusRevisionRef.current += 1;
+          const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+          // A finished tool part can be a sub-agent's late receipt while this
+          // session is still backing off; only fresh output ends the retry.
+          const finishedToolPart = (part.type === 'tool' || part.type === 'toolCall') && !isActiveToolPart(part);
+          if (!finishedToolPart) setRetryStatus((current) => (current ? null : current));
+          if (part.id) {
+            if (isActiveToolPart(part)) {
+              activeToolPartIdsRef.current.add(part.id);
+              if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) setIsStreaming(true);
+            } else {
+              activeToolPartIdsRef.current.delete(part.id);
+            }
+          }
+          updateMessagePart(action.part, action.delta);
+          scrollToBottom();
+          return;
+        }
+        case 'question-asked':
+          handleQuestionAsked(action.callID, action.requestId, action.questions as QuestionItem[]);
+          scrollToBottom();
+          return;
+        case 'question-resolved':
+          removeByRequestId(action.requestId);
+          return;
+        case 'compaction-progress':
+          if (action.stage === 'complete' && action.data.result === 'continue') {
+            void refreshContextUsage({ skipIfFreshMs: 500 });
+          }
+          // Single source of truth: append into ``compactionStages`` and let
+          // the progress bar derive ``done/total`` from it via useMemo.
+          // ``chunk_done`` arrives in non-deterministic order under
+          // ``asyncio.gather``; deduplicate by chunk index here so SSE
+          // reconnects / accidental re-deliveries are idempotent.
+          setCompactionStages((prev) => {
+            if (action.stage === 'chunk_done') {
+              const chunkIdx = typeof action.data.chunk === 'number' ? action.data.chunk : undefined;
+              if (chunkIdx !== undefined && prev.some(
+                (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
+              )) {
+                return prev;
+              }
+            }
+            return [...prev, { stage: action.stage, data: action.data, ts: Date.now() }];
+          });
+          return;
+        case 'prompt-queue-updated':
+          applyPromptQueueItems(action.items);
+          return;
+        case 'goal-updated': {
+          const nextGoal = toGoalBannerState(action.goal);
+          if (nextGoal) {
+            goalHydrationVersionRef.current += 1;
+            setGoalBanner(nextGoal);
+            setDismissedGoalKey(readDismissedGoalKey(sessionId));
+          } else if (action.goal?.status === 'cleared') {
+            goalHydrationVersionRef.current += 1;
+            setGoalBanner(null);
+          }
+          return;
+        }
+        case 'context-compacted':
+          void refreshContextUsage({ skipIfFreshMs: 500 });
+          return;
+        case 'context-usage-updated': {
+          const capturedPending = pendingContextSnapshotKeysRef.current;
+          if (capturedPending?.sessionId === action.snapshot.sessionID) {
+            resolvePendingContextUsage(
+              capturedPending.keys,
+              capturedPending.sessionId,
+              action.snapshot,
+            );
+            pendingContextSnapshotKeysRef.current = null;
+          }
+          applyContextUsagePushSnapshot(action.snapshot);
+          return;
+        }
+        case 'session-error':
+          setIsStreaming(false);
+          setIsCompacting(false);
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setRetryStatus(null);
+          setCompactionStages([]);
+          stopContextUsageRefreshing();
+          refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
+          abortingRef.current = false;
+          sessionBusyRef.current = false;
+          activeToolPartIdsRef.current.clear();
+          onError?.(action.message || t('chat.placeholder'));
+          return;
+      }
+    },
+    [
+      sessionId,
+      childStatusScope,
+      updateMessage,
+      updateMessagePart,
+      removeMessage,
+      clearMessages,
+      refetch,
+      refreshContextUsage,
+      refreshContextUsageAfterTurn,
+      applyContextUsagePushSnapshot,
+      stopContextUsageRefreshing,
+      clearPendingContextUsage,
+      resolvePendingContextUsage,
+      removePendingContextUsage,
+      handleQuestionAsked,
+      removeByRequestId,
+      applyPromptQueueItems,
+      addPendingPermission,
+      settlePendingPermission,
+      onSSEEvent,
+      onError,
+      scrollToBottom,
+      t,
+    ],
+  );
+
+  const handleQuestionAnswer = useCallback(
+    async (callID: string, requestId: string, answers: string[][]) => {
+      try {
+        await submitAnswer(callID, requestId, answers);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (onError) {
+          onError(message);
+        } else {
+          toast.error(t('chat.questionSubmitFailed', 'Submit failed'), message);
+        }
+      }
+    },
+    [onError, submitAnswer, t, toast],
+  );
+
+  const handleQuestionReject = useCallback(
+    async (callID: string, requestId: string) => {
+      try {
+        await submitReject(callID, requestId);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (onError) {
+          onError(message);
+        } else {
+          toast.error(t('chat.questionCancelFailed', 'Cancel failed'), message);
+        }
+      }
+    },
+    [onError, submitReject, t, toast],
+  );
+
+  const reconcileSessionStatusAfterReconnect = useCallback(async () => {
+    if (!sessionId) return;
+    const statusRevision = sessionStatusRevisionRef.current;
+
+    try {
+      const response = await client.get('/api/session/status');
+      if (statusRevision !== sessionStatusRevisionRef.current) return;
+
+      const status = response.data?.[sessionId];
+      if (isActiveSessionStatus(status)) {
+        sessionBusyRef.current = true;
+        if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) {
+          setIsStreaming(true);
+        }
+        if (status?.type === 'compacting') {
+          setIsCompacting(true);
+          isCompactingRef.current = true;
+          setCompactingMessage(status.message || t('chat.compacting'));
+        } else {
+          setIsCompacting(false);
+          isCompactingRef.current = false;
+          setCompactingMessage('');
+          setCompactionStages([]);
+        }
+        // A retry event missed while the stream was down is recovered from
+        // the poll; any other active state means the backoff is over.
+        setRetryStatus(status?.type === 'retry'
+          ? (readSessionRetryStatus(status) ?? { attempt: 1, message: status.message })
+          : null);
+        return;
+      }
+
+      sessionBusyRef.current = false;
+      activeToolPartIdsRef.current.clear();
+      setSending(false);
+      setIsStreaming(false);
+      setIsCompacting(false);
+      isCompactingRef.current = false;
+      setCompactingMessage('');
+      setCompactionStages([]);
+      setRetryStatus(null);
+    } catch {
+      // Keep the current activity state when reconnect status cannot be verified.
+    }
+  }, [sessionId, t]);
+
+  const { status: sseStatus } = useSSE({
+    url: `${getApiBase()}/api/event`,
+    onEvent: handleSSEEvent,
+    onReconnect: () => {
+      if (!sessionId) return;
+      void reconcileSessionStatusAfterReconnect();
+      void refreshChildStatuses();
+      refetch();
+      void refreshContextUsage();
+      fetchPromptQueue();
+      fetchPendingPermissions().catch((err) => {
+        console.warn('[SessionChat] Failed to recover pending permissions after reconnect:', err);
+      });
+      fetchPendingQuestions(sessionId).catch((err) => {
+        console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
+      });
+    },
+    enabled: sseEnabled,
+    reconnect: { enabled: true, maxRetries: 5, initialDelay: 1000, maxDelay: 10000 },
+  });
+
+  // Forward SSE connection status to parent
+  useEffect(() => {
+    onSseStatusChange?.(sseStatus);
+  }, [sseStatus, onSseStatusChange]);
+
+  // Auto-scroll when messages update
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, scrollToBottom]);
+
+  useEffect(() => {
+    if (!isStreaming && !sending && !isCompacting) return;
+    const target = messagesContentRef.current;
+    if (!target || typeof ResizeObserver === 'undefined') return;
+
+    const observer = new ResizeObserver(() => {
+      scrollToBottom();
+    });
+    observer.observe(target);
+    return () => observer.disconnect();
+  }, [isStreaming, sending, isCompacting, scrollToBottom]);
+
+  // Auto-resize textarea
+  const autoResize = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    const nextHeight = Math.min(
+      Math.max(el.scrollHeight, effectiveComposerTextareaMinHeight),
+      effectiveComposerTextareaMaxHeight,
+    );
+    el.style.height = `${nextHeight}px`;
+  }, [effectiveComposerTextareaMaxHeight, effectiveComposerTextareaMinHeight]);
+  useEffect(() => { autoResize(); }, [input, autoResize]);
+
+  useEffect(() => {
+    if (!sending && !isStreaming) {
+      setPendingAgentName(agentName || 'rex');
+    }
+  }, [agentName, sending, isStreaming]);
+
+  // Reset state on session change
+  useEffect(() => {
+    setIsStreaming(false);
+    attachmentScopeRef.current += 1;
+    discardAttachments();
+    setIsDragOver(false);
+    setIsCompacting(false);
+    setCompactingMessage('');
+    setIsDreaming(false);
+    setDreamingMessage('');
+    setRetryStatus(null);
+    setCompactionStages([]);
+    setGoalBanner(null);
+    setDismissedGoalKey('');
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
+    sessionBusyRef.current = false;
+    sessionStatusRevisionRef.current += 1;
+    statusCheckedRef.current = null;
+    isAtBottomRef.current = true;
+    clearPendingQuestions();
+    setPendingPermissions([]);
+    settledPermissionIdsRef.current = new Set();
+    permissionAnnouncedAtRef.current = new Map();
+    permissionSessionGenerationRef.current += 1;
+    setPermissionError(null);
+    // Swap the draft when the session changes — needed for callers that
+    // don't force a remount (Session/index.tsx does, but other consumers
+    // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
+    setComposerReferences([]);
+    setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
+  }, [sessionId, clearPendingQuestions, discardAttachments]);
+
+  const handleProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
+    setProcessGroupOpenState(prev => {
+      if (prev[key] === open) return prev;
+      const next = { ...prev, [key]: open };
+      writeProcessGroupOpenState(sessionId, next);
+      return next;
+    });
+  }, [sessionId]);
+
+  useEffect(() => {
+    fetchPromptQueue();
+  }, [fetchPromptQueue]);
+
+  // Keep after the session reset effect above: that one bumps the session
+  // generation, and a list requested before the bump is dropped as stale.
+  useEffect(() => {
+    fetchPendingPermissions().catch((err) => {
+      console.warn('[SessionChat] Failed to fetch pending permissions:', err);
+    });
+  }, [fetchPendingPermissions]);
+
+  useEffect(() => {
+    setInput(readChatDraft(draftKey ?? sessionId));
+  }, [draftKey ?? sessionId]);
+
+  // Persist the draft on every keystroke. localStorage writes are synchronous
+  // and cheap, so debouncing isn't worth the added latency on send (which
+  // depends on the draft being flushed). Drafts are removed when ``input``
+  // becomes empty (e.g. after a successful send).
+  useEffect(() => {
+    writeChatDraft(draftKey ?? sessionId, input);
+  }, [draftKey ?? sessionId, input]);
+
+  // Recover streaming state after page refresh / session switch
+  useEffect(() => {
+    if (!sessionId || loading) return;
+    if (statusCheckedRef.current === sessionId) return;
+    statusCheckedRef.current = sessionId;
+    // The poll is in flight across awaits, and this closure keeps the
+    // sessionId it started with. By the time it lands the consumer may have
+    // swapped sessions (callers like WorkflowDetail/ChatTab reuse this
+    // component without remounting) or an SSE status may already have
+    // superseded it — both bump the revision, so comparing it is what tells
+    // a stale response apart, the same way
+    // reconcileSessionStatusAfterReconnect does.
+    const statusRevision = sessionStatusRevisionRef.current;
+    let cancelled = false;
+    // Set once the poll has an answer, even a superseded one. A poll cancelled
+    // before that hands the check back to the next run (see cleanup below).
+    let settled = false;
+
+    const checkStatus = async () => {
+      try {
+        const res = await client.get('/api/session/status');
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
+        const status = res.data[sessionId];
+        if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setRetryStatus(null);
+        } else if (status?.type === 'retry' && !suppressStreamingUntilIdleRef.current) {
+          // The backend is sleeping between provider retries; the turn is
+          // still running even though nothing is streaming yet.
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setRetryStatus(readSessionRetryStatus(status) ?? { attempt: 1, message: status.message });
+        } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsCompacting(true);
+          isCompactingRef.current = true;
+          setIsDreaming(false);
+          setDreamingMessage('');
+          setCompactingMessage(status.message || t('chat.compacting'));
+        } else if (status?.type === 'dreaming' && !suppressStreamingUntilIdleRef.current) {
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsCompacting(false);
+          isCompactingRef.current = false;
+          setIsDreaming(true);
+          setDreamingMessage(status.message || t('chat.dreaming'));
+        } else {
+          sessionBusyRef.current = false;
+        }
+      } catch {
+        if (cancelled) return;
+        settled = true;
+        if (statusRevision !== sessionStatusRevisionRef.current) return;
+        const lastMsg = messagesRef.current[messagesRef.current.length - 1];
+        if (lastMsg?.role === 'assistant' && !lastMsg.finish) {
+          setIsStreaming(true);
+        }
+      }
+
+      if (statusRevision !== sessionStatusRevisionRef.current) return;
+      try {
+        await fetchPendingQuestions(sessionId);
+      } catch (err) {
+        console.warn('[SessionChat] Failed to recover pending questions:', err);
+      }
+    };
+    void checkStatus();
+    return () => {
+      cancelled = true;
+      // The message load flips ``loading`` false -> true right after mount,
+      // which re-runs this effect and cancels the poll still in flight. Without
+      // this reset the later ``loading=false`` run would skip the session as
+      // already checked, so a reload during a retry showed an idle chat.
+      if (!settled && statusCheckedRef.current === sessionId) {
+        statusCheckedRef.current = null;
+      }
+    };
+  }, [sessionId, loading, fetchPendingQuestions]);
+
+  // A remote proxy or a reconnect boundary can delay or lose the one-shot
+  // question.asked event. Reconcile only while the session is active; the
+  // hook ignores responses made stale by a newer SSE update.
+  useEffect(() => {
+    if (!sessionId || (!isStreaming && !sending)) return;
+    const timer = setInterval(() => {
+      fetchPendingQuestions(sessionId).catch((err) => {
+        console.warn('[SessionChat] Failed to reconcile pending questions:', err);
+      });
+    }, PENDING_QUESTION_RECONCILE_MS);
+    return () => clearInterval(timer);
+  }, [sessionId, isStreaming, sending, fetchPendingQuestions]);
+
+  // Refetch when page becomes visible again
+  useEffect(() => {
+    if (!sessionId) return;
+    const handler = () => {
+      if (document.visibilityState === 'visible') {
+        refetch();
+        fetchPromptQueue();
+        fetchPendingQuestions(sessionId).catch((err) => {
+          console.warn('[SessionChat] Failed to recover pending questions after visibility change:', err);
+        });
+      }
+    };
+    document.addEventListener('visibilitychange', handler);
+    return () => document.removeEventListener('visibilitychange', handler);
+  }, [sessionId, refetch, fetchPromptQueue, fetchPendingQuestions]);
+
+  // Backup refetch when compaction ends — covers SSE reconnect scenarios
+  // where the session.status event may have been missed.
+  const prevIsCompactingRef = useRef(false);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    if (prevIsCompactingRef.current && !isCompacting && sessionId) {
+      refetch();
+      // Delayed safety-net: refetch once more in case the immediate fetch
+      // returned stale data (e.g. compacted flag not yet persisted).
+      timer = setTimeout(() => refetch(), 1500);
+    }
+    prevIsCompactingRef.current = isCompacting;
+    return () => { if (timer) clearTimeout(timer); };
+  }, [isCompacting, sessionId, refetch]);
+
+  /** Lazily load slash commands and periodically revalidate while autocomplete is used. */
+  const loadCommandsIfNeeded = useCallback(async (): Promise<void> => {
+    if (commandsLoadingRef.current || Date.now() - commandsLoadedAtRef.current < 5_000) return;
+    commandsLoadingRef.current = true;
+    try {
+      setCommands(await fetchSessionChatCommands());
+      commandsLoadedAtRef.current = Date.now();
+    } catch {
+      commandsLoadedAtRef.current = 0;
+    } finally {
+      commandsLoadingRef.current = false;
+    }
+  }, []);
+
+  const buildMessageText = useCallback((rawText: string) => {
+    if (!rawText) return '';
+    return nodeRef
+      ? `@@node:${nodeRef.id}|${nodeRef.type}\n${rawText}`
+      : rawText;
+  }, [nodeRef]);
+
+  const updateAttachment = useCallback((id: string, updater: (attachment: ComposerAttachment) => ComposerAttachment) => {
+    setAttachments((prev) => prev.map((attachment) => (
+      attachment.id === id ? updater(attachment) : attachment
+    )));
+  }, [setAttachments]);
+
+  const uploadSelectedFiles = useCallback(async (entries: Array<{ id: string; file: File }>) => {
+    if (entries.length === 0) return;
+    try {
+      const response = await workspaceAPI.upload(
+        entries.map((entry) => entry.file),
+        WORKSPACE_UPLOAD_DEST,
+        'chat',
+      );
+      const uploaded = response.data.uploaded ?? [];
+      entries.forEach(({ id }, index) => {
+        const result = uploaded[index];
+        const attachment = attachmentsRef.current.find((item) => item.id === id);
+        // Register every returned ID, even if its chip was cancelled or the
+        // component unmounted while this batch was in flight. Dispose per item,
+        // outside React state updaters (which may be replayed or never run).
+        if (result?.uploadID) {
+          if (!uploadOwnershipRef.current.has(result.uploadID)) {
+            uploadOwnershipRef.current.set(result.uploadID, 'draft');
+          }
+          if (!attachmentsMountedRef.current || !attachment || result.error) disposeUpload(result.uploadID);
+        }
+        if (!attachmentsMountedRef.current || !attachment) return;
+        if (attachment.uploadID && attachment.uploadID !== result?.uploadID) disposeUpload(attachment.uploadID);
+        updateAttachment(id, (current) => !result || result.error || !result.uploadID ? {
+          ...current,
+          status: 'error',
+          uploadID: undefined,
+          error: result?.error || t('chat.upload.errorGeneric'),
+        } : {
+          ...current,
+          name: result.name || current.name,
+          status: 'success',
+          uploadID: result.uploadID,
+          mime: result.mime || current.file.type || 'application/octet-stream',
+          error: undefined,
+        });
+      });
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail ?? err?.message ?? t('chat.upload.errorGeneric');
+      setAttachments((prev) => prev.map((attachment) => (
+        entries.some((entry) => entry.id === attachment.id)
+          ? { ...attachment, status: 'error', error: detail }
+          : attachment
+      )));
+    }
+  }, [disposeUpload, setAttachments, updateAttachment, t]);
+
+  const queueFilesForUpload = useCallback((files: File[], { imageBlocked = false }: { imageBlocked?: boolean } = {}) => {
+    if (files.length === 0) return;
+    const validDocEntries: Array<{ id: string; file: File }> = [];
+    const validImageFiles: Array<{ id: string; file: File }> = [];
+    const invalidAttachments: ComposerAttachment[] = [];
+    let imageRejectedToastShown = false;
+
+    files.forEach((file, index) => {
+      const id = `attachment-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+
+      if (isImageFile(file)) {
+        if (imageBlocked || supportsVision === false) {
+          // Show a toast once for the whole batch of rejected images
+          if (!imageRejectedToastShown) {
+            imageRejectedToastShown = true;
+            toast.error(t('chat.upload.imageNotSupported'));
+          }
+        } else {
+          validImageFiles.push({ id, file });
+        }
+        return;
+      }
+
+      if (!allowAnyUpload && !isAllowedUploadFile(file)) {
+        invalidAttachments.push({
+          id,
+          file,
+          name: file.name,
+          status: 'error',
+          error: t('chat.upload.invalidType'),
+        });
+        return;
+      }
+      validDocEntries.push({ id, file });
+    });
+
+    if (invalidAttachments.length > 0) {
+      setAttachments((prev) => [...prev, ...invalidAttachments]);
+    }
+
+    // Handle document uploads (server upload)
+    if (validDocEntries.length > 0) {
+      setAttachments((prev) => [
+        ...prev,
+        ...validDocEntries.map(({ id, file }) => ({
+          id,
+          file,
+          name: file.name,
+          status: 'uploading' as const,
+        })),
+      ]);
+      void uploadSelectedFiles(validDocEntries);
+    }
+
+    // Handle image files (read as base64, no server upload)
+    if (validImageFiles.length > 0) {
+      setAttachments((prev) => [
+        ...prev,
+        ...validImageFiles.map(({ id, file }) => ({
+          id,
+          file,
+          name: file.name,
+          status: 'uploading' as const,
+          isImage: true,
+        })),
+      ]);
+      // Pick compression aggressiveness from how many images are arriving
+      // together. A 4-image drop gets a tighter cap than a single image so
+      // the combined base64 body still fits inside upstream gateway limits.
+      const batchOpts = batchCompressOptions(validImageFiles.length);
+      validImageFiles.forEach(({ id, file }) => {
+        compressImageFile(file, batchOpts)
+          .then((compressed) => readFileAsDataUrl(compressed).then((dataUrl) => ({ compressed, dataUrl })))
+          .then(({ compressed, dataUrl }) => {
+            setAttachments((prev) => prev.map((a) =>
+              a.id === id
+                ? { ...a, file: compressed, name: compressed.name, status: 'success' as const, dataUrl, isImage: true }
+                : a
+            ));
+          })
+          .catch(() => {
+            setAttachments((prev) => prev.map((a) =>
+              a.id === id
+                ? { ...a, status: 'error' as const, error: t('chat.upload.errorGeneric') }
+                : a
+            ));
+          });
+      });
+    }
+  }, [t, toast, uploadSelectedFiles, supportsVision, setAttachments, allowAnyUpload]);
+
+  const handleFileSelection = useCallback((fileList: FileList | null) => {
+    if (!fileList || fileList.length === 0) return;
+    queueFilesForUpload(Array.from(fileList));
+  }, [queueFilesForUpload]);
+
+  const handleRetryAttachment = useCallback((attachmentId: string) => {
+    const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
+    if (!attachment || attachment.status !== 'error') return;
+    updateAttachment(attachmentId, (current) => ({
+      ...current,
+      status: 'uploading',
+      error: undefined,
+    }));
+    if (attachment.isImage) {
+      compressImageFile(attachment.file)
+        .then((compressed) => readFileAsDataUrl(compressed).then((dataUrl) => ({ compressed, dataUrl })))
+        .then(({ compressed, dataUrl }) => {
+          setAttachments((prev) => prev.map((a) =>
+            a.id === attachmentId
+              ? { ...a, file: compressed, name: compressed.name, status: 'success' as const, dataUrl, error: undefined }
+              : a
+          ));
+        })
+        .catch(() => {
+          setAttachments((prev) => prev.map((a) =>
+            a.id === attachmentId
+              ? { ...a, status: 'error' as const, error: t('chat.upload.errorGeneric') }
+              : a
+          ));
+        });
+    } else {
+      void uploadSelectedFiles([{ id: attachment.id, file: attachment.file }]);
+    }
+  }, [setAttachments, updateAttachment, uploadSelectedFiles, t]);
+
+  const handleRemoveAttachment = useCallback((attachmentId: string) => {
+    const attachment = attachmentsRef.current.find((item) => item.id === attachmentId);
+    setAttachments((prev) => prev.filter((item) => item.id !== attachmentId));
+    if (attachment?.uploadID && !attachment.isImage) disposeUpload(attachment.uploadID);
+  }, [disposeUpload, setAttachments]);
+
+  const handleComposerPaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    const files = Array.from(event.clipboardData?.files ?? []);
+    if (files.length === 0) return;
+    event.preventDefault();
+    queueFilesForUpload(files);
+  }, [queueFilesForUpload]);
+
+
+  const handleComposerDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!Array.from(event.dataTransfer?.types ?? []).includes('Files')) return;
+    event.preventDefault();
+    setIsDragOver(true);
+  }, []);
+
+  const handleComposerDragLeave = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+      setIsDragOver(false);
+    }
+  }, []);
+
+  const handleComposerDrop = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (event.dataTransfer.files.length === 0) return;
+    event.preventDefault();
+    setIsDragOver(false);
+    handleFileSelection(event.dataTransfer.files);
+  }, [handleFileSelection]);
+
+  /**
+   * Execute a slash command via the dedicated command API.
+   *
+   * The backend creates the user message (showing "/tools"), handles the command
+   * directly if possible (no LLM), and pushes the response via SSE.
+   * A temporary user message is added immediately for instant feedback;
+   * the SSE "message.updated" event replaces it with the persisted message.
+   */
+  const sendCommand = async (command: string, args: string) => {
+    if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
+
+    abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
+    isAtBottomRef.current = true;
+    setSending(true);
+    setIsStreaming(true);
+
+    const displayText = args ? `/${command} ${args}` : `/${command}`;
+    const messageId = createMessageId();
+    addMessage({
+      id: messageId,
+      sessionID: sessionId,
+      role: 'user',
+      parts: [{ id: `temp-${messageId}-part`, type: 'text', text: displayText }],
+      timestamp: Date.now(),
+    } as Message);
+
+    try {
+      await ensureAutoModelSession();
+      await client.post(`/api/session/${sessionId}/command`, {
+        command,
+        arguments: args,
+        agent: agentName,
+        messageID: messageId,
+      });
+      if (command === 'goal' && args.trim()) {
+        goalHydrationVersionRef.current += 1;
+        writeDismissedGoalKey(sessionId, '');
+        setGoalBanner({ objective: args.trim(), status: 'active' });
+        setDismissedGoalKey('');
+      }
+    } catch (err: unknown) {
+      setIsStreaming(false);
+      removeMessage(messageId);
+      const axiosErr = err as any;
+      if (axiosErr?.response?.status === 404) {
+        onError?.('Session not found. Please start a new session.');
+      } else {
+        alert(`Command failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      throw err;
+    } finally {
+      setSending(false);
+    }
+  };
+
+  /** Core send logic */
+  const sendText = async (
+    text: string,
+    fileParts: FilePartData[] = [],
+    agentOverride?: string,
+    options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
+  ) => {
+    if (!sessionId) return;
+    const effectiveAgent = agentOverride || agentName;
+    sessionStatusRevisionRef.current += 1;
+    // Clear abort state immediately so SSE events for the new stream are not suppressed
+    abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
+    // Force scroll to bottom when user sends a new message
+    isAtBottomRef.current = true;
+    setSending(true);
+    setIsStreaming(true);
+    setPendingAgentName(effectiveAgent || 'rex');
+
+    const messageId = createMessageId();
+    const tempParts: MessagePart[] = [];
+    const optimisticTextPart: MessagePart = {
+      id: `temp-${messageId}-text`,
+      type: 'text',
+      text,
+      ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
+    };
+    if (text || options?.displayText) tempParts.push(optimisticTextPart);
+    fileParts.forEach((file, i) => {
+      tempParts.push({
+        id: file.id || `temp-${messageId}-file-${i}`,
+        type: 'file',
+        url: file.url,
+        mime: file.mime,
+        filename: file.filename,
+      });
+    });
+
+    const optimisticMessage = {
+      id: messageId,
+      sessionID: sessionId,
+      role: 'user',
+      parts: tempParts.length > 0 ? tempParts : [optimisticTextPart],
+      timestamp: Date.now(),
+      agent: effectiveAgent,
+    } as Message;
+    setSubmittedModelPromptSessionId(sessionId);
+    beginPendingContextUsage(messageId, {
+      conversation: estimateMessageTokens(optimisticMessage),
+    });
+    addMessage(optimisticMessage);
+
+    try {
+      await ensureAutoModelSession();
+      const payload: Record<string, unknown> = {
+        parts: buildPromptParts(text, fileParts),
+        messageID: messageId,
+      };
+      if (effectiveAgent) payload.agent = effectiveAgent;
+      if (model) payload.model = model;
+      if (options?.displayText) payload.displayText = options.displayText;
+      payload.executionMode = promptExecutionMode;
+
+      uploadSubmission?.start();
+      await client.post(`/api/session/${sessionId}/prompt_async`, payload);
+      uploadSubmission?.accept();
+      if (promptExecutionMode === 'goal' && text.trim()) {
+        goalHydrationVersionRef.current += 1;
+        writeDismissedGoalKey(sessionId, '');
+        setGoalBanner({ objective: text.trim(), status: 'active' });
+        setDismissedGoalKey('');
+      }
+      onExecutionModeAccepted?.(promptExecutionMode);
+    } catch (err: unknown) {
+      setIsStreaming(false);
+      removeMessage(messageId);
+      removePendingContextUsage(messageId);
+      if (!hasPersistedModelInvocation) {
+        setSubmittedModelPromptSessionId((currentSessionId) => (
+          currentSessionId === sessionId ? null : currentSessionId
+        ));
+      }
+      const axiosErr = err as any;
+      if (axiosErr?.response?.status === 404) {
+        onError?.(`Session not found. Please start a new session.`);
+      } else {
+        // Same surface as the new-session path in pages/Session (toast with the
+        // backend message); a blocking alert() hid the composer draft the user
+        // needs to retry.
+        toast.error(
+          t('chat.sendFailed'),
+          axiosErr?.response?.data?.message || axiosErr?.response?.data?.detail || (err instanceof Error ? err.message : String(err)),
+        );
+      }
+      throw err;
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const enqueueText = async (
+    text: string,
+    fileParts: FilePartData[] = [],
+    agentOverride?: string,
+    options?: PromptDisplayOptions,
+    uploadSubmission?: UploadSubmission,
+    promptExecutionMode = executionMode,
+  ) => {
+    if (!sessionId) return;
+    const effectiveAgent = agentOverride || agentName;
+    try {
+      await ensureAutoModelSession();
+      uploadSubmission?.start();
+      await sessionApi.enqueuePrompt(sessionId, {
+        parts: buildPromptParts(text, fileParts),
+        ...(effectiveAgent ? { agent: effectiveAgent } : {}),
+        ...(model ? { model } : {}),
+        ...(options?.displayText ? { displayText: options.displayText } : {}),
+        executionMode: promptExecutionMode,
+      });
+      // Acceptance transfers ownership before the queue refresh or a parent
+      // callback can switch/unmount this composer.
+      uploadSubmission?.accept();
+      await fetchPromptQueue();
+      setQueueExpanded(true);
+      onExecutionModeAccepted?.(promptExecutionMode);
+    } catch (err: any) {
+      const statusCode = err?.response?.status;
+      const detail = err?.response?.data?.detail;
+      const message = statusCode === 409
+        ? t('chat.queue.full')
+        : detail || err?.message || t('chat.queue.enqueueFailed');
+      toast.error(message);
+      throw err;
+    }
+  };
+
+  // A shortcut may await an installation/status lookup before sending. Read the
+  // latest chat state so a prompt started meanwhile is queued, not interrupted.
+  const welcomeSendingRef = useRef(false);
+  const welcomeSendRef = useRef<SendWelcomePrompt>(async () => false);
+  welcomeSendRef.current = async (text, options) => {
+    if (!attachmentsMountedRef.current || !sessionId || hideInput || transport || sending || welcomeSendingRef.current) return false;
+    welcomeSendingRef.current = true;
+    try {
+      const send = isStreaming ? enqueueText : sendText;
+      await send(text, [], options?.agent, options, undefined, options?.executionMode ?? executionMode);
+      return true;
+    } finally {
+      welcomeSendingRef.current = false;
+    }
+  };
+  const sendWelcomePrompt = useCallback<SendWelcomePrompt>((...args) => welcomeSendRef.current(...args), []);
+
+  const handleComposerPrompt = async (text: string, options?: PromptDisplayOptions) => {
+    const trimmed = text.trim();
+    if (!trimmed || sending || transport?.disabled) return;
+    if (transport) {
+      setSending(true);
+      setInput('');
+      try { await transport.send(trimmed); }
+      catch { setInput(trimmed); }
+      finally { setSending(false); }
+      return;
+    }
+
+    setInput('');
+    setShowCommandDropdown(false);
+    setMentionRange(null);
+    discardAttachments();
+
+    if (sessionId && isStreaming) {
+      try {
+        await enqueueText(trimmed, [], undefined, options);
+      } catch {
+        setInput(trimmed);
+      }
+      return;
+    }
+
+    if (!sessionId) {
+      if (!onCreateAndSend) {
+        setInput(trimmed);
+        textareaRef.current?.focus();
+        return;
+      }
+      setSending(true);
+      try {
+        setPendingAgentName(agentName || 'rex');
+        await onCreateAndSend(
+          trimmed,
+          [],
+          agentName,
+          model,
+          { ...options, schedulingMode },
+          executionMode,
+        );
+        onExecutionModeAccepted?.(executionMode);
+      } catch {
+        setInput(trimmed);
+      } finally {
+        setSending(false);
+      }
+      return;
+    }
+
+    try {
+      await sendText(trimmed, [], agentName, options);
+    } catch {
+      setInput(trimmed);
+    }
+  };
+
+  const handleSend = async () => {
+    if (!canSend || composerBusyOwners.current.size > 0) return;
+    if (transport) {
+      const text = input.trim();
+      if (!text) return;
+      setSending(true);
+      setInput('');
+      try { await transport.send(text); }
+      catch { setInput(text); }
+      finally { setSending(false); }
+      return;
+    }
+    const draftText = input.trim();
+    const referencesToSend = [...composerReferences];
+    const referenceText = referencesToSend.map(formatComposerReference).join(' ');
+    const rawText = [referenceText, draftText].filter(Boolean).join(' ');
+    const docAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.uploadID && !item.isImage);
+    const imageAttachmentsToSend = attachmentsRef.current.filter((item) => item.status === 'success' && item.isImage && item.dataUrl);
+    if (docAttachmentsToSend.some(({ uploadID }) => {
+      const ownership = uploadOwnershipRef.current.get(uploadID!);
+      return ownership === 'submitting' || ownership === 'submitted';
+    })) return;
+    const text = buildMessageText(rawText);
+    const mentionedAgent = resolveReferencedAgentName(rawText, mentionAgents);
+    const scope = attachmentScopeRef.current;
+    const restoreDraft = () => {
+      if (!attachmentsMountedRef.current || scope !== attachmentScopeRef.current) return;
+      setInput(draftText);
+      setComposerReferences(referencesToSend);
+    };
+
+    // Need either text content or at least one uploaded file.
+    if (!text && docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0) return;
+
+    // Reserve IDs synchronously, before create, model selection or enqueue can
+    // yield. Tray removal/unmount must never DELETE a possibly accepted upload.
+    const uploadSubmission = beginUploadSubmission(docAttachmentsToSend);
+    const sentAttachmentIds = new Set([...docAttachmentsToSend, ...imageAttachmentsToSend].map(({ id }) => id));
+    const clearSentAttachments = () => setAttachments((current) => current.filter(({ id }) => !sentAttachmentIds.has(id)));
+    const rejectSubmission = (error: unknown) => {
+      uploadSubmission.reject(error);
+      restoreDraft();
+      // The live tray still owns retryable attachments. Do not resurrect chips
+      // explicitly removed in flight or replace uploads added during the send.
+    };
+
+    setInput('');
+    setComposerReferences([]);
+    setShowCommandDropdown(false);
+    setMentionRange(null);
+
+    const documentParts: FilePartData[] = docAttachmentsToSend.map((attachment) => ({
+      id: attachment.id,
+      uploadID: attachment.uploadID!,
+      mime: attachment.mime || attachment.file.type || 'application/octet-stream',
+      filename: attachment.name,
+    }));
+    const imageParts: ImagePartData[] = imageAttachmentsToSend.map((attachment) => ({
+      id: attachment.id,
+      url: attachment.dataUrl!,
+      mime: attachment.file.type,
+      filename: attachment.name,
+    }));
+    const fileParts: FilePartData[] = [...documentParts, ...imageParts];
+
+    // Keep client-side commands local even while Atlas is streaming.
+    const parsed = docAttachmentsToSend.length === 0 && imageAttachmentsToSend.length === 0
+      ? parseSlashCommand(rawText) : null;
+    if (parsed?.command === 'new') {
+      if (onCreateNewSession) {
+        await onCreateNewSession();
+      }
+      return;
+    }
+
+    if (sessionId && isStreaming) {
+      try {
+        await enqueueText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+        clearSentAttachments();
+      } catch (error) {
+        rejectSubmission(error);
+      }
+      return;
+    }
+
+    // Route slash commands through the command API (requires an active session, no images)
+    if (parsed) {
+      if (!sessionId) {
+        // Slash commands need an existing session; restore input and do nothing
+        restoreDraft();
+        return;
+      }
+      try {
+        await sendCommand(parsed.command, parsed.args);
+      } catch {
+        restoreDraft();
+      }
+      return;
+    }
+
+    if (!sessionId) {
+      if (onCreateAndSend) {
+        setSending(true);
+        try {
+          const effectiveAgent = mentionedAgent || agentName;
+          setPendingAgentName(effectiveAgent || 'rex');
+          // The parent's opaque create-and-send promise must resolve only after
+          // acceptance and propagate explicit rejection errors unchanged.
+          uploadSubmission.start();
+          await onCreateAndSend(
+            text,
+            fileParts,
+            effectiveAgent || undefined,
+            model,
+            { schedulingMode },
+            executionMode,
+          );
+          uploadSubmission.accept();
+          onExecutionModeAccepted?.(executionMode);
+          clearSentAttachments();
+        } catch (error) {
+          rejectSubmission(error);
+        } finally {
+          setSending(false);
+        }
+      } else {
+        rejectSubmission(undefined);
+      }
+      return;
+    }
+
+    try {
+      await sendText(text, fileParts, mentionedAgent || undefined, undefined, uploadSubmission);
+      clearSentAttachments();
+    } catch (error) {
+      rejectSubmission(error);
+    }
+  };
+
+  // Auto-send initialMessage (reactive to prop changes; waits for sessionId).
+  // Uses a composite key to guard against React StrictMode double-mount sends.
+  // Immediately notifies parent so the message won't re-send if selectedSessionId changes.
+  useEffect(() => {
+    if (!initialMessage || !sessionId) return;
+    const sentKey = `${sessionId}::${initialMessage}::${initialDisplayText ?? ''}`;
+    if (initialMessageSentRef.current === sentKey) return;
+    initialMessageSentRef.current = sentKey;
+    sendText(
+      initialMessage,
+      [],
+      undefined,
+      initialDisplayText ? { displayText: initialDisplayText } : undefined,
+    ).catch(() => {});
+    onInitialMessageConsumed?.();
+  }, [initialDisplayText, initialMessage, sessionId]);
+
+  const insertMention = useCallback((name: string) => {
+    const currentValue = textareaRef.current?.value ?? input;
+    const cursorPos = textareaRef.current?.selectionStart ?? currentValue.length;
+    const currentRange = findMentionTrigger(currentValue, cursorPos) ?? mentionRange;
+    if (!currentRange) return;
+    const next = `${currentValue.slice(0, currentRange.start)}@${name} ${currentValue.slice(currentRange.end)}`;
+    const cursor = currentRange.start + name.length + 2;
+    setInput(next);
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+      textareaRef.current?.setSelectionRange(cursor, cursor);
+    });
+  }, [input, mentionRange]);
+
+  const insertAgentMention = useCallback((name: string) => {
+    setComposerReferences((current) => [
+      { kind: 'subagent', value: name },
+      ...current.filter((reference) => reference.kind !== 'subagent'),
+    ]);
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }, []);
+
+  const insertComposerReference = useCallback((
+    value: string,
+    kind: 'workflow' | 'skill',
+  ) => {
+    setComposerReferences((current) => {
+      if (kind === 'skill') {
+        if (current.some((reference) => reference.kind === 'skill' && reference.value === value)) {
+          return current;
+        }
+        return [{ kind, value }, ...current];
+      }
+      return [
+        { kind, value },
+        ...current.filter((reference) => reference.kind !== kind),
+      ];
+    });
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }, []);
+
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    const currentValue = e.currentTarget instanceof HTMLTextAreaElement ? e.currentTarget.value : input;
+    const activeMention = mentionRange
+      ? findMentionTrigger(currentValue, textareaRef.current?.selectionStart ?? currentValue.length)
+      : null;
+    if (mentionRange && !activeMention) {
+      setMentionRange(null);
+    }
+    if (activeMention && filteredMentionAgents.length > 0) {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setMentionRange(null);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setSelectedMentionIndex((i) => (i - 1 + filteredMentionAgents.length) % filteredMentionAgents.length);
+        return;
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setSelectedMentionIndex((i) => (i + 1) % filteredMentionAgents.length);
+        return;
+      }
+      if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current)) {
+        e.preventDefault();
+        const chosen = filteredMentionAgents[selectedMentionIndex] ?? filteredMentionAgents[0];
+        if (chosen) {
+          insertMention(chosen.name);
+        }
+        return;
+      }
+    }
+
+    if (showCommandDropdown) {
+      const filtered = commands.filter(
+        (cmd) => !cmd.hidden && (commandQuery === '' || cmd.name.toLowerCase().startsWith(commandQuery.toLowerCase()))
+      );
+      const filteredCount = filtered.length;
+
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        setShowCommandDropdown(false);
+        return;
+      }
+
+      if (filteredCount === 0) {
+        // No candidates — let Enter/Tab fall through to normal behavior
+        if (e.key === 'Tab') { e.preventDefault(); }
+      } else {
+        if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setSelectedCommandIndex((i) => (i - 1 + filteredCount) % filteredCount);
+          return;
+        }
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setSelectedCommandIndex((i) => (i + 1) % filteredCount);
+          return;
+        }
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current)) {
+          e.preventDefault();
+          const chosen = filtered[selectedCommandIndex] ?? filtered[0];
+          if (chosen) {
+            setInput(`/${chosen.name} `);
+            setShowCommandDropdown(false);
+          }
+          return;
+        }
+      }
+    }
+
+    if (e.key === 'Enter' && !e.shiftKey && !isComposingRef.current) {
+      e.preventDefault();
+      handleSend();
+    }
+  };
+
+  const handleAbort = useCallback(async () => {
+    if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
+    // Record the ID of the message being aborted so we can ignore its finish event later.
+    const lastAsstMsg = isStreaming ? [...messagesRef.current].reverse().find(
+      (m) => m.role === 'assistant' && !m.finish,
+    ) : undefined;
+    const wasSessionBusy = sessionBusyRef.current;
+    abortedMessageIdRef.current = lastAsstMsg?.id || null;
+    abortingRef.current = true;
+    suppressStreamingUntilIdleRef.current = true;
+    sessionBusyRef.current = false;
+    setIsStreaming(false);
+    setSending(false);
+    try {
+      if (transport?.stop) await transport.stop();
+      else await client.post(`/api/session/${sessionId}/abort`);
+      if (lastAsstMsg?.id) {
+        markMessageStopped(lastAsstMsg.id);
+      }
+      setTimeout(() => { abortingRef.current = false; }, ABORT_SSE_SETTLE_DELAY);
+    } catch (err) {
+      console.error('[SessionChat] Abort failed:', err);
+      abortingRef.current = false;
+      abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
+      sessionBusyRef.current = wasSessionBusy;
+      setIsStreaming(isStreaming);
+      setSending(sending);
+    }
+  }, [isStreaming, markMessageStopped, sending, sessionId, transport?.stop]);
+
+  const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
+    startQueuedEdit(item);
+  }, [startQueuedEdit]);
+
+  const handleQueuedEditCancel = useCallback(() => {
+    cancelQueuedEdit();
+  }, [cancelQueuedEdit]);
+
+  const handleQueuedEditSave = useCallback(async (item: QueuedPrompt) => {
+    try {
+      await saveQueuedEdit(item);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.updateFailed'));
+    }
+  }, [saveQueuedEdit, t, toast]);
+
+  const handleQueuedRemove = useCallback(async (item: QueuedPrompt) => {
+    try {
+      await removeQueuedPrompt(item);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.removeFailed'));
+    }
+  }, [removeQueuedPrompt, t, toast]);
+
+  const handleQueuedRunNow = useCallback(async (item: QueuedPrompt) => {
+    sessionStatusRevisionRef.current += 1;
+    try {
+      const didRun = await runQueuedPromptNow(item);
+      if (!didRun) return;
+      abortingRef.current = false;
+      abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
+      setIsStreaming(true);
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
+    }
+  }, [runQueuedPromptNow, t, toast]);
+
+  // Fire onStreamingDone when isStreaming transitions true → false
+  useEffect(() => {
+    if (prevStreamingRef.current && !isStreaming) {
+      onStreamingDone?.();
+    }
+    prevStreamingRef.current = isStreaming;
+  }, [isStreaming, onStreamingDone]);
+
+  // Fallback polling to detect completion when SSE events are missed
+  useEffect(() => {
+    if (!isStreaming || !sessionId) return;
+    const controller = new AbortController();
+    let pollInFlight = false;
+    const timer = setInterval(async () => {
+      if (pollInFlight) return;
+      pollInFlight = true;
+      const statusRevision = sessionStatusRevisionRef.current;
+      const isCurrentPoll = () => !controller.signal.aborted
+        && statusRevision === sessionStatusRevisionRef.current;
+      try {
+        const res = await client.get(`/api/session/${sessionId}/message`, {
+          params: { page: true, limit: 50, include_archived: true },
+          signal: controller.signal,
+        });
+        if (!isCurrentPoll()) return;
+        const msgs: FetchedMessageWithParts[] = Array.isArray(res.data)
+          ? res.data
+          : (res.data?.items || []);
+        const currentTurnAssistantMessages = getCurrentTurnAssistantMessages(msgs);
+        const shouldRecoverQuestionPart = (part: MessagePart) => (
+          isQuestionToolName(part.tool || '')
+          && (
+            isActiveToolPart(part)
+            || !!(part.callID && pendingQuestionsRef.current[part.callID])
+          )
+        );
+        const hasFetchedPendingQuestion = currentTurnAssistantMessages?.some((message) => (
+          (message.parts || []).some((part) => (
+            shouldRecoverQuestionPart(part)
+          ))
+        )) ?? false;
+        if (currentTurnAssistantMessages && hasFetchedPendingQuestion) {
+          const localQuestionPartIds = new Set<string>();
+          const localQuestionCallIds = new Set<string>();
+          for (const message of messagesRef.current) {
+            for (const part of message.parts || []) {
+              if (
+                (part.type !== 'tool' && part.type !== 'toolCall')
+                || !isQuestionToolName(part.tool || '')
+              ) continue;
+              if (part.id) localQuestionPartIds.add(part.id);
+              if (part.callID) localQuestionCallIds.add(part.callID);
+            }
+          }
+          const hasMissingFetchedQuestion = currentTurnAssistantMessages.some((msg) => (
+            (msg.parts || []).some((part: MessagePart) => (
+              shouldRecoverQuestionPart(part)
+              && !(
+                (part.id && localQuestionPartIds.has(part.id))
+                || (part.callID && localQuestionCallIds.has(part.callID))
+              )
+            ))
+          ));
+          if (hasMissingFetchedQuestion) {
+            await refetch();
+            if (!isCurrentPoll()) return;
+          }
+        }
+
+        const lastMsg = msgs[msgs.length - 1];
+        if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
+          const currentTurnMessages = currentTurnAssistantMessages
+            ? new Set(currentTurnAssistantMessages)
+            : null;
+          const hasFetchedActiveTool = msgs.some((msg) => (
+            (msg.parts || []).some((part: MessagePart) => {
+              if (!isQuestionToolName(part.tool || '')) return isActiveToolPart(part);
+              const isPendingQuestion = isActiveToolPart(part)
+                || !!(part.callID && pendingQuestionsRef.current[part.callID]);
+              if (!isPendingQuestion) return false;
+              return currentTurnMessages === null || currentTurnMessages.has(msg);
+            })
+          ));
+          if (hasFetchedActiveTool) return;
+
+          const statusRes = await client.get('/api/session/status', { signal: controller.signal });
+          if (!isCurrentPoll()) return;
+          const status = statusRes.data?.[sessionId];
+          if (isActiveSessionStatus(status)) return;
+
+          activeToolPartIdsRef.current.clear();
+          refetch();
+          setIsStreaming(false);
+        }
+      } catch { /* retry on the next interval while this effect remains active */ }
+      finally { pollInFlight = false; }
+    }, FALLBACK_POLL_MS);
+    return () => {
+      controller.abort();
+      clearInterval(timer);
+    };
+  }, [isStreaming, sessionId, refetch]);
+
+  // Copy text to clipboard
+  const handleCopy = useCallback((text: string) => {
+    void copyText(text).catch(() => {});
+  }, []);
+
+  const resetEditingState = useCallback(() => {
+    setEditingMessageId(null);
+    setEditingPartId(null);
+    setEditingRole(null);
+    setEditingText('');
+    setActionMessageId(null);
+  }, []);
+
+  const reportActionError = useCallback((fallback: string, err: unknown) => {
+    const message = err instanceof Error ? err.message : fallback;
+    onError?.(message);
+    if (!onError) {
+      alert(message);
+    }
+  }, [onError]);
+
+  const beginMessageEdit = useCallback((
+    targetMessageId: string,
+    targetPartId: string,
+    role: Message['role'],
+    rawText: string,
+  ) => {
+    setEditingMessageId(targetMessageId);
+    setEditingPartId(targetPartId);
+    setEditingRole(role);
+    setEditingText(rawText);
+    setActionMessageId(null);
+  }, []);
+
+  const handleSaveEditedMessage = useCallback(async () => {
+    if (!sessionId || !editingMessageId || !editingPartId || !editingRole) return;
+    const text = editingText.trim();
+    if (!text) return;
+
+    setActionMessageId(editingMessageId);
+    try {
+      await sessionApi.updateMessagePart(sessionId, editingMessageId, editingPartId, {
+        id: editingPartId,
+        messageID: editingMessageId,
+        sessionID: sessionId,
+        type: 'text',
+        text,
+      });
+      replaceMessageText(editingMessageId, editingPartId, text);
+      resetEditingState();
+    } catch (err) {
+      reportActionError(t('chat.errors.saveFailed'), err);
+    } finally {
+      setActionMessageId(null);
+    }
+  }, [
+    editingMessageId,
+    editingPartId,
+    editingRole,
+    editingText,
+    replaceMessageText,
+    reportActionError,
+    resetEditingState,
+    sessionId,
+    t,
+  ]);
+
+  const handleSendEditedUserMessage = useCallback(async () => {
+    if (!sessionId || !editingMessageId || !editingPartId || editingRole !== 'user') return;
+    const text = editingText.trim();
+    if (!text) return;
+
+    abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
+    isAtBottomRef.current = true;
+    setActionMessageId(editingMessageId);
+    const sourceMessage = messagesRef.current.find((message) => message.id === editingMessageId);
+    const sourceMessageIndex = messagesRef.current.findIndex((message) => message.id === editingMessageId);
+    const sourcePart = sourceMessage?.parts.find((part) => part.id === editingPartId);
+    const originalText = sourcePart?.text || '';
+    const pendingContextKey = `edit:${editingMessageId}`;
+    const editedMessageTokenDelta = sourceMessage
+      ? estimateMessageTokens({
+          ...sourceMessage,
+          parts: sourceMessage.parts.map((part) => (
+            part.id === editingPartId ? { ...part, text } : part
+          )),
+        }) - estimateMessageTokens(sourceMessage)
+      : countTokensLikeCompaction(text) - countTokensLikeCompaction(originalText);
+    const snapshotTokenDeltas: ContextUsageTokenDeltas = { conversation: editedMessageTokenDelta };
+    const localTokenDeltas: ContextUsageTokenDeltas = {};
+    if (sourceMessageIndex >= 0) {
+      estimateActiveMessageBreakdown(
+        messagesRef.current.slice(sourceMessageIndex + 1),
+      ).segments.forEach((segment) => {
+        addContextTokenDelta(snapshotTokenDeltas, segment.key, -segment.tokens);
+        addContextTokenDelta(localTokenDeltas, segment.key, -segment.tokens);
+      });
+    }
+    setSubmittedModelPromptSessionId(sessionId);
+    beginPendingContextUsage(
+      pendingContextKey,
+      snapshotTokenDeltas,
+      activeContextUsageSnapshot,
+      localTokenDeltas,
+    );
+    replaceMessageText(editingMessageId, editingPartId, text);
+    sessionStatusRevisionRef.current += 1;
+    try {
+      await sessionApi.resendMessage(sessionId, editingMessageId, editingPartId, text);
+      truncateAfterMessage(editingMessageId);
+      setIsStreaming(true);
+      resetEditingState();
+    } catch (err) {
+      replaceMessageText(editingMessageId, editingPartId, originalText);
+      removePendingContextUsage(pendingContextKey);
+      if (!hasPersistedModelInvocation) {
+        setSubmittedModelPromptSessionId((currentSessionId) => (
+          currentSessionId === sessionId ? null : currentSessionId
+        ));
+      }
+      reportActionError(t('chat.errors.resendFailed'), err);
+    } finally {
+      setActionMessageId(null);
+    }
+  }, [
+    editingMessageId,
+    editingPartId,
+    editingRole,
+    editingText,
+    activeContextUsageSnapshot,
+    beginPendingContextUsage,
+    hasPersistedModelInvocation,
+    replaceMessageText,
+    removePendingContextUsage,
+    reportActionError,
+    resetEditingState,
+    sessionId,
+    t,
+    truncateAfterMessage,
+  ]);
+
+  const handleRegenerateMessage = useCallback(async (messageId: string) => {
+    if (!sessionId) return;
+    sessionStatusRevisionRef.current += 1;
+
+    abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
+    isAtBottomRef.current = true;
+    setActionMessageId(messageId);
+    try {
+      await sessionApi.regenerateMessage(sessionId, messageId);
+      const truncateTarget = getRegenerateTruncateTarget(messagesRef.current, messageId);
+      truncateAfterMessage(
+        truncateTarget.messageId,
+        truncateTarget.includeTarget ? { includeTarget: true } : undefined,
+      );
+      setIsStreaming(true);
+      if (editingMessageId === messageId) {
+        resetEditingState();
+      }
+    } catch (err) {
+      reportActionError(t('chat.errors.regenerateFailed'), err);
+    } finally {
+      setActionMessageId(null);
+    }
+  }, [editingMessageId, reportActionError, resetEditingState, sessionId, t, truncateAfterMessage]);
+
+  useEffect(() => {
+    if (!editingMessageId) return;
+    if (!messages.some((message) => message.id === editingMessageId)) {
+      resetEditingState();
+    }
+  }, [editingMessageId, messages, resetEditingState]);
+
+  // ── Merged messages ──
+  // Archived-by-compaction messages stay visible in the UI timeline. The
+  // summary message itself renders as a divider, so multiple compactions
+  // naturally appear as multiple chronological separators.
+  const { merged, skipIndices } = useMemo(() => {
+    const merged = mergeConsecutiveAssistantMessages(messages);
+    const skipIndices = new Set<number>();
+
+    for (let idx = 0; idx < merged.length; idx++) {
+      const msg = merged[idx];
+      if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic) && !getAgentSender(msg.parts)) {
+        skipIndices.add(idx);
+        continue;
+      }
+    }
+
+    return { merged, skipIndices };
+  }, [messages]);
+  const timelineItems = useMemo(() => (
+    buildChatTimelineItems({ messages: merged, skipIndices, isStreaming })
+  ), [isStreaming, merged, skipIndices]);
+  const { historyItems, tailItems } = useStableChatTimelineSegments(timelineItems);
+
+  // ── Styling based on compact mode ──
+  const msgAreaClass = compact
+    ? 'relative flex flex-col flex-1 bg-gray-50 px-4 py-4 dark:bg-zinc-950 min-h-0 overflow-y-auto'
+    : pageCanvas
+      ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
+      : 'relative flex flex-col flex-1 bg-gray-50 py-6 dark:bg-zinc-950 min-h-0 overflow-y-auto';
+
+  // A 760px reading column plus 48px avatar gutters aligns with the composer's
+  // 760px text area, 16px inner padding and 32px outer gutters.
+  const msgListClass = compact
+    ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
+    : fullWidth
+      ? 'space-y-5 w-full px-12'
+      : pageCanvas
+        // Phones hide the avatars and keep 16px.
+        ? 'space-y-7 w-full max-w-[856px] mx-auto px-12 max-md:px-4'
+        : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
+  const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
+    ? goalBanner
+    : null;
+  const handleDismissGoalBanner = useCallback(() => {
+    const goalKey = getGoalBannerKey(visibleGoalBanner);
+    writeDismissedGoalKey(sessionId, goalKey);
+    setDismissedGoalKey(goalKey);
+  }, [sessionId, visibleGoalBanner]);
+  const latestReaCardPartId = useMemo(() => findLatestReaCardPartId(messages), [messages]);
+  const reaSubmitRef = useRef<(text: string) => Promise<void>>(async () => {});
+  reaSubmitRef.current = async (text: string) => {
+    if (!sessionId || transport) return;
+    // Sent as the user's own message, the same as typing it into the composer.
+    if (isStreaming) {
+      await enqueueText(text, []);
+      return;
+    }
+    await sendText(text, [], agentName);
+  };
+  const submitReaPrompt = useCallback((text: string) => reaSubmitRef.current(text), []);
+  // Puts a guide into the message box for the user to read, edit and send:
+  // caret before its first line and the box scrolled to its top.
+  const fillComposer = useCallback((text: string) => {
+    setInput(text);
+    setShowCommandDropdown(false);
+    setMentionRange(null);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(0, 0);
+      el.scrollTop = 0;
+    });
+  }, []);
+  // After the draft restore above, so the restored (empty) draft does not replace it.
+  const appliedPrefillRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!composerPrefill || appliedPrefillRef.current === composerPrefill.id) return;
+    appliedPrefillRef.current = composerPrefill.id;
+    fillComposer(composerPrefill.text);
+    onComposerPrefillApplied?.(composerPrefill.id);
+  }, [composerPrefill, fillComposer, onComposerPrefillApplied]);
+  const reaChatContext = useMemo<ReaChatContextValue>(() => ({
+    sessionId: sessionId ?? null,
+    readOnly: hideInput || Boolean(transport) || !sessionId,
+    latestCardPartId: latestReaCardPartId,
+    submitPrompt: submitReaPrompt,
+    fillComposer,
+  }), [fillComposer, hideInput, latestReaCardPartId, sessionId, submitReaPrompt, transport]);
+  const stopButton = canStop && (
+    <button
+      onClick={handleAbort}
+      title={t('chat.stopTitle')}
+      className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action hover:bg-ui-action/90 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
+    >
+      <Square aria-hidden="true" className="w-3 h-3 fill-current" />
+    </button>
+  );
+
+  return (
+    <ReaChatContext.Provider value={reaChatContext}>
+    {cacheUsageContainer && createPortal(
+      <div className="border-b border-ui-border">
+        {loading && sessionCacheUsageCalls.length === 0 ? <LoadingSpinner className="py-3" /> : (
+          messagesError && sessionCacheUsageCalls.length === 0
+            ? <p role="alert" className="px-3 py-2 text-xs text-ui-muted">{t('chat.loadFailed')}</p>
+            : <SessionCacheUsage calls={sessionCacheUsageCalls} isActive={isStreaming} scope="session" />
+        )}
+      </div>,
+      cacheUsageContainer,
+    )}
+    <div className={`flex flex-col min-h-0 ${className}`}>
+      {/* Messages area */}
+      <div
+        ref={scrollContainerRef}
+        className={msgAreaClass}
+        onScroll={handleScroll}
+        style={{ scrollbarGutter: 'stable' }}
+      >
+        {conversationTopSlot}
+        {loading && messages.length === 0 ? (
+          <div className="flex justify-center py-8">
+            <LoadingSpinner
+              size="sm"
+              delayMs={180}
+              className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
+            />
+          </div>
+        ) : messagesError && messages.length === 0 ? (
+          <div className="flex min-h-40 items-center justify-center px-6" role="alert">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <span className="text-sm text-zinc-500 dark:text-zinc-400">
+                {t('chat.loadFailed')}
+              </span>
+              <button
+                type="button"
+                onClick={() => void refetch()}
+                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                {t('chat.retry')}
+              </button>
+            </div>
+          </div>
+        ) : messages.length === 0 ? (
+          welcomeContent ? (
+            // Below top content the welcome follows it instead of filling the view.
+            <div
+              className={`flex items-center justify-center ${conversationTopSlot ? 'py-6' : ''}`}
+              style={conversationTopSlot ? undefined : { minHeight: '100%' }}
+            >
+              {typeof welcomeContent === 'function'
+                ? welcomeContent((text) => { setInput(text); textareaRef.current?.focus(); }, sendWelcomePrompt)
+                : welcomeContent}
+            </div>
+          ) : conversationTopSlot ? null : (
+            <div className="text-center py-8 text-gray-400 text-sm">{effectiveEmptyText}</div>
+          )
+        ) : (
+          <div ref={messagesContentRef} className={msgListClass}>
+            {hasOlder && (
+              <div className="flex justify-center py-2">
+                <button type="button" disabled={loadingOlder} onClick={() => void loadHistoryPage('older')}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                  {loadingOlder ? t('chat.history.loading') : t('chat.history.older')}
+                </button>
+              </div>
+            )}
+            <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
+              items={historyItems}
+              scrollContainerRef={scrollContainerRef}
+              focusMessageId={focusMessageId}
+              onFocusMessageConsumed={onFocusMessageConsumed}
+              pendingQuestions={pendingQuestions}
+              onQuestionAnswer={handleQuestionAnswer}
+              onQuestionReject={handleQuestionReject}
+              showActions={showActions}
+              showTimestamp={showTimestamp}
+              showCacheUsage={cacheUsageContainer === undefined}
+              collapseIntermediateSteps={collapseIntermediateSteps}
+              processGroupsDefaultOpen={processGroupsDefaultOpen}
+              processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+              processGroupOpenState={processGroupOpenState}
+              onProcessGroupOpenChange={handleProcessGroupOpenChange}
+              compact={compact}
+              onCopy={handleCopy}
+              editingMessageId={editingMessageId}
+              editingText={editingText}
+              actionsDisabled={sending || isStreaming}
+              actionMessageId={actionMessageId}
+              onEditStart={beginMessageEdit}
+              onEditChange={setEditingText}
+              onEditCancel={resetEditingState}
+              onEditSave={handleSaveEditedMessage}
+              onEditSend={handleSendEditedUserMessage}
+              onRegenerate={handleRegenerateMessage}
+              onOpenContextFile={onOpenContextFile}
+              onOpenContext={onOpenContext}
+            />
+            <ChatMessageTimeline
+              renderMessageFooter={renderMessageFooter}
+              items={tailItems}
+              pendingQuestions={pendingQuestions}
+              onQuestionAnswer={handleQuestionAnswer}
+              onQuestionReject={handleQuestionReject}
+              showActions={showActions}
+              showTimestamp={showTimestamp}
+              showCacheUsage={cacheUsageContainer === undefined}
+              collapseIntermediateSteps={collapseIntermediateSteps}
+              processGroupsDefaultOpen={processGroupsDefaultOpen}
+              processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+              processGroupOpenState={processGroupOpenState}
+              onProcessGroupOpenChange={handleProcessGroupOpenChange}
+              compact={compact}
+              onCopy={handleCopy}
+              editingMessageId={editingMessageId}
+              editingText={editingText}
+              actionsDisabled={sending || isStreaming}
+              actionMessageId={actionMessageId}
+              onEditStart={beginMessageEdit}
+              onEditChange={setEditingText}
+              onEditCancel={resetEditingState}
+              onEditSave={handleSaveEditedMessage}
+              onEditSend={handleSendEditedUserMessage}
+              onRegenerate={handleRegenerateMessage}
+              onOpenContextFile={onOpenContextFile}
+              onOpenContext={onOpenContext}
+            />
+
+            {hasNewer && (
+              <div className="flex flex-wrap justify-center gap-2 py-2">
+                <button type="button" disabled={loadingNewer} onClick={() => void loadHistoryPage('newer')}
+                  className="rounded-lg border border-gray-200 bg-white px-3 py-2 text-sm text-gray-600 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800">
+                  {loadingNewer ? t('chat.history.loading') : t('chat.history.newer')}
+                </button>
+                <button type="button" onClick={() => { isAtBottomRef.current = true; void loadLatest?.(); }}
+                  className="rounded-lg bg-slate-800 px-3 py-2 text-sm text-white transition-colors hover:bg-slate-900">
+                  {t('chat.history.latest')}
+                </button>
+              </div>
+            )}
+
+            {/* Compacting indicator with live progress stages */}
+            {isCompacting && (
+              <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
+                <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
+                  <ChatAvatar compact={compact} className={compact ? '' : 'absolute -left-10 top-1 max-md:hidden'} />
+                  <div className="flex flex-col items-start flex-1 min-w-0">
+                    <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                    </div>
+                    <div className="flex flex-col min-w-0 w-full">
+                      <div className={`${compact ? 'w-full px-4 py-3 rounded-[20px] max-w-full' : 'w-full px-5 py-4 rounded-[24px]'} text-sm shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none break-words`}>
+                        <div className="flex items-center gap-2 text-sm text-amber-700">
+                          <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin text-amber-500" />
+                          <span>{compactingMessage || t('chat.compacting')}</span>
+                        </div>
+                        {compactionPercent !== null && (
+                          <div className="mt-2">
+                            <div className="flex items-center justify-between text-[11px] text-amber-700/80 mb-1">
+                              <span>{t('chat.compactionStage.overallProgressLabel')}</span>
+                              <span>{compactionPercent}%</span>
+                            </div>
+                            <div className="h-1 w-full rounded-full bg-amber-100 overflow-hidden">
+                              <div
+                                className="h-full bg-amber-500 transition-all duration-300"
+                                style={{ width: `${compactionPercent}%` }}
+                              />
+                            </div>
+                          </div>
+                        )}
+                        {compactionStages.length > 0 && (
+                          <ul className="mt-2 space-y-0.5 text-[11px] text-amber-700/80 max-h-32 overflow-y-auto">
+                            {compactionStages
+                              .map((entry, idx) => {
+                                const text = describeCompactionStage(entry, t);
+                                if (!text) return null;
+                                return (
+                                  <li key={`${entry.stage}-${idx}-${entry.ts}`} className="flex gap-1.5">
+                                    <span className="text-amber-400">·</span>
+                                    <span>{text}</span>
+                                  </li>
+                                );
+                              })
+                              .filter(Boolean)}
+                          </ul>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Provider retry notice: the backend is backing off (429 / 5xx) before the next attempt */}
+            {retryStatus && isStreaming && !isCompacting && (
+              <div
+                className={`group relative ${!compact ? 'w-full' : ''} flex`}
+                data-testid="session-retry-notice"
+                role="status"
+              >
+                <div className={compact ? 'w-full' : 'flex w-full min-w-0'}>
+                  <div className="flex w-full items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:border-amber-500/35 dark:bg-amber-950/30 dark:text-amber-300">
+                    <Loader2 aria-hidden="true" className="h-3.5 w-3.5 animate-spin text-amber-500 flex-shrink-0" />
+                    <span className="min-w-0 break-words">{retryNoticeText}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Standalone thinking indicator when no incomplete message exists */}
+            {(isStreaming || sending) && !isCompacting && !(messages.length > 0 && messages[messages.length - 1].role === 'assistant' && !messages[messages.length - 1].finish) && (
+              <div className={`group relative ${!compact ? 'w-full' : ''} flex`}>
+                <div className={compact ? `flex gap-2.5 ${getMessageGroupClassName({ compact, isUser: false, isEditing: false })}` : 'flex w-full min-w-0'}>
+                  <ChatAvatar compact={compact} className={compact ? '' : 'absolute -left-10 top-1 max-md:hidden'} />
+                  <div className="flex flex-col items-start flex-1 min-w-0">
+                    <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                    </div>
+                    <div className="flex flex-col min-w-0 w-full">
+                      <div className={getStandaloneThinkingBubbleClassName(compact)}>
+                        {isDreaming ? (
+                          <div className="flex items-center gap-2 text-sm text-violet-600 dark:text-violet-300">
+                            <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
+                            <span>{dreamingMessage || t('chat.dreaming')}</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2 text-sm text-gray-500">
+                            <div className="flex gap-0.5">
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Suggestions — shown before user sends any message */}
+      {suggestions && suggestions.length > 0 && !hasUserMessage && !hideInput && (
+        <div className="px-3 pt-2.5 pb-2 border-t border-gray-100 bg-white dark:border-zinc-800 dark:bg-zinc-950 flex-shrink-0">
+          <div className="flex items-center gap-1.5 mb-2">
+            <span className="text-xs font-medium text-gray-400">{t('chat.suggestions')}</span>
+          </div>
+          <div className="flex flex-col gap-1.5 max-h-36 overflow-y-auto">
+            {suggestions.map((q, i) => (
+              <button
+                key={i}
+                onClick={() => setInput(q)}
+                disabled={sending}
+                className="text-left text-xs text-gray-600 bg-gray-50 hover:bg-gray-100 hover:text-gray-900 border border-gray-200 hover:border-gray-300 rounded-lg px-2.5 py-2 transition-colors disabled:opacity-40 disabled:cursor-not-allowed line-clamp-2"
+              >
+                {q}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Live detail views can stop work without exposing a follow-up composer. */}
+      {hideInput && live && canStop && (
+        <div className="flex flex-shrink-0 justify-end px-4 py-3">
+          {stopButton}
+        </div>
+      )}
+
+      {/* Follow-up input */}
+      {hideInput && (pendingPermissions[0] || permissionError) && (
+        <div className="border-t border-amber-200/60 bg-white px-3 py-2 dark:border-amber-500/35 dark:bg-zinc-950 flex-shrink-0">
+          <div className={!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}>
+            <PermissionApprovalDialog
+              request={pendingPermissions[0] ?? null}
+              submitting={permissionSubmitting}
+              error={permissionError}
+              onReply={handlePermissionReply}
+            />
+          </div>
+        </div>
+      )}
+
+      {!hideInput && (
+        <div
+          className={`flex-shrink-0 ${
+            compact
+              ? 'bg-white px-4 py-3 dark:bg-zinc-950'
+              : pageCanvas
+                ? 'bg-transparent px-8 pb-5 pt-3 max-md:px-4 max-md:pb-4'
+                : 'bg-white py-4 dark:bg-zinc-950'
+          }`}
+        >
+          <div
+            className={`relative min-w-0 ${
+              !compact
+                ? fullWidth
+                  ? 'w-full px-5'
+                  : pageCanvas
+                    ? 'mx-auto w-full max-w-[792px]'
+                    : 'w-[min(76%,64rem)] mx-auto px-6'
+                : ''
+            }`}
+          >
+            {conversationBottomSlot && (
+              <div className="mb-2 min-w-0">
+                {typeof conversationBottomSlot === 'function'
+                  ? conversationBottomSlot({
+                    sendPrompt: (text, options) => { void handleComposerPrompt(text, options); },
+                    setInput: (text) => {
+                      setInput(text);
+                      requestAnimationFrame(() => textareaRef.current?.focus());
+                    },
+                    focusInput: () => textareaRef.current?.focus(),
+                    sending,
+                    streaming: isStreaming,
+                    sessionId,
+                    hasMessages: messages.length > 0,
+                  })
+                  : conversationBottomSlot}
+              </div>
+            )}
+            {visibleGoalBanner && (
+              <GoalBanner
+                goal={visibleGoalBanner}
+                t={t}
+                onDismiss={handleDismissGoalBanner}
+              />
+            )}
+            <QueuedPromptPanel
+              items={queuedPrompts}
+              expanded={queueExpanded}
+              editingId={editingQueueId}
+              editingText={editingQueueText}
+              actionId={queueActionId}
+              t={t}
+              onToggle={() => setQueueExpanded((value) => !value)}
+              onEditStart={handleQueuedEditStart}
+              onEditChange={setEditingQueueText}
+              onEditCancel={handleQueuedEditCancel}
+              onEditSave={handleQueuedEditSave}
+              onRemove={handleQueuedRemove}
+              onRunNow={handleQueuedRunNow}
+            />
+            <PermissionApprovalDialog
+              request={pendingPermissions[0] ?? null}
+              submitting={permissionSubmitting}
+              error={permissionError}
+              onReply={handlePermissionReply}
+            />
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              accept={allowAnyUpload ? undefined : FILE_INPUT_ACCEPT_ALL}
+              multiple
+              onChange={(event) => {
+                handleFileSelection(event.target.files);
+                event.target.value = '';
+              }}
+            />
+            <CommandDropdown
+              visible={showCommandDropdown}
+              query={commandQuery}
+              commands={commands}
+              selectedIndex={selectedCommandIndex}
+              onSelect={(cmd) => {
+                setInput(`/${cmd.name} `);
+                setShowCommandDropdown(false);
+                textareaRef.current?.focus();
+              }}
+            />
+            <AgentMentionDropdown
+              visible={Boolean(mentionRange) && filteredMentionAgents.length > 0}
+              agents={filteredMentionAgents}
+              selectedIndex={selectedMentionIndex}
+              displayLang={i18n.language}
+              onSelect={(agent) => insertMention(agent.name)}
+            />
+            <div
+              data-yushu-composer
+              onDragOver={transport ? undefined : handleComposerDragOver}
+              onDragLeave={handleComposerDragLeave}
+              onDrop={transport ? undefined : handleComposerDrop}
+              onKeyDown={(event) => {
+                if (showComposerAddMenu && event.key === 'Escape' && !event.defaultPrevented) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  closeComposerAddMenu();
+                  // @ opens this menu from the textarea; preserve that focus
+                  // instead of moving the user away from their draft.
+                  if (event.target !== textareaRef.current) composerAddMenuButtonRef.current?.focus();
+                }
+              }}
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[18px] shadow-ui-input' : 'rounded-2xl'} border transition-colors ${
+                isCompacting
+                  ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
+                  : isDragOver
+                    ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
+                    : isStreaming
+                      ? 'border-ui-border bg-ui-surface'
+                      : pageCanvas && !compact
+                        // Focus changes the border only, keeping the composer geometry stable.
+                        ? 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus'
+                        : 'border-ui-border bg-ui-surface hover:border-ui-control focus-within:border-ui-focus focus-within:ring-2 focus-within:ring-ui-focus/15'
+              }`}
+            >
+                {/* Node reference chip */}
+                {nodeRef && (
+                  <div className="flex items-center gap-1.5 px-3 pt-2.5 pb-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-slate-400 flex-shrink-0" />
+                    <code className="text-[11px] font-mono font-semibold text-slate-700 flex-1 dark:text-slate-200 truncate">{nodeRef.id}</code>
+                    <span className="text-[10px] text-slate-400 dark:text-slate-500 flex-shrink-0">{nodeRef.type}</span>
+                    {onNodeRefDismiss && (
+                      <button
+                        onClick={onNodeRefDismiss}
+                        className="ml-1 text-gray-400 hover:text-gray-600 transition-colors flex-shrink-0"
+                        title={t('chat.removeNodeRef')}
+                      >
+                        <svg className="w-3 h-3" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.5">
+                          <path d="M4 4l8 8M12 4l-8 8" strokeLinecap="round" />
+                        </svg>
+                      </button>
+                    )}
+                  </div>
+                )}
+                {attachments.length > 0 && (
+                  <div className={`flex flex-wrap gap-2 px-3 ${nodeRef ? 'pb-2' : 'pt-2'} ${attachments.length > 0 ? '' : 'hidden'}`}>
+                    {attachments.map((attachment) => {
+                      const isUploading = attachment.status === 'uploading';
+                      const isError = attachment.status === 'error';
+
+                      // Image thumbnail display
+                      if (attachment.isImage && attachment.dataUrl && !isError) {
+                        return (
+                          <div
+                            key={attachment.id}
+                            className={`relative rounded-lg border flex-shrink-0 overflow-hidden ${
+                              isUploading ? 'border-sky-200 bg-sky-50 dark:border-sky-500/35 dark:bg-sky-950/30' : 'border-gray-200 bg-gray-50 dark:border-zinc-800 dark:bg-zinc-900'
+                            }`}
+                          >
+                            {isUploading ? (
+                              <div className="w-16 h-16 flex items-center justify-center">
+                                <Loader2 aria-hidden="true" className="w-5 h-5 animate-spin text-sky-500" />
+                              </div>
+                            ) : (
+                              <img
+                                src={attachment.dataUrl}
+                                alt={attachment.name}
+                                className="w-16 h-16 object-cover cursor-zoom-in"
+                                title={attachment.name}
+                                onClick={() =>
+                                  setComposerPreview({ url: attachment.dataUrl!, alt: attachment.name })
+                                }
+                              />
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveAttachment(attachment.id)}
+                              className="absolute top-0.5 right-0.5 rounded-full bg-black/50 p-0.5 text-white hover:bg-black/70 transition-colors"
+                              title={t('chat.upload.remove')}
+                            >
+                              <X aria-hidden="true" className="w-3 h-3" />
+                            </button>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div
+                          key={attachment.id}
+                          className={`inline-flex items-center gap-2 rounded-lg border px-2.5 py-1.5 text-xs max-w-full ${
+                            isError
+                              ? 'border-red-200 bg-red-50 text-red-700'
+                              : isUploading
+                                ? 'border-sky-200 bg-sky-50 text-sky-700'
+                                : 'border-gray-200 bg-gray-50 text-gray-700 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200'
+                          }`}
+                        >
+                          {isUploading ? (
+                            <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />
+                          ) : isError ? (
+                            <AlertCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                          ) : attachment.isImage ? (
+                            <ImageIcon aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                          ) : (
+                            <FileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                          )}
+                          <div className="min-w-0">
+                            <div className="truncate font-medium">{attachment.name}</div>
+                            {attachment.error && (
+                              <div className="text-[11px] truncate">{attachment.error}</div>
+                            )}
+                          </div>
+                          {isError && !attachment.isImage && (
+                            <button
+                              type="button"
+                              onClick={() => handleRetryAttachment(attachment.id)}
+                              className="rounded p-0.5 hover:bg-white/70 transition-colors"
+                              title={t('chat.upload.retry')}
+                            >
+                              <RefreshCw aria-hidden="true" className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleRemoveAttachment(attachment.id)}
+                            className="rounded p-0.5 hover:bg-white/70 transition-colors"
+                            title={t('chat.upload.remove')}
+                          >
+                            <X aria-hidden="true" className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+                {isDragOver && (
+                  <div className="px-4 pb-1 text-[11px] text-sky-600">
+                    {t('chat.upload.dropHint')}
+                  </div>
+                )}
+                {composerReferences.length > 0 && (
+                  <div
+                    className="flex flex-wrap gap-1.5 px-4 pt-3"
+                    aria-label={t('chat.references.selected')}
+                  >
+                    {composerReferences.map((reference) => {
+                      const referenceStyle = reference.kind === 'subagent'
+                        ? 'border-sky-200/80 bg-sky-50 text-sky-700 dark:border-sky-400/20 dark:bg-sky-400/[0.10] dark:text-sky-200'
+                        : reference.kind === 'skill'
+                          ? 'border-emerald-200/80 bg-emerald-50 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/[0.10] dark:text-emerald-200'
+                          : 'border-amber-200/80 bg-amber-50 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/[0.10] dark:text-amber-200';
+                      const ReferenceIcon = reference.kind === 'subagent'
+                        ? Bot
+                        : reference.kind === 'skill'
+                          ? BookOpen
+                          : WorkflowIcon;
+                      return (
+                        <span
+                          key={`${reference.kind}:${reference.value}`}
+                          className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium shadow-[0_1px_2px_rgba(22,27,34,0.03)] max-w-full ${referenceStyle}`}
+                        >
+                          <ReferenceIcon aria-hidden="true" className="h-3 w-3 shrink-0" />
+                          <span className="shrink-0 opacity-65">
+                            {t(`chat.references.${reference.kind}`)}
+                          </span>
+                          <span className="truncate font-semibold">{reference.value}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setComposerReferences((current) => current.filter(
+                                (item) => (
+                                  item.kind !== reference.kind
+                                  || item.value !== reference.value
+                                ),
+                              ));
+                              textareaRef.current?.focus();
+                            }}
+                            className="-mr-1 grid h-5 w-5 place-items-center rounded-md opacity-55 transition hover:bg-black/[0.06] hover:opacity-100 dark:hover:bg-white/[0.08] shrink-0"
+                            aria-label={t('chat.references.remove', {
+                              type: t(`chat.references.${reference.kind}`),
+                              name: reference.value,
+                            })}
+                          >
+                            <X aria-hidden="true" className="h-3 w-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className={`px-4 pb-1 ${composerReferences.length > 0 ? 'pt-2' : 'pt-3'}`}>
+                  <textarea
+                    ref={textareaRef}
+                    value={input}
+                    readOnly={composerBusy}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const cursor = e.target.selectionStart ?? val.length;
+                      const beforeCursor = val.slice(0, cursor);
+                      if (/(^|\s)@$/.test(beforeCursor)) {
+                        const next = `${val.slice(0, cursor - 1)}${val.slice(cursor)}`;
+                        setInput(next);
+                        setShowCommandDropdown(false);
+                        setMentionRange(null);
+                        openComposerAddMenu();
+                        requestAnimationFrame(() => {
+                          textareaRef.current?.focus();
+                          textareaRef.current?.setSelectionRange(cursor - 1, cursor - 1);
+                        });
+                        return;
+                      }
+                      setInput(val);
+                      const mention = mentionAgents.length > 0 ? findMentionTrigger(val, cursor) : null;
+                      const trimmed = val.trimStart();
+                      const slashQuery = trimmed.startsWith('/') ? trimmed.slice(1) : '';
+                      if (mention && !trimmed.startsWith('/')) {
+                        setMentionRange({ start: mention.start, end: mention.end });
+                        setMentionQuery(mention.query);
+                        setSelectedMentionIndex(0);
+                        setShowCommandDropdown(false);
+                      } else if (
+                        trimmed.startsWith('/') &&
+                        !trimmed.includes(' ') &&
+                        (slashQuery === '' || isSlashCommandName(slashQuery)) &&
+                        successfulAttachments.length === 0
+                      ) {
+                        void loadCommandsIfNeeded();
+                        setCommandQuery(slashQuery);
+                        setSelectedCommandIndex(0);
+                        setShowCommandDropdown(true);
+                        setMentionRange(null);
+                      } else {
+                        setShowCommandDropdown(false);
+                        setMentionRange(null);
+                      }
+                    }}
+                    onBlur={() => { setTimeout(() => { setShowCommandDropdown(false); setMentionRange(null); }, 100); }}
+                    onCompositionStart={() => { isComposingRef.current = true; }}
+                    onCompositionEnd={() => { isComposingRef.current = false; }}
+                    onPaste={transport ? undefined : handleComposerPaste}
+                    onKeyDown={handleKeyDown}
+                    placeholder={
+                      isCompacting
+                        ? t('chat.placeholderCompacting')
+                        : isStreaming
+                          ? t('chat.queue.placeholderStreaming')
+                          : nodeRef
+                            ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
+                            : effectivePlaceholder
+                    }
+                    className={`w-full resize-none bg-transparent leading-[1.8] outline-none placeholder:text-ui-muted text-sm ${
+                      sending ? 'text-ui-muted cursor-not-allowed' : 'text-ui-text'
+                    }`}
+                    style={{
+                      minHeight: `${effectiveComposerTextareaMinHeight}px`,
+                      maxHeight: `${effectiveComposerTextareaMaxHeight}px`,
+                    }}
+                    disabled={sending || transport?.disabled}
+                    rows={1}
+                  />
+                </div>
+
+                {/* Bottom toolbar inside the composer card */}
+                {/* Wraps onto a second line when a narrow composer cannot fit every control. */}
+                <div className="flex flex-wrap items-center gap-1 px-2 pb-2">
+                  <div className="relative" data-composer-add-menu hidden={!!transport}>
+                    <button
+                      ref={composerAddMenuButtonRef}
+                      type="button"
+                      onClick={toggleComposerAddMenu}
+                      disabled={sending || transport?.disabled}
+                      title={t('chat.addMenu.title')}
+                      aria-label={t('chat.addMenu.title')}
+                      aria-haspopup="menu"
+                      aria-expanded={showComposerAddMenu}
+                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+                        showComposerAddMenu
+                          ? 'bg-ui-selected text-ui-text'
+                          : 'text-ui-secondary hover:bg-ui-hover hover:text-ui-text'
+                      }`}
+                    >
+                      <Plus aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={2} />
+                    </button>
+
+                    {showComposerAddMenu && (
+                      <div
+                        role="menu"
+                        aria-label={t('chat.addMenu.title')}
+                        className="absolute bottom-full left-0 mb-2 w-[228px] max-w-[calc(100vw-2rem)] rounded-[14px] border border-black/[0.09] bg-white/95 p-1.5 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)] z-50 overflow-visible"
+                      >
+                        <div className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-zinc-400 dark:text-zinc-500">
+                          {t('chat.addMenu.title')}
+                        </div>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            closeComposerAddMenu();
+                            fileInputRef.current?.click();
+                          }}
+                          className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+                        >
+                          <span className="grid h-7 w-7 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white shrink-0">
+                            <Paperclip aria-hidden="true" className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
+                        </button>
+                        {composerAddMenuSlot && (
+                          <div className="mt-0.5 border-t border-zinc-100 pt-0.5 dark:border-white/[0.07]">
+                            {typeof composerAddMenuSlot === 'function'
+                              ? composerAddMenuSlot({
+                                closeMenu: closeComposerAddMenu,
+                                insertMention: insertAgentMention,
+                                insertReference: insertComposerReference,
+                              })
+                              : composerAddMenuSlot}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-800 shrink-0" />
+
+                  {toolbarSlot}
+                  {!compact && !transport && (!agentName || agentName === 'rex') && <SchedulingModePicker
+                    value={schedulingMode} onChange={changeSchedulingMode} chinese={i18n.language.startsWith('zh')}
+                    disabled={sending || isStreaming || schedulingSaving || isCompacting}
+                  />}
+
+                  <ExtensionSlot
+                    name="chat.composer"
+                    context={{
+                      sessionId,
+                      input,
+                      setInput,
+                      disabled: sending || isCompacting,
+                      setBusy: setComposerExtensionBusy,
+                    }}
+                  />
+
+                  {centerToolbarSlot && (
+                    // Starts from its narrowest usable width (a shortened model name), so the row
+                    // shrinks the model name first and only wraps when even that does not fit.
+                    <div className="ml-1 min-w-0 max-w-max grow basis-44">
+                      {centerToolbarSlot}
+                    </div>
+                  )}
+
+                  {/* Usage and send stay together on the right, also when they wrap to their own line. */}
+                  <div className="ml-auto flex shrink-0 items-center gap-1">
+                    {resolvedContextWindowTokens > 0 && (
+                      <ContextUsageRing
+                        percent={contextUsagePercent}
+                        title={contextUsageTitle}
+                        usedTokens={estimatedContextTokens}
+                        totalTokens={resolvedContextWindowTokens}
+                        breakdown={contextUsageBreakdown}
+                      />
+                    )}
+
+                    {isStreaming ? (
+                      canSend && !composerBusy && (
+                        <button
+                          onClick={handleSend}
+                          title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
+                          className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action transition-colors hover:bg-ui-action/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
+                        >
+                          {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
+                        </button>
+                      )
+                    ) : (
+                      <button
+                        onClick={handleSend}
+                        disabled={!canSend || composerBusy}
+                        aria-label={t('chat.sendTitle')}
+                        title={hasUploadingFiles ? t('chat.upload.waiting') : undefined}
+                        className={`inline-flex h-8 w-8 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2 ${
+                          canSend && !composerBusy
+                            ? 'bg-ui-action text-ui-on-action hover:bg-ui-action/90'
+                            : 'cursor-not-allowed border border-ui-border bg-ui-subtle text-ui-muted'
+                        }`}
+                      >
+                        {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
+                      </button>
+                    )}
+                    {stopButton}
+                  </div>
+                </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {composerPreview && (
+        <ImageLightbox
+          src={composerPreview.url}
+          alt={composerPreview.alt}
+          onClose={() => setComposerPreview(null)}
+        />
+      )}
+    </div>
+    </ReaChatContext.Provider>
+  );
+}
+
+function AgentMentionDropdown({
+  visible,
+  agents,
+  selectedIndex,
+  displayLang,
+  onSelect,
+}: {
+  visible: boolean;
+  agents: Agent[];
+  selectedIndex: number;
+  displayLang: string;
+  onSelect: (agent: Agent) => void;
+}) {
+  const { t } = useTranslation('session');
+  const listRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const item = listRef.current?.children[selectedIndex] as HTMLElement | undefined;
+    item?.scrollIntoView({ block: 'nearest' });
+  }, [selectedIndex]);
+
+  if (!visible) return null;
+
+  return (
+    <div
+      className="absolute bottom-full left-0 right-0 mb-1 rounded-lg border border-gray-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30 z-50 overflow-hidden"
+      onMouseDown={(e) => e.preventDefault()}
+    >
+      <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wide text-gray-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
+        {t('chat.mention.title')}
+      </div>
+      <div ref={listRef} className="max-h-64 overflow-y-auto p-1">
+        {agents.map((agent, idx) => {
+          const desc = getAgentDisplayDescription(agent, displayLang) || t('smartAssistant');
+          return (
+            <button
+              key={agent.name}
+              type="button"
+              onClick={() => onSelect(agent)}
+              onMouseDown={(e) => e.preventDefault()}
+              className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-left transition-colors w-full min-w-0 ${
+                idx === selectedIndex ? 'bg-sky-50 text-sky-800 dark:bg-sky-950/45 dark:text-sky-100' : 'text-gray-800 hover:bg-gray-50 dark:text-zinc-200 dark:hover:bg-zinc-800'
+              }`}
+            >
+              <Bot aria-hidden="true" className="h-3.5 w-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+              <span className="shrink-0 font-mono text-sm font-semibold">@{agent.name}</span>
+              <span className="text-xs text-gray-500 dark:text-zinc-400 min-w-0 truncate">{desc}</span>
+            </button>
+          );
+        })}
+      </div>
+      <div className="flex gap-3 border-t border-gray-100 bg-gray-50 px-3 py-1 text-[10px] text-gray-400 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-500">
+        <span><kbd className="font-mono">↑↓</kbd> {t('chat.mention.navigate')}</span>
+        <span><kbd className="font-mono">Enter</kbd>/<kbd className="font-mono">Tab</kbd> {t('chat.mention.select')}</span>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// ChatMessageBubble
+// ============================================================================
+
+function ContextFileCard({
+  sessionId,
+  resourceId,
+  filename,
+  mime,
+  onOpen,
+}: {
+  sessionId: string;
+  resourceId?: string | null;
+  filename: string;
+  mime?: string;
+  onOpen?: (resourceId: string) => void;
+}) {
+  const { t } = useTranslation('session');
+  const previewUrl = resourceId ? sessionApi.contextFilePreviewUrl(sessionId, resourceId) : null;
+  const downloadUrl = resourceId ? sessionApi.contextFileDownloadUrl(sessionId, resourceId) : null;
+  const label = mime?.split('/').pop()?.toUpperCase();
+  const content = (
+    <>
+      <FileText aria-hidden="true" className="h-4 w-4 text-slate-500 flex-shrink-0" />
+      <span className="min-w-0 flex-1 truncate font-medium">{filename}</span>
+      {label && <span className="text-[10px] text-slate-400 shrink-0">{label}</span>}
+    </>
+  );
+  return (
+    <div className="flex items-center gap-1 rounded-lg border border-slate-200 bg-slate-50 px-2 py-1.5 text-xs text-slate-700 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 min-w-0 max-w-full">
+      {onOpen && resourceId ? (
+        <button
+          type="button"
+          onClick={() => onOpen(resourceId)}
+          className="flex flex-1 items-center gap-2 text-left hover:text-slate-900 dark:hover:text-white min-w-0"
+          title={t('context.preview', 'Preview')}
+        >
+          {content}
+        </button>
+      ) : previewUrl ? (
+        <a
+          href={previewUrl}
+          target="_blank"
+          rel="noreferrer"
+          className="flex flex-1 items-center gap-2 hover:text-slate-900 dark:hover:text-white min-w-0"
+        >
+          {content}
+        </a>
+      ) : (
+        <span className="flex min-w-0 flex-1 items-center gap-2">{content}</span>
+      )}
+      {downloadUrl && (
+        <a
+          href={downloadUrl}
+          download={filename}
+          onClick={(event) => event.stopPropagation()}
+          className="rounded p-1 text-slate-400 hover:bg-white hover:text-slate-700 dark:hover:bg-zinc-800 dark:hover:text-white"
+          title={t('context.download', 'Download')}
+        >
+          <Download aria-hidden="true" className="h-3.5 w-3.5" />
+        </a>
+      )}
+    </div>
+  );
+}
+
+export interface ChatMessageBubbleProps {
+  message: MergedMessage;
+  isActive?: boolean;
+  pendingQuestions?: Record<string, PendingQuestion>;
+  onQuestionAnswer?: (callID: string, requestId: string, answers: string[][]) => Promise<void>;
+  onQuestionReject?: (callID: string, requestId: string) => Promise<void>;
+  showActions?: boolean;
+  showTimestamp?: boolean;
+  showCacheUsage?: boolean;
+  collapseIntermediateSteps?: boolean;
+  processGroupsDefaultOpen?: boolean;
+  processGroupsOpenWhileActive?: boolean;
+  processGroupOpenState?: ProcessGroupOpenState;
+  onProcessGroupOpenChange?: (key: string, open: boolean) => void;
+  compact?: boolean;
+  /** Message body only: no avatar or agent name, for a caller that draws its own sender frame. */
+  bare?: boolean;
+  onCopy?: (text: string) => void;
+  editingMessageId?: string | null;
+  editingText?: string;
+  actionsDisabled?: boolean;
+  actionMessageId?: string | null;
+  onEditStart?: (messageId: string, partId: string, role: Message['role'], rawText: string) => void;
+  onEditChange?: (text: string) => void;
+  onEditCancel?: () => void;
+  onEditSave?: () => Promise<void>;
+  onEditSend?: () => Promise<void>;
+  onRegenerate?: (messageId: string) => Promise<void>;
+  onOpenContextFile?: (resourceId: string) => void;
+  onOpenContext?: () => void;
+}
+
+interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
+  items: ChatTimelineItem[];
+  scrollContainerRef?: RefObject<HTMLDivElement | null>;
+  focusMessageId?: string | null;
+  onFocusMessageConsumed?: () => void;
+  renderMessageFooter?: (message: Message) => React.ReactNode;
+}
+
+function ChatMessageTimelineInner({
+  items,
+  scrollContainerRef,
+  focusMessageId,
+  onFocusMessageConsumed,
+  renderMessageFooter,
+  pendingQuestions,
+  onQuestionAnswer,
+  onQuestionReject,
+  showActions,
+  showTimestamp,
+  showCacheUsage,
+  collapseIntermediateSteps,
+  processGroupsDefaultOpen,
+  processGroupsOpenWhileActive,
+  processGroupOpenState,
+  onProcessGroupOpenChange,
+  compact,
+  bare,
+  onCopy,
+  editingMessageId,
+  editingText,
+  actionsDisabled,
+  actionMessageId,
+  onEditStart,
+  onEditChange,
+  onEditCancel,
+  onEditSave,
+  onEditSend,
+  onRegenerate,
+  onOpenContextFile,
+  onOpenContext,
+}: ChatMessageTimelineProps) {
+  const listRef = useRef<HTMLDivElement>(null);
+  const [scrollMargin, setScrollMargin] = useState(0);
+  const virtual = !!scrollContainerRef && items.length > 30;
+  const getItemKey = useCallback((index: number) => items[index].message.id, [items]);
+  const virtualizer = useVirtualizer({
+    count: items.length,
+    getScrollElement: () => scrollContainerRef?.current ?? null,
+    getItemKey,
+    estimateSize: () => 180,
+    overscan: 5,
+    gap: compact ? 12 : 20,
+    scrollMargin,
+    anchorTo: 'end',
+    followOnAppend: false,
+    enabled: virtual,
+  });
+  useLayoutEffect(() => {
+    if (!virtual || !listRef.current || !scrollContainerRef?.current) return;
+    const measure = () => {
+      const list = listRef.current;
+      const scroll = scrollContainerRef.current;
+      if (list && scroll) setScrollMargin(list.getBoundingClientRect().top - scroll.getBoundingClientRect().top + scroll.scrollTop);
+    };
+    measure();
+    const observer = typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(measure);
+    observer?.observe(scrollContainerRef.current);
+    return () => observer?.disconnect();
+  }, [virtual, scrollContainerRef, items[0]?.message.id]);
+  const focusedRef = useRef('');
+  const focusHighlightRef = useRef<{ row: HTMLElement; timer: number } | null>(null);
+  useEffect(() => () => {
+    const highlight = focusHighlightRef.current;
+    if (highlight) {
+      window.clearTimeout(highlight.timer);
+      highlight.row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    }
+  }, []);
+  useEffect(() => { if (!focusMessageId) focusedRef.current = ''; }, [focusMessageId]);
+  const focusIndex = focusMessageId ? items.findIndex(({message}) => message.id === focusMessageId || message.parts.some(part => part.messageID === focusMessageId)) : -1;
+  useLayoutEffect(() => {
+    if (!virtual || focusIndex < 0 || !focusMessageId || focusedRef.current === focusMessageId) return;
+    virtualizer.scrollToIndex(focusIndex, { align: 'center' });
+  }, [virtual, focusIndex, focusMessageId, virtualizer]);
+  const virtualItems = virtualizer.getVirtualItems();
+  useEffect(() => {
+    if (!virtual || focusIndex < 0 || !focusMessageId || focusedRef.current === focusMessageId) return;
+    const row = listRef.current?.querySelector<HTMLElement>(`[data-message-id="${CSS.escape(items[focusIndex].message.id)}"]`);
+    if (!row) return;
+    focusedRef.current = focusMessageId;
+    const previous = focusHighlightRef.current;
+    if (previous) {
+      window.clearTimeout(previous.timer);
+      previous.row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    }
+    row.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    const timer = window.setTimeout(() => {
+      row.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+      focusHighlightRef.current = null;
+    }, 1800);
+    focusHighlightRef.current = { row, timer };
+    onFocusMessageConsumed?.();
+  }, [virtual, focusIndex, focusMessageId, items, virtualItems, onFocusMessageConsumed]);
+  const rendered = virtual ? virtualItems.map(row => ({ ...row, item: items[row.index] })) : items.map((item, index) => ({ item, index, key: item.message.id, start: 0 }));
+  return (
+    <div ref={listRef} data-chat-virtual={virtual ? 'true' : undefined}
+      className={virtual ? 'relative w-full' : compact ? 'space-y-3' : 'space-y-5'}
+      style={virtual ? { height: virtualizer.getTotalSize() } : undefined}>
+      {rendered.map(({ item: {message, isActive}, index, start }) => (
+        <div key={message.id} data-index={index} ref={virtual ? virtualizer.measureElement : undefined}
+          data-message-id={message.id} className="rounded-md transition-shadow duration-300"
+          style={virtual ? { position: 'absolute', top: 0, left: 0, width: '100%', transform: `translateY(${start - scrollMargin}px)` } : undefined}>
+          <ChatMessageBubble
+            message={message}
+            isActive={isActive}
+            pendingQuestions={pendingQuestions}
+            onQuestionAnswer={onQuestionAnswer}
+            onQuestionReject={onQuestionReject}
+            showActions={showActions}
+            showTimestamp={showTimestamp}
+            showCacheUsage={showCacheUsage}
+            collapseIntermediateSteps={collapseIntermediateSteps}
+            processGroupsDefaultOpen={processGroupsDefaultOpen}
+            processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+            processGroupOpenState={processGroupOpenState}
+            onProcessGroupOpenChange={onProcessGroupOpenChange}
+            compact={compact}
+            bare={bare}
+            onCopy={onCopy}
+            editingMessageId={editingMessageId}
+            editingText={editingText}
+            actionsDisabled={actionsDisabled}
+            actionMessageId={actionMessageId}
+            onEditStart={onEditStart}
+            onEditChange={onEditChange}
+            onEditCancel={onEditCancel}
+            onEditSave={onEditSave}
+            onEditSend={onEditSend}
+            onRegenerate={onRegenerate}
+            onOpenContextFile={onOpenContextFile}
+            onOpenContext={onOpenContext}
+          />
+          {renderMessageFooter?.(message)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export const ChatMessageTimeline = memo(ChatMessageTimelineInner);
+
+function ProcessGroupDetails({
+  defaultOpen,
+  open,
+  onOpenChange,
+  summary,
+  children,
+}: {
+  defaultOpen: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
+  summary: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  const isControlled = typeof open === 'boolean';
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+
+  useEffect(() => {
+    if (!isControlled) {
+      setInternalOpen(defaultOpen);
+    }
+  }, [defaultOpen, isControlled]);
+
+  const effectiveOpen = isControlled ? open : internalOpen;
+  const handleSummaryClick = useCallback((event: React.MouseEvent<HTMLElement>) => {
+    event.preventDefault();
+    const nextOpen = !effectiveOpen;
+    if (!isControlled) {
+      setInternalOpen(nextOpen);
+    }
+    onOpenChange?.(nextOpen);
+  }, [effectiveOpen, isControlled, onOpenChange]);
+
+  return (
+    <details
+      open={effectiveOpen}
+      data-testid="chat-process-group"
+      className="group/process mt-2 w-full first:mt-0 text-[#626874] dark:text-[#aab4bf]"
+    >
+      <summary
+        onClick={handleSummaryClick}
+        className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden min-h-7"
+      >
+        {summary}
+        <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500 flex-shrink-0" />
+      </summary>
+      {children}
+    </details>
+  );
+}
+
+function ChatMessageBubbleInner({
+  message,
+  isActive = false,
+  pendingQuestions,
+  onQuestionAnswer,
+  onQuestionReject,
+  showActions = false,
+  showTimestamp = false,
+  showCacheUsage = true,
+  collapseIntermediateSteps = false,
+  processGroupsDefaultOpen = false,
+  processGroupsOpenWhileActive = false,
+  processGroupOpenState,
+  onProcessGroupOpenChange,
+  compact = true,
+  bare = false,
+  onCopy,
+  editingMessageId,
+  editingText = '',
+  actionsDisabled = false,
+  actionMessageId,
+  onEditStart,
+  onEditChange,
+  onEditCancel,
+  onEditSave,
+  onEditSend,
+  onRegenerate,
+  onOpenContextFile,
+  onOpenContext,
+}: ChatMessageBubbleProps) {
+  const { t, i18n } = useTranslation('session');
+  const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const sender = getAgentSender(parts);
+  const isUser = message.role === 'user' && !sender;
+  const processElapsedClock = useProcessElapsedClock(
+    isActive && (collapseIntermediateSteps || showTimestamp),
+    `aegisops:session:${message.sessionID}:message:${message.id}:observedEnd`,
+  );
+  const processStartedAt = Number.isFinite(message.timestamp) && message.timestamp > 0
+    ? message.timestamp
+    : Math.min(...parts.map((part) => getProcessPartInterval(part, processElapsedClock)?.start ?? Infinity));
+  const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
+  // Lightbox state for inline image previews. Browsers block top-level
+  // navigation to ``data:`` URLs (the format we send for chat images), so a
+  // ``window.open`` would land on a blank page. We open an in-app overlay
+  // instead — same UX, no popup blocker / data-URL restriction headaches.
+  const [previewImage, setPreviewImage] = useState<{ url: string; alt?: string } | null>(null);
+  if (message.finish === 'summary') {
+    return (
+      <div className={getCompactionDividerClassName(compact, !bare)}>
+        <span className="h-px flex-1 bg-zinc-200" />
+        <span className="px-1.5 font-medium text-zinc-500 shrink-0">
+          {t('chat.contextCompressed')}
+        </span>
+        <span className="h-px flex-1 bg-zinc-200" />
+      </div>
+    );
+  }
+  const rawAgentName = sender?.source_agent || message.agent || 'rex';
+  const agentName = formatAgentName(rawAgentName);
+
+  const getTextContent = () => {
+    const text = parts
+      .filter((p) => p.type === 'text' && p.text)
+      .map((p) => sender ? getMessagePartDisplayText(p) : p.text)
+      .join('\n\n');
+    return isUser ? text : stripTaskMetadata(text);
+  };
+
+  const editableTextParts = parts.filter((part): part is MessagePart & { text: string } =>
+    part.type === 'text' && typeof part.text === 'string',
+  );
+  const latestEditablePart = editableTextParts.length > 0 ? editableTextParts[editableTextParts.length - 1] : null;
+  const targetMessageId = String((latestEditablePart as any)?.messageID || message.id);
+  const targetPartId = latestEditablePart?.id || null;
+  const editableRawText = latestEditablePart?.text || '';
+  const isEditing = !!targetPartId && editingMessageId === targetMessageId;
+  const isActionPending = actionMessageId === targetMessageId;
+  const hasProcessOutput = collapseIntermediateSteps && !isUser && parts.some((part) => {
+    if (part.type === 'reasoning' || part.type === 'thinking') {
+      return !!getRenderableThinkingText(part);
+    }
+    if (part.type !== 'tool') return false;
+    return !(part.callID && pendingQuestions?.[part.callID]);
+  });
+  const instructionDisplayLabel = isUser && !isEditing && editableTextParts.length === 1
+    ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0], false))
+    : null;
+
+  const bubbleClass = instructionDisplayLabel
+    ? getInstructionDisplayBubbleClassName(compact)
+    : hasProcessOutput
+      ? `w-full max-w-full min-w-0 break-words ${compact ? 'text-sm' : 'text-[15px]'} text-[#34393e] dark:text-zinc-100`
+      : getMessageBubbleClassName({ compact, isUser, isEditing });
+  const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
+  const actionBarClass = `flex items-center gap-1.5`;
+  const editingActionBarClass = getEditingActionBarClassName();
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-[#8b929d] transition-colors duration-150 hover:bg-white hover:text-[#4f5660] active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-zinc-100 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
+  const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 mb-1.5 -translate-x-1/2 rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100 z-10 whitespace-nowrap';
+  const messageErrorText = isUser ? '' : getMessageErrorText(message);
+  const visiblePartCount = parts.filter((part) => !isModelActivityPart(part)).length;
+  const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
+    isModelActivityPart(part) ||
+    part.type === 'text' && !String(part.text || '').trim()
+  );
+  const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
+    parts.length === 0 || hasOnlyBlankTextParts
+  );
+  const showErrorInEmptyState = visiblePartCount === 0 || shouldRenderAssistantErrorState;
+  // Why the turn stopped stays on the reply, below whatever it produced. When the
+  // reply had nothing else to say, the backend also stores the same text as a part.
+  const messageErrorNoteKey = messageErrorText ? getMessageErrorNoteKey(message) : null;
+  const errorEchoText = messageErrorText.trim();
+  const isErrorEchoPart = (part: MessagePart): boolean => (
+    !!errorEchoText && part.type === 'text' && String(part.text || '').trim() === errorEchoText
+  );
+  const messageErrorAlert = messageErrorText ? (
+    <div className="flex items-start gap-2 py-1 text-sm text-red-700 dark:text-red-300" role="alert">
+      <AlertCircle aria-hidden="true" className="mt-0.5 h-4 w-4 flex-shrink-0 text-red-500 dark:text-red-400" />
+      <div className="min-w-0">
+        <p className="font-medium">{t('chat.stopReason.title')}</p>
+        <p className="whitespace-pre-wrap break-words">{messageErrorText}</p>
+        {messageErrorNoteKey && <p className="mt-0.5 text-xs">{t(messageErrorNoteKey)}</p>}
+      </div>
+    </div>
+  ) : null;
+  const outputAttachments = isUser ? [] : parts.flatMap((part) => {
+    if (part.type !== 'tool' || part.tool !== 'write' || part.state?.status !== 'completed') return [];
+    return (part.state.attachments || []).filter(
+      (attachment) => attachment.origin === 'agent_output' && attachment.id,
+    );
+  });
+
+  const avatar = <ChatAvatar user={isUser} compact={compact} />;
+
+  const headerHeight = compact ? 'h-7' : 'h-8';
+  const bubble = (
+    <div
+      className={`${bubbleClass} aegis-chat-bubble relative`}
+      data-process-output={hasProcessOutput ? 'true' : undefined}
+      style={{ overflowWrap: 'anywhere' }}
+    >
+
+      {/* Empty / loading state */}
+      {showErrorInEmptyState && (
+        isUser ? (
+          <div className="flex items-center gap-2 opacity-60">
+            <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
+            {t('chat.sending')}
+          </div>
+        ) : (
+          messageErrorAlert ?? (
+            <div className="flex items-center gap-1 py-1" aria-label={t('chat.thinking')}>
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.3s]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:-0.15s]" />
+              <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce" />
+            </div>
+          )
+        )
+      )}
+
+      {/* Parts */}
+      {isEditing ? (
+        <div className="space-y-3">
+          {/* The editor shows the stored markdown/raw text, not the rendered
+              bubble; say so, since saving overwrites that text directly. */}
+          <p className="text-xs text-sky-600 dark:text-sky-300" data-testid="chat-edit-raw-hint">
+            {t('chat.editRawHint')}
+          </p>
+          <textarea
+            value={editingText}
+            onChange={(event) => onEditChange?.(event.target.value)}
+            rows={Math.min(12, Math.max(4, editingText.split('\n').length + 1))}
+            className="w-full rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-sm text-gray-900 focus:border-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-100"
+          />
+        </div>
+      ) : (
+        (() => {
+          // Render attachments (file/image parts) first so the bubble shows
+          // image previews above the textual prompt — matches typical chat
+          // UX for "look at this image and …" style messages.
+          const fileParts = parts.filter((p) => p.type === 'file');
+          // The error alert below already says it.
+          const displayParts = parts.filter((p) => p.type !== 'file' && !isErrorEchoPart(p));
+          const isQuestionToolPart = (part: MessagePart): boolean => {
+            if (part.type !== 'tool') return false;
+            return isQuestionToolName(part.tool || '');
+          };
+          const isPendingQuestionToolPart = (part: MessagePart): boolean => {
+            if (!isQuestionToolPart(part)) return false;
+            return !!(part.callID && pendingQuestions?.[part.callID]);
+          };
+          const isIntermediateProcessPart = (part: MessagePart): boolean => {
+            if (part.type === 'reasoning' || part.type === 'thinking') {
+              return !!getRenderableThinkingText(part);
+            }
+            if (part.type !== 'tool') return false;
+            if (isPendingQuestionToolPart(part)) return false;
+            // REA status, install and report cards stay visible between process groups.
+            if (isReaCardPart(part)) return false;
+            return true;
+          };
+          const isRenderableTextPart = (part: MessagePart): boolean => (
+            part.type === 'text' && !!getMessagePartDisplayText(part, !isUser).trim()
+          );
+          const isRenderableDisplayPart = (part: MessagePart): boolean => {
+            if (isIntermediateProcessPart(part)) return true;
+            if (part.type === 'text') return isRenderableTextPart(part);
+            if (part.type === 'tool') return true;
+            if (part.type === 'file') return !!part.url;
+            return false;
+          };
+          const activeTailPart = isActive
+            ? [...displayParts].reverse().find(isRenderableDisplayPart)
+            : undefined;
+          const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
+            // Spacing between consecutive parts is owned by this wrapper,
+            // not by individual part components. Each part used to set its
+            // own `mt-2 first:mt-0`, but since every part lives in its own
+            // wrapper div, `first:` always matched and the gap collapsed
+            // to zero between, e.g., a tool card and the next thinking
+            // block, making them look glued together.
+            <div key={part.id || i} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
+              {/* Text */}
+              {part.type === 'text' && (() => {
+                const rawText = part.text || '';
+                const nodeRefMatch = isUser
+                  ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
+                  : null;
+                const partDisplayText = getMessagePartDisplayText(part, !isUser);
+                if (!partDisplayText.trim()) return null;
+                const displayText = nodeRefMatch && partDisplayText === rawText ? nodeRefMatch[3] : partDisplayText;
+                const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
+                if (instructionLabel) {
+                  return (
+                    <span className="inline-flex items-center text-sm font-semibold leading-none text-rose-700 max-w-full truncate">
+                      {instructionLabel}
+                    </span>
+                  );
+                }
+                return (
+                  <>
+                    {nodeRefMatch && (
+                      <div className="flex items-center gap-1.5 mb-2 bg-gray-100 border border-gray-200 rounded-md px-2 py-1">
+                        <span className="w-1.5 h-1.5 rounded-full bg-gray-400 flex-shrink-0" />
+                        <code className="text-[10px] font-mono font-semibold text-gray-700 truncate">{nodeRefMatch[1]}</code>
+                        <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
+                      </div>
+                    )}
+                    {processStep ? (
+                      <div
+                        data-testid="chat-process-text-step"
+                        className="py-1 text-sm leading-7 text-[#686e6c] dark:text-zinc-400 min-w-0"
+                      >
+                        <StreamingMarkdown
+                          content={displayText}
+                          isStreaming={isActive && !isUser}
+                        />
+                      </div>
+                    ) : (
+                      <StreamingMarkdown
+                        content={displayText}
+                        isStreaming={isActive && !isUser}
+                      />
+                    )}
+                  </>
+                );
+              })()}
+
+              {/* Tool call */}
+              {part.type === 'tool' && (
+                <ChatToolPart
+                  part={part}
+                  pendingQuestion={part.callID ? pendingQuestions?.[part.callID] : undefined}
+                  onAnswer={onQuestionAnswer && part.callID
+                    ? (answers) => onQuestionAnswer(part.callID!, pendingQuestions![part.callID!].requestId, answers)
+                    : undefined}
+                  onReject={onQuestionReject && part.callID
+                    ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
+                    : undefined}
+                  processStep={processStep}
+                />
+              )}
+
+              {/* Reasoning / thinking */}
+              {(part.type === 'reasoning' || part.type === 'thinking') && (() => {
+                const thinkingText = getRenderableThinkingText(part);
+                if (!thinkingText) return null;
+                const partKey = part.id || `reasoning-${i}`;
+                const isThinking = part === activeTailPart;
+                const isExpanded = isThinking || getPartExpanded(partKey);
+                if (processStep) {
+                  return (
+                    <div data-testid="chat-process-reasoning-step">
+                      <button
+                        type="button"
+                        aria-expanded={isExpanded}
+                        onClick={() => togglePart(partKey)}
+                        disabled={isThinking}
+                        className="flex w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200 min-h-7"
+                      >
+                        <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
+                          {isThinking ? (
+                            <Loader2 aria-hidden="true" className="h-[15px] w-[15px] animate-spin" />
+                          ) : (
+                            <Brain aria-hidden="true" className="h-[15px] w-[15px]" />
+                          )}
+                        </span>
+                        <span className="shrink-0">{t('chat.process.deepThinking')}</span>
+                        {!isExpanded && (
+                          <span
+                            data-testid="chat-process-reasoning-preview"
+                            className="font-normal text-[#9da29f] dark:text-zinc-500 min-w-0 truncate"
+                          >
+                            {getThinkingFirstSentence(thinkingText)}
+                          </span>
+                        )}
+                        <ChevronDown aria-hidden="true" className={`ml-0.5 h-3 w-3 text-[#9da29f] transition-transform dark:text-zinc-500 flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      {isExpanded && isVisible && (
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400 overflow-y-auto whitespace-pre-wrap">
+                          <StreamingReasoningText
+                            content={thinkingText}
+                            isStreaming={isThinking}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                return (
+                  // Vertical spacing is provided by the parent part wrapper
+                  // (see `otherParts.map` above); keep this container neutral
+                  // so wrapper-level `mt-2 first:mt-0` is the single source of
+                  // truth for inter-part gaps.
+                  <div>
+                    <button
+                      onClick={() => togglePart(partKey)}
+                      disabled={isThinking}
+                      className="group/think w-full text-left"
+                    >
+                      <div className={`flex items-center gap-2 px-2.5 py-1.5 rounded-md border text-xs transition-colors ${
+                        isThinking
+                          ? 'bg-sky-50 border-sky-100'
+                          : 'bg-zinc-50 border-zinc-200 hover:bg-zinc-100'
+                      }`}>
+                        {isThinking ? (
+                          <>
+                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
+                            <span className="text-violet-600">{t('chat.thinking')}</span>
+                          </>
+                        ) : (
+                          <>
+                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
+                            <span className="text-zinc-500 truncate min-w-0">
+                              {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
+                            </span>
+                            <ChevronDown aria-hidden="true" className={`w-3 h-3 text-zinc-400 transition-transform ml-auto flex-shrink-0 ${isExpanded ? '' : '-rotate-90'}`} />
+                          </>
+                        )}
+                      </div>
+                    </button>
+                    {isExpanded && isVisible && (
+                      <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 font-mono leading-relaxed max-h-52 whitespace-pre-wrap overflow-y-auto">
+                        <StreamingReasoningText
+                          content={thinkingText}
+                          isStreaming={isThinking}
+                        />
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+            </div>
+          );
+          const renderProcessGroup = (
+            group: Array<{ part: MessagePart; index: number }>,
+            groupIndex: number,
+            timingParts: MessagePart[],
+            isLastGroup: boolean,
+          ) => {
+            const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
+            const processGroupKey = `${message.id}:process:${groupIndex}`;
+            const durationParts = [...group.map(({ part }) => part), ...timingParts];
+            // Summaries show elapsed time since the reply began; only the last one ticks.
+            const processDurationMs = getProcessGroupDurationMs(
+              durationParts,
+              isLastGroup ? processElapsedClock : undefined,
+              processStartedAt,
+            );
+            const hasStoredOpenState = !!processGroupOpenState
+              && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
+            const effectiveProcessGroupOpen = hasStoredOpenState
+              ? processGroupOpenState[processGroupKey]
+              : processGroupOpen;
+            return (
+              <ProcessGroupDetails
+                key={`process-${groupIndex}`}
+                defaultOpen={processGroupOpen}
+                open={effectiveProcessGroupOpen}
+                onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
+                summary={(
+                  <>
+                    <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
+                      <Eye aria-hidden="true" className="h-4 w-4" />
+                    </span>
+                    <span className="min-w-0">
+                      {t('chat.process.title', { count: group.length })}
+                    </span>
+                    {processDurationMs !== null && (
+                      <span
+                        data-testid="chat-process-duration"
+                        className="text-xs font-normal text-[#9da29f] dark:text-zinc-500 shrink-0"
+                      >
+                        · {t('chat.process.duration', { duration: formatProcessDuration(processDurationMs) })}
+                      </span>
+                    )}
+                  </>
+                )}
+              >
+                <div data-testid="chat-process-timeline" className="mt-3 grid gap-1 pl-1">
+                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen, true))}
+                </div>
+              </ProcessGroupDetails>
+            );
+          };
+          const renderDisplayParts = () => {
+            if (!collapseIntermediateSteps || isUser) {
+              return displayParts.filter((part) => !isModelActivityPart(part)).map((part, index) => renderPart(part, index));
+            }
+            // Build first, render second: hidden markers and final output can
+            // arrive after a group's visible steps. Keep their timing after finish.
+            type ProcessGroup = {
+              steps: Array<{ part: MessagePart; index: number }>;
+              timing: MessagePart[];
+              index: number;
+            };
+            const nodes: Array<() => React.ReactNode> = [];
+            let processGroup: ProcessGroup | undefined;
+            let lastGroup: ProcessGroup | undefined;
+            let pendingTiming: MessagePart[] = [];
+            let processGroupIndex = 0;
+            const lastIntermediateProcessIndex = displayParts.reduce((lastIndex, part, index) => (
+              isIntermediateProcessPart(part) ? index : lastIndex
+            ), -1);
+            const flushProcessGroup = () => {
+              if (!processGroup) return;
+              const group = processGroup;
+              nodes.push(() => renderProcessGroup(
+                group.steps, group.index, group.timing, group.index === processGroupIndex - 1,
+              ));
+              lastGroup = group;
+              processGroup = undefined;
+            };
+            displayParts.forEach((part, index) => {
+              if (isModelActivityPart(part)) {
+                const group = processGroup || lastGroup;
+                if (group) group.timing.push(part);
+                else pendingTiming.push(part);
+                return;
+              }
+              if (isIntermediateProcessPart(part) || (isRenderableTextPart(part) && index <= lastIntermediateProcessIndex)) {
+                if (!processGroup) {
+                  processGroup = { steps: [], timing: pendingTiming, index: processGroupIndex++ };
+                  pendingTiming = [];
+                }
+                processGroup.steps.push({ part, index });
+                return;
+              }
+              // Empty output is still timed, but never adds a visible step.
+              if (['text', 'reasoning', 'thinking'].includes(part.type)) {
+                const group = processGroup || lastGroup;
+                if (group) group.timing.push(part);
+                else pendingTiming.push(part);
+              }
+              if (!isRenderableDisplayPart(part)) return;
+              if (isPendingQuestionToolPart(part) || isRenderableTextPart(part) || isReaCardPart(part)) {
+                flushProcessGroup();
+              }
+              if (isPendingQuestionToolPart(part)) {
+                // A question divides groups; do not assign subsequent timing twice.
+                lastGroup = undefined;
+                pendingTiming = [];
+              }
+              nodes.push(() => renderPart(part, index));
+            });
+            flushProcessGroup();
+            return nodes.map((render) => render());
+          };
+          return (
+            <>
+              {fileParts.length > 0 && (
+                <div className="mb-2 flex flex-row flex-wrap items-center gap-2">
+                  {fileParts.map((part, i) => {
+                    const isImage = (part.mime || '').startsWith('image/');
+                    if (isImage && part.url) {
+                      const imageUrl = getRenderableFileUrl(part.url);
+                      const messageSessionId = part.sessionID || message.sessionID;
+                      const resourceId = part.resourceID || null;
+                      return (
+                        <div key={part.id || `file-${i}`} className="group/image relative h-24 w-24 flex-shrink-0">
+                          <img
+                            src={imageUrl}
+                            alt={part.filename || ''}
+                            className="h-24 w-24 rounded-lg border border-gray-200 bg-gray-50 object-cover cursor-zoom-in transition-transform hover:scale-[1.02]"
+                            onClick={() => (
+                              onOpenContextFile && resourceId
+                                ? onOpenContextFile(resourceId)
+                                : setPreviewImage({ url: imageUrl, alt: part.filename })
+                            )}
+                          />
+                          {messageSessionId && resourceId && (
+                            <a
+                              href={sessionApi.contextFileDownloadUrl(messageSessionId, resourceId)}
+                              download={part.filename || 'image'}
+                              className="absolute bottom-1 right-1 rounded bg-black/55 p-1 text-white opacity-0 transition-opacity hover:bg-black/75 group-hover/image:opacity-100 max-md:opacity-100"
+                              title={t('context.download', 'Download')}
+                            >
+                              <Download aria-hidden="true" className="h-3.5 w-3.5" />
+                            </a>
+                          )}
+                        </div>
+                      );
+                    }
+                    const messageSessionId = part.sessionID || message.sessionID;
+                    const resourceId = part.resourceID || null;
+                    if (!messageSessionId || !resourceId) {
+                      // Not a Session upload (channel attachments, for one):
+                      // there is no context resource to open, so show the
+                      // plain chip, downloadable through the file route.
+                      const href = part.url ? getRenderableFileUrl(part.url) : null;
+                      const chipClassName = 'inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-2.5 py-1.5 text-xs text-gray-700';
+                      const chipBody = (
+                        <>
+                          <FileText aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />
+                          <span className="truncate max-w-[240px]">{part.filename || 'file'}</span>
+                        </>
+                      );
+                      return href ? (
+                        <a
+                          key={part.id || `file-${i}`}
+                          href={href}
+                          download={part.filename || 'file'}
+                          className={`${chipClassName} hover:bg-gray-100`}
+                        >
+                          {chipBody}
+                        </a>
+                      ) : (
+                        <div key={part.id || `file-${i}`} className={chipClassName}>{chipBody}</div>
+                      );
+                    }
+                    return (
+                      <ContextFileCard
+                        key={part.id || `file-${i}`}
+                        sessionId={messageSessionId}
+                        resourceId={resourceId}
+                        filename={part.filename || 'file'}
+                        mime={part.mime}
+                        onOpen={onOpenContextFile}
+                      />
+                    );
+                    })}
+                  </div>
+                )}
+                {renderDisplayParts()}
+                {message.sessionID && outputAttachments.length > 0 && (
+                  <div className="mt-2 space-y-1.5" data-testid="chat-output-files">
+                    {outputAttachments.slice(0, 3).map((attachment) => (
+                      <ContextFileCard
+                        key={attachment.id}
+                        sessionId={message.sessionID}
+                        resourceId={attachment.resourceID}
+                        filename={attachment.filename || 'file'}
+                        mime={attachment.mime}
+                        onOpen={onOpenContextFile}
+                      />
+                    ))}
+                    {outputAttachments.length > 3 && onOpenContext && (
+                      <button
+                        type="button"
+                        onClick={onOpenContext}
+                        className="text-xs font-medium text-slate-500 hover:text-slate-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                      >
+                        {t('context.viewAll', 'View all in Context')}
+                      </button>
+                    )}
+                  </div>
+                )}
+              </>
+            );
+        })()
+      )}
+
+      {/* Why the turn stopped, after what it already produced */}
+      {messageErrorAlert && !showErrorInEmptyState && (
+        <div className="mt-2 first:mt-0" data-testid="chat-message-stop-reason">{messageErrorAlert}</div>
+      )}
+
+      {/* Streaming indicator */}
+      {isActive && !isUser && visiblePartCount > 0 && (() => {
+        return (
+          <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
+            <div className="flex gap-0.5">
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+            </div>
+            <span>{t('chat.streaming')}</span>
+          </div>
+        );
+      })()}
+
+
+      {showCacheUsage && !isUser && !sender && <SessionCacheUsage calls={getChatCacheUsageCalls(message)} isActive={isActive} />}
+
+      {/* Actions — rendered inside bubble only while editing */}
+      {showActions && parts.length > 0 && isEditing && (
+        <div className={editingActionBarClass}>
+          <>
+            <button
+              onClick={() => void onEditSave?.()}
+              disabled={actionsDisabled || isActionPending || !editingText.trim()}
+              className={iconButtonClass}
+              aria-label={t('chat.save')}
+            >
+              <Save aria-hidden="true" className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.save')}</span>
+            </button>
+            {isUser && (
+              <button
+                onClick={() => void onEditSend?.()}
+                disabled={actionsDisabled || isActionPending || !editingText.trim()}
+                className={iconButtonClass}
+                aria-label={t('chat.sendEdited')}
+              >
+                <Send aria-hidden="true" className="w-3 h-3" />
+                <span className={tooltipClass}>{t('chat.sendEdited')}</span>
+              </button>
+            )}
+            <button
+              onClick={onEditCancel}
+              disabled={isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.cancel')}
+            >
+              <X aria-hidden="true" className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.cancel')}</span>
+            </button>
+          </>
+        </div>
+      )}
+    </div>
+  );
+  // Use the same elapsed time as the process summary, including the final output.
+  const displayTimestamp = message.timestamp + (
+    message.role === 'assistant'
+      ? (getProcessGroupDurationMs(parts, processElapsedClock, message.timestamp) ?? 0)
+      : 0
+  );
+  const footerTimestamp = showTimestamp && message.timestamp
+    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(displayTimestamp, i18n.language)}</span>
+    : null;
+  const footer = !compact && showActions && visiblePartCount > 0 && !isEditing ? (
+    <div className={`mt-1.5 flex items-center ${
+      isUser ? 'justify-between' : `justify-start${footerTimestamp ? ' gap-1.5' : ''}`
+    }`}>
+      {isUser && (footerTimestamp || <span />)}
+      <div className={actionBarClass}>
+        {isUser ? (
+          <>
+            {targetPartId && editableRawText && (
+              <button
+                onClick={() => onEditStart?.(targetMessageId, targetPartId, message.role, editableRawText)}
+                disabled={actionsDisabled || isActionPending}
+                className={iconButtonClass}
+                aria-label={t('chat.edit')}
+              >
+                <Pencil aria-hidden="true" className="w-3 h-3" />
+                <span className={tooltipClass}>{t('chat.edit')}</span>
+              </button>
+            )}
+            <button
+              onClick={() => onCopy?.(getTextContent())}
+              disabled={isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.copy')}
+            >
+              <Copy aria-hidden="true" className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.copy')}</span>
+            </button>
+          </>
+        ) : (
+          <>
+            {!sender && <button
+              onClick={() => void onRegenerate?.(targetMessageId)}
+              disabled={actionsDisabled || isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.regenerate')}
+            >
+              <RefreshCw aria-hidden="true" className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+              <span className={tooltipClass}>{t('chat.regenerate')}</span>
+            </button>}
+            <button
+              onClick={() => onCopy?.(getTextContent())}
+              disabled={isActionPending}
+              className={iconButtonClass}
+              aria-label={t('chat.copy')}
+            >
+              <Copy aria-hidden="true" className="w-3 h-3" />
+              <span className={tooltipClass}>{t('chat.copy')}</span>
+            </button>
+          </>
+        )}
+      </div>
+      {!isUser && footerTimestamp}
+    </div>
+  ) : null;
+
+  if (bare) {
+    return (
+      <div className={`group relative flex w-full min-w-0${isUser ? ' justify-end' : ''}`}>
+        <div className={`flex min-w-0 flex-col ${
+          isUser ? `items-end ${isEditing ? 'w-full' : 'max-w-[88%]'}` : 'w-full items-start'
+        }`}>
+          {bubble}
+          {footer}
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (isUser) {
+    if (!compact) {
+      return (
+        <div className="group relative flex w-full min-w-0 justify-end">
+          <div className={`flex min-w-0 flex-col items-end ${isEditing ? 'w-full' : 'max-w-[88%]'}`}>
+            {bubble}
+            {footer}
+          </div>
+          {/* Hidden on phones like the assistant's: 40px outside the column it
+              made the whole chat scroll sideways. */}
+          <div className="absolute -right-10 top-1 max-md:hidden">
+            {avatar}
+          </div>
+          {previewImage && (
+            <ImageLightbox
+              src={previewImage.url}
+              alt={previewImage.alt}
+              onClose={() => setPreviewImage(null)}
+            />
+          )}
+        </div>
+      );
+    }
+
+    return (
+      <div className={`group relative ${!compact ? 'w-full' : ''} flex min-w-0 justify-end`}>
+        <div className={`flex min-w-0 items-start justify-end gap-2 ${messageGroupClass}`}>
+          <div className={`flex min-w-0 flex-col items-end ${isEditing ? 'w-full' : 'max-w-full'}`}>
+            {bubble}
+            {footer}
+          </div>
+          <div className={getUserAvatarContainerClassName(compact)}>
+            {avatar}
+          </div>
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (!compact) {
+    return (
+      <div className="group relative flex w-full min-w-0">
+        <div className="absolute -left-10 top-1 max-md:hidden">
+          {avatar}
+        </div>
+        <div className="flex w-full min-w-0 flex-col items-start">
+          <div className={`flex items-center gap-2 ${headerHeight}`}>
+            <span className="aegis-chat-author text-base font-medium text-ui-text">
+              {agentName}
+            </span>
+          </div>
+          <div className="flex w-full min-w-0 flex-col">
+            {bubble}
+            {footer}
+          </div>
+        </div>
+        {previewImage && (
+          <ImageLightbox
+            src={previewImage.url}
+            alt={previewImage.alt}
+            onClose={() => setPreviewImage(null)}
+          />
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="group relative flex">
+      <div className={`flex gap-2.5 ${messageGroupClass}`}>
+        {avatar}
+        <div className="flex flex-col items-start flex-1 min-w-0">
+          <div className={`flex items-center gap-2 ${headerHeight}`}>
+            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+              {agentName}
+            </span>
+          </div>
+          <div className="flex flex-col min-w-0 w-full">
+            {bubble}
+            {footer}
+          </div>
+        </div>
+      </div>
+      {previewImage && (
+        <ImageLightbox
+          src={previewImage.url}
+          alt={previewImage.alt}
+          onClose={() => setPreviewImage(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// ============================================================================
+// ChatToolPart — collapsible tool call card
+// ============================================================================
+
+const TOOL_DISPLAY_MAX_LEN = 120;
+/** Truncate long tool titles / param summaries shown in the card header. */
+export function truncateToolDisplayText(text: string, maxLen = TOOL_DISPLAY_MAX_LEN): string {
+  if (text.length <= maxLen) return text;
+  return `${text.slice(0, maxLen)}…`;
+}
+
+function buildToolInputSummary(input: Record<string, unknown>): string {
+  return Object.entries(input)
+    .map(([k, v]) => {
+      if (Array.isArray(v)) return `${k}=[${v.length} items]`;
+      if (v && typeof v === 'object') return `${k}=${JSON.stringify(v)}`;
+      return `${k}=${String(v)}`;
+    })
+    .join(', ');
+}
+
+function isQuestionToolName(toolName: string): boolean {
+  const normalized = toolName.toLowerCase();
+  return normalized === 'question' || normalized === 'request_user_input' || normalized.includes('question');
+}
+
+function isBashToolName(toolName: string): boolean {
+  return toolName.toLowerCase() === 'bash';
+}
+
+function formatToolPayload(output: unknown): string {
+  if (typeof output === 'string') {
+    try { return JSON.stringify(JSON.parse(output), null, 2); } catch { return output; }
+  }
+  return JSON.stringify(output, null, 2);
+}
+
+function readQuestionItems(value: unknown): QuestionItem[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is Record<string, unknown> => !!item && typeof item === 'object')
+    .map((item) => ({
+      question: typeof item.question === 'string' ? item.question : '',
+      header: typeof item.header === 'string' ? item.header : undefined,
+      type: typeof item.type === 'string' ? item.type as QuestionItem['type'] : undefined,
+      options: Array.isArray(item.options) ? item.options as QuestionItem['options'] : undefined,
+      multiple: typeof item.multiple === 'boolean' ? item.multiple : undefined,
+      custom: typeof item.custom === 'boolean' ? item.custom : undefined,
+    }))
+    .filter((item) => item.question.trim().length > 0);
+}
+
+type ToolTranslator = (key: string, options?: Record<string, unknown>) => string;
+
+function normalizeQuestionAnswer(value: unknown): string[] {
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean);
+  }
+  if (value == null) return [];
+  const text = String(value).trim();
+  return text ? [text] : [];
+}
+
+function formatQuestionAnswerValue(question: QuestionItem, value: string, t: ToolTranslator): string {
+  const normalized = value.trim().toLowerCase();
+  if (question.type === 'confirm') {
+    if (normalized === 'yes' || normalized === 'true') return t('chat.questionResult.yes');
+    if (normalized === 'no' || normalized === 'false') return t('chat.questionResult.no');
+  }
+  return value;
+}
+
+function ChatQuestionResult({
+  state,
+  actionLabel,
+  statusLabel,
+  statusIcon,
+  statusIconColor,
+  processStep = false,
+  t,
+}: {
+  state: Partial<ToolState>;
+  actionLabel: string;
+  statusLabel: string;
+  statusIcon: React.ReactNode;
+  statusIconColor: string;
+  processStep?: boolean;
+  t: ToolTranslator;
+}) {
+  const questions = readQuestionItems(state.input?.questions);
+  if (questions.length === 0) return null;
+  const rawAnswers = Array.isArray(state.metadata?.answers) ? state.metadata.answers : [];
+  const status = state.status || 'pending';
+  const displayStatus = statusLabel;
+  const isCompleted = status === 'completed';
+  const isError = status === 'error';
+  const answerLabelClass = isCompleted
+    ? 'text-emerald-600'
+    : isError
+    ? 'text-red-500'
+    : 'text-zinc-500';
+  const answerChipClass = isCompleted
+    ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+    : isError
+    ? 'border-red-200 bg-red-50 text-red-600'
+    : 'border-zinc-200 bg-zinc-50 text-zinc-600';
+  const statusPillClass = isCompleted
+    ? 'bg-emerald-50 text-emerald-600'
+    : isError
+    ? 'bg-red-50 text-red-500'
+    : 'bg-zinc-100 text-zinc-500';
+  const firstQuestion = questions[0]?.header || questions[0]?.question || '';
+  const questionDetails = questions.map((question, index) => {
+    const answers = normalizeQuestionAnswer(rawAnswers[index]);
+    const displayAnswers = answers.length > 0
+      ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
+      : [t('chat.questionResult.unanswered')];
+    return (
+      <div
+        key={`${question.question}-${index}`}
+        className={`space-y-2 py-2 last:pb-0 ${processStep ? 'first:pt-0' : 'first:pt-2'}`}
+      >
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
+            {t('chat.questionResult.questionLabel')}
+          </span>
+          <div className="min-w-0">
+            {question.header && (
+              <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
+            )}
+            <div className="text-xs leading-5 text-zinc-700 dark:text-zinc-300">{question.question}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
+            {t('chat.questionResult.answerLabel')}
+          </span>
+          <div className="flex min-w-0 flex-wrap gap-1.5">
+            {displayAnswers.map((answer, answerIndex) => (
+              <span
+                key={`${answer}-${answerIndex}`}
+                className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
+              >
+                {answer}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  });
+
+  if (processStep) {
+    return (
+      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
+          <span
+            className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}
+            title={statusLabel}
+            aria-label={statusLabel}
+            role="img"
+          >
+            {statusIcon}
+          </span>
+          <span className="min-w-0 flex-shrink-0">{actionLabel}</span>
+          {firstQuestion && (
+            <span className="ml-0.5 font-normal text-[#9a9f9c] dark:text-zinc-500 min-w-0 truncate">
+              {firstQuestion}
+            </span>
+          )}
+          <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
+        </summary>
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          {questionDetails}
+        </div>
+      </details>
+    );
+  }
+
+  return (
+    <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+      <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 select-none hover:bg-zinc-50 transition-colors min-w-0">
+        <span className={`${statusIconColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{actionLabel}</span>
+            {firstQuestion && (
+              <span className="text-[11px] text-zinc-400 truncate min-w-0">
+                {firstQuestion}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-1.5 flex-shrink-0 self-center">
+          <span className={`rounded-md px-1.5 py-0.5 text-[11px] font-medium ${statusPillClass}`}>
+            {displayStatus}
+          </span>
+          <ChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
+        </div>
+      </summary>
+      <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
+        {questionDetails}
+      </div>
+    </details>
+  );
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+function parseJsonRecord(value: string): Record<string, unknown> | undefined {
+  try {
+    return asRecord(JSON.parse(value));
+  } catch {
+    return undefined;
+  }
+}
+
+function pickStringValue(data: Record<string, unknown> | undefined, ...keys: string[]): string | undefined {
+  if (!data) return undefined;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'string' && value.trim().length > 0) return value;
+    if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  }
+  return undefined;
+}
+
+function pickNumberValue(data: Record<string, unknown> | undefined, ...keys: string[]): number | undefined {
+  if (!data) return undefined;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'number' && Number.isFinite(value)) return value;
+    if (typeof value === 'string') {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+  return undefined;
+}
+
+function pickBooleanValue(data: Record<string, unknown> | undefined, ...keys: string[]): boolean {
+  if (!data) return false;
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'string') {
+      const normalized = value.trim().toLowerCase();
+      if (normalized === 'true') return true;
+      if (normalized === 'false') return false;
+    }
+  }
+  return false;
+}
+
+function extractBashMetadata(text: string): { output: string; metadataLines: string[] } {
+  const metadataMatch = text.match(/\n*<bash_metadata>\n?([\s\S]*?)\n?<\/bash_metadata>\s*$/);
+  if (!metadataMatch) return { output: text, metadataLines: [] };
+  return {
+    output: text.slice(0, metadataMatch.index).trimEnd(),
+    metadataLines: metadataMatch[1]
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean),
+  };
+}
+
+function buildBashCommandSummary(state: Partial<ToolState>): string {
+  const command = pickStringValue(state.input, 'command', 'cmd', 'shell');
+  return truncateToolDisplayText(command || state.title || '');
+}
+
+function getBashDescription(state: Partial<ToolState>): string {
+  const command = pickStringValue(state.input, 'command', 'cmd', 'shell') || '';
+  const metadata = asRecord(state.metadata);
+  const description = pickStringValue(state.input, 'description')
+    || pickStringValue(metadata, 'description')
+    || state.title
+    || '';
+  return description && description !== command ? description : '';
+}
+
+function buildBashHeaderSummary(state: Partial<ToolState>): string {
+  return truncateToolDisplayText(getBashDescription(state) || buildBashCommandSummary(state));
+}
+
+function formatBashDuration(state: Partial<ToolState>): string | undefined {
+  const start = state.time?.start;
+  const end = state.time?.end;
+  if (typeof start === 'number' && typeof end === 'number' && end >= start) {
+    return `${((end - start) / 1000).toFixed(2)}s`;
+  }
+  const metadata = asRecord(state.metadata);
+  const durationMs = pickNumberValue(metadata, 'duration_ms', 'durationMs', 'elapsed_ms', 'elapsedMs');
+  if (durationMs !== undefined) return `${(durationMs / 1000).toFixed(2)}s`;
+  return undefined;
+}
+
+function normalizeBashOutput(state: Partial<ToolState>) {
+  const metadata = asRecord(state.metadata);
+  const outputRecord = asRecord(state.output)
+    || (typeof state.output === 'string' ? parseJsonRecord(state.output) : undefined);
+  const stdout = pickStringValue(outputRecord, 'stdout');
+  const stderr = pickStringValue(outputRecord, 'stderr');
+  const genericOutput = pickStringValue(outputRecord, 'output', 'text', 'result')
+    ?? (typeof state.output === 'string' ? state.output : undefined)
+    ?? pickStringValue(metadata, 'output');
+  const errorFromOutput = pickStringValue(outputRecord, 'error');
+  const rawError = errorFromOutput || state.error || '';
+  const errorSummary = rawError.split('\n\n')[0]?.trim() || '';
+  const extracted = extractBashMetadata(stdout || genericOutput || '');
+  const fallbackRawOutput = !stdout && !genericOutput && state.output !== undefined && !outputRecord
+    ? formatToolPayload(state.output)
+    : '';
+
+  return {
+    stdout: stdout ? extracted.output : '',
+    stderr: stderr || '',
+    output: stdout ? '' : (extracted.output || fallbackRawOutput),
+    metadataLines: extracted.metadataLines,
+    errorSummary,
+    timedOut: pickBooleanValue(metadata, 'timed_out', 'timedOut'),
+    aborted: pickBooleanValue(metadata, 'aborted'),
+  };
+}
+
+function ChatBashPayload({
+  state,
+  t,
+}: {
+  state: Partial<ToolState>;
+  t: ToolTranslator;
+}) {
+  const command = pickStringValue(state.input, 'command', 'cmd', 'shell') || state.title || '';
+  const workdir = pickStringValue(state.input, 'workdir', 'cwd', 'directory');
+  const timeout = pickNumberValue(state.input, 'timeout', 'timeout_ms', 'timeoutMs');
+  const duration = formatBashDuration(state);
+  const output = normalizeBashOutput(state);
+  const hasOutput = !!(output.stdout || output.output || output.stderr || output.errorSummary);
+
+  return (
+    <div className="space-y-2">
+      {command && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.command')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-zinc-100 max-h-64 font-mono overflow-x-auto overflow-y-auto">
+            <span className="text-zinc-500">$ </span>{command}
+          </pre>
+        </div>
+      )}
+
+      <div className="flex items-center gap-1.5 text-[11px] flex-wrap">
+        {workdir && (
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
+            {t('chat.bash.workdir')} <span className="font-mono text-zinc-600">{workdir}</span>
+          </span>
+        )}
+        {duration && (
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
+            {t('chat.bash.duration')} {duration}
+          </span>
+        )}
+        {timeout !== undefined && (
+          <span className="rounded-md border border-zinc-200 bg-white px-1.5 py-0.5 text-zinc-500">
+            {t('chat.bash.timeout')} {timeout}ms
+          </span>
+        )}
+        {output.timedOut && (
+          <span className="rounded-md border border-amber-200 bg-amber-50 px-1.5 py-0.5 font-medium text-amber-700">
+            {t('chat.bash.timedOut')}
+          </span>
+        )}
+        {output.aborted && (
+          <span className="rounded-md border border-zinc-200 bg-zinc-100 px-1.5 py-0.5 font-medium text-zinc-600">
+            {t('chat.bash.aborted')}
+          </span>
+        )}
+      </div>
+
+      {output.metadataLines.length > 0 && (
+        <div className="rounded-md bg-amber-50 px-2 py-1.5 text-[11px] leading-5 text-amber-700">
+          {output.metadataLines.join(' · ')}
+        </div>
+      )}
+
+      {output.errorSummary && !output.stderr && (
+        <div className="rounded-md bg-red-50 px-2 py-1.5 text-[11px] leading-5 text-red-600">
+          {output.errorSummary}
+        </div>
+      )}
+
+      {output.stdout && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.stdout')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 max-h-64 font-mono overflow-x-auto overflow-y-auto">
+            {output.stdout}
+          </pre>
+        </div>
+      )}
+
+      {output.output && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-zinc-500">{t('chat.bash.output')}</div>
+          <pre className="rounded-md bg-zinc-950 p-2 text-[11px] leading-relaxed text-emerald-300 max-h-64 font-mono overflow-x-auto overflow-y-auto">
+            {output.output}
+          </pre>
+        </div>
+      )}
+
+      {output.stderr && (
+        <div className="space-y-1">
+          <div className="text-[11px] font-medium text-red-500">{t('chat.bash.stderr')}</div>
+          <pre className="rounded-md bg-red-950 p-2 text-[11px] leading-relaxed text-red-100 max-h-64 font-mono overflow-x-auto overflow-y-auto">
+            {output.stderr}
+          </pre>
+        </div>
+      )}
+
+      {!hasOutput && (
+        <div className="rounded-md bg-white px-2 py-1.5 text-[11px] text-zinc-400 border border-zinc-200/70">
+          {t('chat.bash.noOutput')}
+        </div>
+      )}
+    </div>
+  );
+}
+
+export interface ChatToolPartProps {
+  part: MessagePart;
+  pendingQuestion?: PendingQuestion;
+  onAnswer?: (answers: string[][]) => Promise<void>;
+  onReject?: () => Promise<void>;
+  processStep?: boolean;
+}
+
+export function ChatToolPart({
+  part,
+  pendingQuestion,
+  onAnswer,
+  onReject,
+  processStep = false,
+}: ChatToolPartProps) {
+  const { t } = useTranslation('session');
+  const toolName = part.tool || 'unknown';
+
+  // Keep the delegate fallback narrow: many MCP tools also carry a generic
+  // `category` field (for example wecom_mcp category="doc").
+  if (shouldRenderDelegateTaskCard(part)) {
+    return <DelegateTaskCard part={part} processStep={processStep} />;
+  }
+  if (isReaCardPart(part)) {
+    return <ReaToolPart part={part} />;
+  }
+
+  const state: Partial<ToolState> = part.state || {};
+  const status = state.status || 'pending';
+  // Pending question state is the source of truth. Tool status can briefly
+  // arrive as completed after reconnects or transport races, but the user
+  // still needs the answer UI while the question request exists.
+  const isWaitingForAnswer = !!pendingQuestion;
+
+  type StatusCfg = {
+    icon: React.ReactNode;
+    iconColor: string;
+    pill: string;      // Status pill classes.
+    label: string;
+  };
+  const statusConfig: Record<string, StatusCfg> = {
+    pending:   {
+      icon: <Clock aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      iconColor: 'text-zinc-400',
+      pill: 'bg-zinc-100 text-zinc-500',
+      label: t('chat.tool.pending'),
+    },
+    running:   {
+      icon: <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />,
+      iconColor: 'text-sky-500',
+      pill: 'bg-sky-50 text-sky-600',
+      label: t('chat.tool.running'),
+    },
+    completed: {
+      icon: <CheckCircle2 aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      iconColor: 'text-green-500',
+      pill: 'bg-green-50 text-green-600',
+      label: t('chat.tool.completed'),
+    },
+    error:     {
+      icon: <XCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      iconColor: 'text-red-400',
+      pill: 'bg-red-50 text-red-500',
+      label: t('chat.tool.error'),
+    },
+  };
+  const config = statusConfig[status] ?? statusConfig.pending;
+  const isBashTool = isBashToolName(toolName);
+  const todoEntries = toolName === 'todo'
+    ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
+    : [];
+  const showGenericToolPayload = toolName !== 'todo' && !isBashTool;
+  const isTodoTool = toolName === 'todo';
+  const toolPresentation = resolveToolPresentation(toolName, state, t);
+  const hasToolInput = Boolean(state.input && Object.keys(state.input).length > 0);
+  const safeToolInput = hasToolInput
+    ? redactToolInput(state.input) as Record<string, unknown>
+    : undefined;
+  const showActionProgress = showGenericToolPayload
+    && !safeToolInput
+    && (status === 'pending' || status === 'running');
+  const actionProgressLabel = toolName === 'write'
+    ? t('chat.tool.progress.writingFile')
+    : toolName === 'edit' || toolName === 'apply_patch'
+      ? t('chat.tool.progress.editingFile')
+      : t('chat.tool.progress.working');
+
+  // Reuse the shared helpers so the truncation rules stay in sync with the
+  // delegate-task card and any other places that render tool input previews.
+  const inputSummary = hasToolInput
+    ? truncateToolDisplayText(
+        toolName === 'todo'
+          ? buildTodoSummary(state, t)
+          : isBashTool
+          ? buildBashHeaderSummary(state)
+          : buildToolInputSummary(safeToolInput || {}),
+      )
+    : '';
+  const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
+  const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
+  const semanticDetail = truncateToolDisplayText(toolPresentation.detail);
+  const fileOperationDisplayName = truncateToolDisplayText(getFileOperationDisplayName(toolName, state));
+  const toolDisplayName = toolPresentation.label;
+  const processStepLabel = isTodoTool
+    ? t('chat.tool.todoUpdated')
+    : toolPresentation.known
+      ? toolDisplayName
+      : config.label;
+  const processStepDetail = fileOperationDisplayName
+    || workflowHeaderSummary
+    || semanticDetail
+    || displayTitle
+    || inputSummary
+    || (toolPresentation.known ? '' : toolDisplayName);
+  const cardHeaderDetail = fileOperationDisplayName
+    || workflowHeaderSummary
+    || semanticDetail
+    || inputSummary
+    || displayTitle;
+  const processStepIcon = isTodoTool
+    ? <ListTree aria-hidden="true" className="h-[15px] w-[15px]" />
+    : config.icon;
+  const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
+  const statusBadgeClass = isTodoTool
+    ? 'text-[11px] font-medium text-zinc-500'
+    : `text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`;
+
+  if (isWaitingForAnswer) {
+    // Outer spacing is owned by the part wrapper in SessionChat's parts map.
+    return (
+      <div>
+        <QuestionTool
+          questions={pendingQuestion!.questions}
+          onAnswer={onAnswer!}
+          onReject={onReject}
+          compact
+        />
+      </div>
+    );
+  }
+
+  if (isQuestionToolName(toolName) && readQuestionItems(state.input?.questions).length > 0) {
+    return (
+      <ChatQuestionResult
+        state={state}
+        actionLabel={toolDisplayName}
+        statusLabel={config.label}
+        statusIcon={config.icon}
+        statusIconColor={config.iconColor}
+        processStep={processStep}
+        t={t}
+      />
+    );
+  }
+
+  const toolDetails = (
+    <>
+      {isTodoTool && todoEntries.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
+            <span>{t('chat.tool.todoStages')}</span>
+            <span className="font-normal text-zinc-400">{todoEntries.length}</span>
+          </div>
+          <TodoList items={todoEntries} />
+        </div>
+      )}
+
+      {isBashTool && (
+        <ChatBashPayload state={state} t={t} />
+      )}
+
+      {showActionProgress && (
+        <div
+          data-testid="chat-tool-action-progress"
+          className="flex items-center gap-2 py-0.5 text-xs text-[#8d9390] dark:text-zinc-500 min-h-6"
+        >
+          <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
+          </span>
+          <span>{actionProgressLabel}</span>
+        </div>
+      )}
+
+      {showGenericToolPayload && safeToolInput && (
+        <details>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.inputParams')}
+          </summary>
+          <pre className="rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300 overflow-x-auto">
+            {JSON.stringify(safeToolInput, null, 2)}
+          </pre>
+        </details>
+      )}
+
+      {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
+        <details open>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.outputResult')}
+          </summary>
+          <pre className="max-h-48 rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-green-400 overflow-x-auto overflow-y-auto">
+            {formatToolPayload(state.output)}
+          </pre>
+        </details>
+      )}
+
+      {!isBashTool && status === 'error' && state.error && (
+        <div className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+          {state.error}
+        </div>
+      )}
+
+      {state.time?.start && state.time?.end && (
+        <div className="text-right text-[10px] text-zinc-400">
+          {((state.time.end - state.time.start) / 1000).toFixed(2)}s
+        </div>
+      )}
+    </>
+  );
+
+  if (processStep) {
+    return (
+      <>
+        <details data-testid="chat-process-tool-step" data-tool-status={status} className="group/tool min-w-0">
+          <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
+            {/* The timeline shows the status as an icon only; keep the text for
+                assistive tech (and hover) so pending/running/completed/error stay
+                distinguishable without colour. */}
+            <span
+              className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}
+              title={config.label}
+              aria-label={config.label}
+              role="img"
+            >
+              {processStepIcon}
+            </span>
+            <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
+            {processStepDetail && (
+              <span className="ml-0.5 font-normal text-[#9a9f9c] dark:text-zinc-500 min-w-0 truncate">
+                {processStepDetail}
+              </span>
+            )}
+            <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
+          </summary>
+          <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+            {toolDetails}
+          </div>
+        </details>
+      </>
+    );
+  }
+
+  return (
+    <>
+      {/* The part wrapper owns vertical spacing between process rows. */}
+      <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
+        <summary className="px-2.5 py-2 cursor-pointer list-none flex items-start gap-2 select-none hover:bg-zinc-50 transition-colors min-w-0">
+        <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
+            {cardHeaderDetail && (
+              <span
+                className={`text-[11px] truncate min-w-0 ${
+                  workflowHeaderSummary ? 'text-emerald-700' : 'text-zinc-400'
+                }`}
+              >
+                {cardHeaderDetail}
+              </span>
+            )}
+          </div>
+        </div>
+        <div className="ml-auto flex items-center gap-1.5 flex-shrink-0 self-center">
+          <span className={statusBadgeClass}>
+            {config.label}
+          </span>
+          <ChevronDown aria-hidden="true" className="w-3 h-3 text-zinc-400 transition-transform group-open/tool:rotate-180" />
+        </div>
+      </summary>
+
+        <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
+          {toolDetails}
+        </div>
+      </details>
+    </>
+  );
+}
+
+/**
+ * Memoized export of ChatMessageBubble.
+ *
+ * Fast path:
+ * - structural props: isActive, role, finish, parts.length
+ * - per-part render probe with early exits and ref equality reuse
+ *
+ * Only triggers a re-render when something actually visible has changed,
+ * avoiding unnecessary reconciliation during high-frequency streaming.
+ */
+export const ChatMessageBubble = memo(ChatMessageBubbleInner, (prev, next) => {
+  if (prev.isActive !== next.isActive) return false;
+  if (prev.bare !== next.bare) return false;
+  if (prev.showActions !== next.showActions) return false;
+  if (prev.showCacheUsage !== next.showCacheUsage) return false;
+  if (prev.collapseIntermediateSteps !== next.collapseIntermediateSteps) return false;
+  if (prev.processGroupsDefaultOpen !== next.processGroupsDefaultOpen) return false;
+  if (prev.processGroupsOpenWhileActive !== next.processGroupsOpenWhileActive) return false;
+  if (prev.processGroupOpenState !== next.processGroupOpenState) return false;
+  if (prev.editingMessageId !== next.editingMessageId) return false;
+  if (prev.editingText !== next.editingText) return false;
+  if (prev.actionsDisabled !== next.actionsDisabled) return false;
+  if (prev.actionMessageId !== next.actionMessageId) return false;
+  if (prev.onOpenContextFile !== next.onOpenContextFile) return false;
+  if (prev.onOpenContext !== next.onOpenContext) return false;
+  if (prev.message.finish !== next.message.finish) return false;
+  if (prev.message.error !== next.message.error) return false;
+  if (prev.message.id !== next.message.id || prev.message.sessionID !== next.message.sessionID) return false;
+  if (prev.message.timestamp !== next.message.timestamp) return false;
+  if (prev.message.role !== next.message.role || prev.message.agent !== next.message.agent) return false;
+  if (!areCacheUsageCallsEqual(getChatCacheUsageCalls(prev.message), getChatCacheUsageCalls(next.message))) return false;
+  const prevParts = prev.message.parts as any[] | undefined;
+  const nextParts = next.message.parts as any[] | undefined;
+  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
+  if (prev.pendingQuestions !== next.pendingQuestions) return false;
+  // Text placeholders can now be created before later tool parts arrive.
+  // Compare each rendered part so mid-array text streaming still repaints.
+  return areChatMessagePartsRenderEqual(prev.message.parts, next.message.parts);
+});

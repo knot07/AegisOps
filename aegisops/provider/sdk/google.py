@@ -1,0 +1,533 @@
+"""
+Google (Gemini) provider implementation - High Quality Version
+"""
+
+import os
+import base64
+import json
+import re
+from typing import List, AsyncIterator, Optional, Dict, Any
+
+from aegisops.provider.provider import (
+    BaseProvider,
+    ModelInfo,
+    ModelCapabilities,
+    ChatMessage,
+    ChatResponse,
+    StreamChunk,
+)
+from aegisops.provider.token_usage import normalize_gemini_usage
+from aegisops.utils.log import Log
+
+log = Log.create(service="provider.google")
+
+
+def _image_block_to_gemini_part(block: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Convert a AegisOps internal image block to a Gemini inline_data part."""
+    data = block.get("data")
+    mime = block.get("mimeType")
+    if not data or not mime:
+        return None
+    return {
+        "inline_data": {
+            "data": data,
+            "mime_type": mime,
+        }
+    }
+
+
+class GoogleProvider(BaseProvider):
+    """Google (Gemini) provider with ReAct text-to-tool parsing and robust error handling"""
+
+    CATALOG_ID = "google"
+
+    def __init__(self):
+        super().__init__(provider_id="google", name="Google")
+        self._api_key = os.getenv("GOOGLE_API_KEY")
+        self._client = None
+    
+    def is_configured(self) -> bool:
+        """Check if provider is configured"""
+        api_key = self._config.api_key if self._config else self._api_key
+        return bool(api_key)
+
+    def get_meta(self):
+        from aegisops.provider.model_catalog import get_provider_meta
+        return get_provider_meta("google") or super().get_meta()
+
+    def _get_client(self):
+        """Get or create Google Generative AI client"""
+        if self._client is None:
+            try:
+                from google import genai
+                api_key = self._config.api_key if self._config else self._api_key
+                if not api_key:
+                    raise ValueError("Google API key not configured")
+                self._client = genai.Client(api_key=api_key)
+            except ImportError:
+                raise ImportError("google-genai package not installed. Install with: pip install google-genai")
+        return self._client
+    
+    def get_models(self) -> List[ModelInfo]:
+        """Return configured models"""
+        return list(getattr(self, "_config_models", []))
+    
+    def _convert_messages(
+        self,
+        messages: List[ChatMessage],
+        session_id: Optional[str] = None,
+    ) -> tuple[Optional[str], List[Dict[str, Any]]]:
+        """
+        Robust ReAct-style message conversion for Gemini 3.
+        Rewrites history as text to bypass binary thought_signature requirements.
+
+        ``session_id`` is forwarded by the runner via kwargs (see
+        ``SessionRunner._call_llm``).  When provided, we attempt to reconstruct
+        the conversation directly from persisted session messages – including
+        reasoning parts – which gives Gemini perfect context.  As a defensive
+        fallback we also honour ``messages[0].sessionID`` / ``session_id``
+        attributes if a future caller chooses to attach them to the
+        ``ChatMessage`` itself.
+        """
+        system_msg = "You are a professional SecOps assistant. Use tools to complete tasks. " \
+                     "If you decide to call a tool, you MUST use the function calling API. "
+
+        if session_id is None and messages:
+            session_id = (
+                getattr(messages[0], "session_id", None)
+                or getattr(messages[0], "sessionID", None)
+            )
+
+        raw_gemini_messages = []
+        processed_mwps = False
+
+        # Try database-backed parts for perfect reasoning retrieval.
+        # We only consider the DB path "successful" if it actually produced
+        # at least one non-system gemini message; otherwise we fall back to
+        # the in-memory ``messages`` argument so we never hand Gemini an
+        # empty contents list (which the API rejects).
+        #
+        # IMPORTANT: build the DB-derived state into local variables and only
+        # commit them once the whole DB pass succeeds.  This prevents
+        # state-pollution scenarios where a mid-loop exception (or a DB
+        # snapshot containing only ``system`` rows / only empty turns) would
+        # leave ``system_msg``/``raw_gemini_messages`` partially populated and
+        # then the fallback would *append* the in-memory messages on top –
+        # producing a duplicated system prompt and duplicated conversation
+        # history.
+        if session_id:
+            db_system_msg = system_msg
+            db_raw_messages: List[Dict[str, Any]] = []
+            db_pass_ok = False
+            try:
+                from aegisops.session.message import MessageSync
+                mwps = MessageSync.list_with_parts(session_id)
+                for mwp in mwps:
+                    info = mwp.info
+                    role = getattr(info, "role", "assistant")
+                    if role == "system":
+                        for p in mwp.parts:
+                            if p.type == "text":
+                                db_system_msg += "\n" + p.text
+                        continue
+
+                    parts = []
+                    for p in mwp.parts:
+                        if p.type == "reasoning" and p.text:
+                            parts.append({"text": f"Thought: {p.text}"})
+                        elif p.type == "text" and p.text:
+                            parts.append({"text": p.text})
+                        elif p.type == "tool" and hasattr(p, "state"):
+                            if role == "assistant":
+                                parts.append({"text": f"Action: Called tool '{p.tool}' with arguments {json.dumps(p.state.input, ensure_ascii=False)}."})
+                            elif role == "tool":
+                                output = getattr(p.state, "output", "")
+                                if getattr(p.state, "status", "") == "error":
+                                    output = f"Error: {getattr(p.state, 'error', 'Unknown error')}"
+                                parts.append({"text": f"Observation from tool '{p.tool}':\n{output}"})
+                        elif p.type == "file":
+                            mime = getattr(p, "mime", "")
+                            if mime.startswith("image/"):
+                                from aegisops.session.utils.file_extractor import read_file_part_bytes
+                                from aegisops.storage.file_mirror import readable_url
+
+                                data = read_file_part_bytes(
+                                    readable_url(getattr(p, "url", ""), session_id=getattr(p, "sessionID", None))
+                                )
+                                if data:
+                                    parts.append({
+                                        "inline_data": {
+                                            "data": base64.b64encode(data).decode("utf-8"),
+                                            "mime_type": mime,
+                                        }
+                                    })
+
+                    gemini_role = "model" if role == "assistant" else "user"
+                    if parts:
+                        db_raw_messages.append({"role": gemini_role, "parts": parts})
+                db_pass_ok = True
+            except Exception as e:
+                log.warning("provider.google.db_sync_failed", {"error": str(e)})
+
+            # Commit DB-derived state only if (a) the pass completed without
+            # exception AND (b) it actually produced at least one non-system
+            # turn.  Otherwise we discard partial DB state and fall back to
+            # the in-memory messages with a clean ``system_msg``.
+            if db_pass_ok and db_raw_messages:
+                system_msg = db_system_msg
+                raw_gemini_messages = db_raw_messages
+                processed_mwps = True
+            elif db_pass_ok:
+                log.debug(
+                    "provider.google.db_sync_empty",
+                    {"session_id": session_id},
+                )
+
+        # Fallback to standard messages
+        if not processed_mwps:
+            for msg in messages:
+                role = msg.role
+                if role == "system":
+                    system_msg += "\n" + str(msg.content)
+                    continue
+                
+                parts = []
+                reasoning = getattr(msg, "reasoning", None) or msg.custom_settings.get("reasoning")
+                if reasoning:
+                    parts.append({"text": f"Thought: {reasoning}"})
+                
+                if msg.content and isinstance(msg.content, str):
+                    parts.append({"text": msg.content})
+                elif isinstance(msg.content, list):
+                    for p in msg.content:
+                        if isinstance(p, dict) and p.get("type") == "text":
+                            parts.append({"text": p["text"]})
+                        elif isinstance(p, dict) and p.get("type") == "image":
+                            image_part = _image_block_to_gemini_part(p)
+                            if image_part:
+                                parts.append(image_part)
+                
+                if msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        f = tc.get("function", {})
+                        parts.append({"text": f"Action: Called tool '{f.get('name')}' with arguments {f.get('arguments')}."})
+                
+                gemini_role = "model" if role == "assistant" else "user"
+                if role == "tool":
+                    parts.append({"text": f"Observation from tool '{msg.name}':\n{msg.content}"})
+                
+                if parts:
+                    raw_gemini_messages.append({"role": gemini_role, "parts": parts})
+
+        # Merge roles and ensure user start
+        final_messages = []
+        for msg in raw_gemini_messages:
+            if not final_messages:
+                final_messages.append(msg)
+            elif final_messages[-1]["role"] == msg["role"]:
+                final_messages[-1]["parts"].extend(msg["parts"])
+            else:
+                final_messages.append(msg)
+        
+        if final_messages and final_messages[0]["role"] == "model":
+            final_messages.insert(0, {"role": "user", "parts": [{"text": "Continue analysis."}]})
+            
+        return system_msg, final_messages
+
+    def _parse_react_text(self, text: str) -> List[Dict[str, Any]]:
+        """Extract tool calls from ReAct-style text"""
+        tool_calls = []
+        pattern = r"Action:\s*Called\s*tool\s*'([^']+)'\s*with\s*arguments\s*(\{.*?\})\s*\.?"
+        matches = re.finditer(pattern, text, re.DOTALL)
+        for match in matches:
+            name = match.group(1)
+            args_str = match.group(2)
+            try:
+                json.loads(args_str)
+                tool_calls.append({
+                    "id": f"call_parsed_{os.urandom(4).hex()}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": args_str}
+                })
+            except Exception:
+                continue
+        return tool_calls
+
+    def _build_generate_config(
+        self,
+        kwargs: Dict[str, Any],
+        system_msg: Optional[str],
+    ) -> Dict[str, Any]:
+        """Build the Gemini ``generate_content`` config from caller kwargs.
+
+        Honours caller-provided ``max_tokens`` and ``thinkingConfig`` (set by
+        :func:`aegisops.provider.options.build_provider_options` for Gemini 2.5
+        and Gemini 3 models).  Falls back to a conservative 8192 only when the
+        caller does not specify a token budget.
+        """
+        config: Dict[str, Any] = {
+            "temperature": kwargs.get("temperature", 0.7),
+        }
+
+        # max_output_tokens: prefer caller-provided value (which already
+        # reflects model/config limits via Provider.resolve_model_info), then
+        # fall back to a safe default.
+        max_tokens = kwargs.get("max_tokens") or kwargs.get("max_output_tokens")
+        if max_tokens:
+            config["max_output_tokens"] = int(max_tokens)
+        else:
+            config["max_output_tokens"] = 8192
+
+        # thinkingConfig: built by build_provider_options() per model family.
+        # Forward verbatim so 2.5 thinkingBudget / Gemini 3 thinkingLevel are
+        # honoured.  Accept both Python-style ``thinking_config`` and the
+        # canonical ``thinkingConfig`` for safety.
+        thinking_config = kwargs.get("thinkingConfig") or kwargs.get("thinking_config")
+        if thinking_config:
+            config["thinking_config"] = thinking_config
+
+        if system_msg:
+            config["system_instruction"] = system_msg
+
+        return config
+
+    async def chat(self, model_id: str, messages: List[ChatMessage], **kwargs) -> ChatResponse:
+        client = self._get_client()
+        session_id = kwargs.get("session_id")
+        system_msg, gemini_messages = self._convert_messages(
+            messages, session_id=session_id
+        )
+
+        config = self._build_generate_config(kwargs, system_msg)
+
+        tools = self._convert_tools(kwargs.get("tools", []))
+        if tools:
+            config["tools"] = tools
+
+        response = await client.aio.models.generate_content(
+            model=model_id, 
+            contents=gemini_messages, 
+            config=config
+        )
+        
+        content = ""
+        reasoning = ""
+        tool_calls = []
+        finish_reason = "stop"
+        
+        if response.candidates:
+            candidate = response.candidates[0]
+            if candidate.content and candidate.content.parts:
+                for part in candidate.content.parts:
+                    if hasattr(part, "text") and part.text:
+                        content += part.text
+                    elif hasattr(part, "thought") and part.thought:
+                        reasoning += part.thought
+                    elif hasattr(part, "function_call") and part.function_call:
+                        call = part.function_call
+                        tool_calls.append({
+                            "id": f"call_{os.urandom(4).hex()}", 
+                            "type": "function",
+                            "function": {"name": call.name, "arguments": json.dumps(call.args)}
+                        })
+            
+            if content and "Action: Called tool" in content:
+                parsed = self._parse_react_text(content)
+                if parsed:
+                    tool_calls.extend(parsed)
+            
+            if tool_calls:
+                finish_reason = "tool_calls"
+        
+        if not content and not tool_calls:
+            try:
+                content = response.text or ""
+            except Exception:
+                content = ""
+        
+        # Real usage metadata
+        usage = normalize_gemini_usage(
+            response.usage_metadata,
+            response_id=getattr(response, "response_id", None),
+        ) or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+
+        return ChatResponse(
+            id="gemini-" + model_id, 
+            model=model_id, 
+            content=content, 
+            finish_reason=finish_reason, 
+            usage=usage, 
+            tool_calls=tool_calls if tool_calls else None, 
+            reasoning=reasoning if reasoning else None
+        )
+
+    async def chat_stream(self, model_id: str, messages: List[ChatMessage], **kwargs) -> AsyncIterator[StreamChunk]:
+        client = self._get_client()
+        session_id = kwargs.get("session_id")
+        system_msg, gemini_messages = self._convert_messages(
+            messages, session_id=session_id
+        )
+
+        config = self._build_generate_config(kwargs, system_msg)
+
+        tools = self._convert_tools(kwargs.get("tools", []))
+        if tools:
+            config["tools"] = tools
+        
+        response = await client.aio.models.generate_content_stream(
+            model=model_id, 
+            contents=gemini_messages, 
+            config=config
+        )
+        
+        full_content = ""
+        has_calls = False
+        # Each function call gets its own index: the downstream accumulator
+        # keys calls by index, so parallel calls sharing index 0 would be
+        # merged into one.
+        call_index = 0
+        block_reason = None
+        async for chunk in response:
+            delta = ""
+            reasoning = None
+            tool_calls = None
+            
+            if chunk.candidates:
+                candidate = chunk.candidates[0]
+                if candidate.content and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if hasattr(part, "text") and part.text: 
+                            delta += part.text
+                            full_content += part.text
+                        elif hasattr(part, "thought") and part.thought:
+                            reasoning = part.thought
+                        elif hasattr(part, "function_call") and part.function_call:
+                            has_calls = True
+                            call = part.function_call
+                            if tool_calls is None:
+                                tool_calls = []
+                            tool_calls.append({
+                                "index": call_index, 
+                                "id": f"call_{os.urandom(4).hex()}", 
+                                "type": "function",
+                                "function": {"name": call.name, "arguments": json.dumps(call.args)}
+                            })
+                            call_index += 1
+            else:
+                feedback = getattr(chunk, "prompt_feedback", None)
+                reason = getattr(feedback, "block_reason", None) if feedback is not None else None
+                if reason:
+                    block_reason = getattr(reason, "name", None) or str(reason)
+            
+            usage = normalize_gemini_usage(
+                chunk.usage_metadata,
+                response_id=getattr(chunk, "response_id", None),
+            )
+
+            # Emit reasoning, text and tool_calls as *separate* chunks so
+            # consumers don't have to special-case mixed chunks (and so a
+            # consumer that treats a reasoning-bearing chunk as
+            # reasoning-only cannot accidentally drop text or tool_calls).
+            if reasoning:
+                yield StreamChunk(
+                    delta="",
+                    reasoning=reasoning,
+                    event_type="reasoning",
+                    usage=None,
+                    finish_reason=None,
+                )
+
+            if delta or tool_calls:
+                yield StreamChunk(
+                    delta=delta,
+                    tool_calls=tool_calls,
+                    event_type="text",
+                    usage=usage,
+                    finish_reason=None,
+                )
+            elif usage:
+                # Surface usage even when the chunk carried only reasoning or
+                # only usage metadata.
+                yield StreamChunk(delta="", usage=usage, finish_reason=None)
+        
+        if "Action: Called tool" in full_content:
+            parsed = self._parse_react_text(full_content)
+            if parsed:
+                has_calls = True
+                yield StreamChunk(delta="", tool_calls=parsed, finish_reason=None)
+        
+        if block_reason and not full_content and not has_calls:
+            # A safety block returns no candidates at all; surface the reason
+            # instead of letting the runner treat it as an empty response and
+            # retry (the message matches the runner's content-policy classifier).
+            raise RuntimeError(
+                f"Gemini content filter triggered: prompt blocked ({block_reason})"
+            )
+        
+        yield StreamChunk(delta="", finish_reason="tool-calls" if has_calls else "stop")
+
+    def _convert_tools(self, aegisops_tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Clean and convert tools for Gemini"""
+        if not aegisops_tools:
+            return []
+            
+        def clean_schema(obj):
+            if not isinstance(obj, dict):
+                if isinstance(obj, list):
+                    return [clean_schema(item) for item in obj]
+                return obj
+            res = {}
+            for k, v in obj.items():
+                if k.lower() in ["additional_properties", "additionalproperties"]:
+                    continue
+                if k.lower() == "anyof":
+                    # JSON Schema spells it "anyOf"; Gemini has no union
+                    # support, so collapse to the first alternative.
+                    if isinstance(v, list) and len(v) > 0:
+                        return clean_schema(v[0])
+                    continue
+                res[k] = clean_schema(v)
+            return res
+
+        function_declarations = []
+        for tool in aegisops_tools:
+            if "function" not in tool:
+                continue
+            func = tool["function"]
+            params = clean_schema(func.get("parameters", {"type": "object", "properties": {}}))
+            function_declarations.append({
+                "name": func["name"], 
+                "description": func.get("description", ""), 
+                "parameters": params
+            })
+        return [{"function_declarations": function_declarations}]
+
+    async def embed(self, text: str, model: Optional[str] = None, **kwargs) -> List[float]:
+        """Generate embedding with error handling"""
+        client = self._get_client()
+        model = model or "models/text-embedding-004"
+        try:
+            result = await client.aio.models.embed_content(model=model, content=text, **kwargs)
+            return result.embeddings[0].values
+        except Exception as e:
+            log.error("provider.google.embed_failed", {"error": str(e), "model": model})
+            raise
+    
+    async def embed_batch(self, texts: List[str], model: Optional[str] = None, batch_size: Optional[int] = 100, **kwargs) -> List[List[float]]:
+        """Generate batch embeddings with error handling"""
+        client = self._get_client()
+        model = model or "models/text-embedding-004"
+        all_embeddings = []
+        try:
+            for i in range(0, len(texts), batch_size):
+                batch = texts[i:i + batch_size]
+                result = await client.aio.models.embed_content(model=model, content=batch, **kwargs)
+                for embedding in result.embeddings:
+                    all_embeddings.append(embedding.values)
+            return all_embeddings
+        except Exception as e:
+            log.error("provider.google.embed_batch_failed", {"error": str(e), "model": model})
+            raise
+    
+    def get_embedding_models(self) -> List[str]:
+        return ["models/text-embedding-004", "models/embedding-001"]

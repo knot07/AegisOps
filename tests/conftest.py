@@ -1,0 +1,259 @@
+"""
+Pytest configuration and global fixtures
+"""
+
+import importlib.metadata
+import os
+from pathlib import Path
+
+import pytest
+
+_RELIABILITY_INHERITED_HOME = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+
+# The suite runs on the runtime's own SQLite backend: a backend chosen by the
+# developer's shell (or by a persisted choice under a real home directory)
+# must not switch it. Set before aegisops is imported, which reads it once.
+os.environ["AEGISOPS_DB_BACKEND"] = "sqlite"
+for _name in ("AEGISOPS_DB_DSN", "AEGISOPS_DB_DSN_FILE"):
+    os.environ.pop(_name, None)
+
+
+_installed_entry_points = importlib.metadata.entry_points
+
+
+def _core_entry_points(**params):
+    """``importlib.metadata.entry_points`` without other packages' ``aegisops.*`` entries.
+
+    A development venv may have an optional extension package installed next to
+    Core. Its ``aegisops.plugins`` / ``aegisops.plugins.critical`` / ``aegisops.cli``
+    entry points would load while these tests build an app or import the CLI and
+    replace Core behaviour (workspace layout, identity, licensing, commands), so
+    the suite would test that package instead of Core, which Core's CI never has.
+    Tests of entry-point loading install their own fakes over this one.
+    """
+    kept = importlib.metadata.EntryPoints(
+        entry_point
+        for entry_point in _installed_entry_points()
+        if not entry_point.group.startswith("aegisops.")
+        or entry_point.dist is None
+        or entry_point.dist.name == "aegisops"
+    )
+    return kept.select(**params) if params else kept
+
+
+_API_KEY_MARKERS = {
+    "requires_anthropic_key": ("ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY not set"),
+    "requires_openai_key": ("OPENAI_API_KEY", "OPENAI_API_KEY not set"),
+    "requires_threatbook_key": ("THREATBOOK_API_KEY", "THREATBOOK_API_KEY not set"),
+    "requires_google_key": ("GOOGLE_API_KEY", "GOOGLE_API_KEY not set"),
+    "requires_glm_key": ("GLM_API_KEY", "GLM_API_KEY not set"),
+}
+
+
+def pytest_configure(config):
+    """Configure custom markers"""
+    config.addinivalue_line(
+        "markers", "integration: mark test as integration test (may require external services)"
+    )
+    config.addinivalue_line(
+        "markers", "slow: mark test as slow running (>30s per test)"
+    )
+    config.addinivalue_line(
+        "markers",
+        "live: mark test as requiring live services "
+        "(set AEGISOPS_LIVE_TEST=1 and start dev server to enable)"
+    )
+    for marker_name, (_, reason) in _API_KEY_MARKERS.items():
+        config.addinivalue_line("markers", f"{marker_name}: skip if {reason}")
+    # Before collection: importing aegisops.cli.main already loads CLI extensions.
+    importlib.metadata.entry_points = _core_entry_points
+
+
+def pytest_unconfigure(config):
+    importlib.metadata.entry_points = _installed_entry_points
+
+
+def pytest_runtest_setup(item):
+    """Auto-skip tests whose required API keys are not set."""
+    for marker_name, (env_var, reason) in _API_KEY_MARKERS.items():
+        if item.get_closest_marker(marker_name) and not os.getenv(env_var):
+            pytest.skip(reason)
+
+
+@pytest.fixture(autouse=True)
+def _home_honors_env(monkeypatch):
+    """Make ``Path.home()`` follow the ``HOME`` env var on every platform.
+
+    Many suites isolate their filesystem by ``monkeypatch.setenv("HOME", ...)``
+    and then rely on production code that resolves ``Path.home() / ".aegisops"``
+    (hub installs, plugin roots, the WebUI contract store, ...). That works on
+    Linux CI, where ``Path.home()`` honors ``$HOME`` — but on Windows
+    ``Path.home()`` reads ``%USERPROFILE%`` and ignores ``HOME`` entirely, so
+    those tests silently leak into (and assert against) the *real* user home.
+
+    This autouse fixture patches ``pathlib.Path.home`` to honor ``HOME`` (then
+    ``USERPROFILE``) at call time, aligning Windows with Linux CI. It is
+    behavior-preserving when ``HOME`` already points at the real home (the
+    default), so tests that never touch ``HOME`` see no change.
+    """
+    def _home_text():
+        candidate = os.environ.get("HOME") or os.environ.get("USERPROFILE")
+        # The acceptance runner opts into a disposable fallback home. Preserve
+        # any more specific HOME override made by a test's own fixture.
+        fallback = os.environ.get("AEGISOPS_RELIABILITY_TEST_HOME")
+        if fallback and candidate == _RELIABILITY_INHERITED_HOME:
+            return fallback
+        return candidate
+
+    def _home() -> Path:
+        candidate = _home_text()
+        if candidate:
+            return Path(candidate)
+        return Path(os.path.expanduser("~"))
+
+    monkeypatch.setattr(Path, "home", staticmethod(_home))
+
+    # ``Path.home()`` covers explicit home lookups, but ``~``/``~user`` tilde
+    # expansion goes through ``os.path.expanduser`` (and ``Path.expanduser``),
+    # which on Windows keys off ``%USERPROFILE%``/``%HOMEDRIVE%%HOMEPATH%`` and
+    # likewise ignores ``HOME``. Route a bare ``~`` / ``~/...`` through the same
+    # ``HOME``-aware root so tilde-based tests are hermetic too. Anything else
+    # (``~otheruser``) falls back to the real implementation untouched.
+    _real_expanduser = os.path.expanduser
+
+    def _expanduser(path):
+        text = os.fspath(path)
+        # Only rewrite plain ``str`` tilde paths; leave bytes and ``~user``
+        # forms to the real implementation so we never change its type
+        # contract or raise on a bytes path.
+        if isinstance(text, str):
+            home = _home_text()
+            if home and (text == "~" or text.startswith("~/") or text.startswith("~\\")):
+                return home + text[1:]
+        return _real_expanduser(path)
+
+    monkeypatch.setattr(os.path, "expanduser", _expanduser)
+
+
+@pytest.fixture(autouse=True)
+async def _cleanup_runtime_singletons_after_test():
+    """Best-effort runtime cleanup to prevent cross-test thread leaks.
+
+    Several code paths lazily initialize singleton stores backed by
+    ``aiosqlite`` worker threads. If a test exits without closing them,
+    pytest can hang at interpreter shutdown while waiting for non-daemon
+    threads. Keep cleanup centralized here so individual tests do not need
+    bespoke teardown blocks.
+    """
+    yield
+
+    # Close workflow store first because it owns its own long-lived
+    # connection in addition to the shared storage layer.
+    try:
+        from aegisops.workflow.store import WorkflowStore
+
+        await WorkflowStore.close()
+    except Exception:
+        pass
+
+    # Session listing can also open the independent channel-binding database.
+    try:
+        from aegisops.channel.inbound.session_binding import close_binding_db
+
+        await close_binding_db()
+    except Exception:
+        pass
+
+    # Then run storage shutdown (idempotent when not initialized).
+    try:
+        from aegisops.storage.storage import Storage
+
+        await Storage.shutdown()
+    except Exception:
+        pass
+
+    # Output limits raised after a cut-off are process-wide; keep one test's
+    # raised or rejected limit out of the next test's requests.
+    try:
+        from aegisops.provider import output_limits
+
+        output_limits.reset()
+    except Exception:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _reset_log_retention_handover():
+    """Give the logger its own cleanup back after every test.
+
+    Starting the CLI or the server hands log cleanup to data retention for the
+    rest of the process (``preload_log_retention``); a test that does so would
+    otherwise leave later tests' loggers deleting nothing, whatever they expect.
+    """
+    yield
+    from aegisops.utils.log import set_log_cleanup_managed, set_log_retention_days_override
+
+    set_log_cleanup_managed(False)
+    set_log_retention_days_override(None)
+
+
+@pytest.fixture(autouse=True)
+def _restore_log_output():
+    """Give the logger its output back after every test.
+
+    Invoking a CLI command initialises logging to the day's file
+    (``Log.init(print=False)``); left that way, every later test's log lines
+    go to that file and a test reading them from stderr sees nothing.
+    """
+    from aegisops.utils.log import Log
+
+    fields = ("_writer", "_error_writer", "_log_file", "_log_dir_path", "_log_date", "_level")
+    before = {name: getattr(Log, name, None) for name in fields}
+    yield
+    with Log._state_lock:
+        for name in ("_writer", "_error_writer"):
+            current = getattr(Log, name, None)
+            if current is not None and current is not before[name]:
+                try:
+                    current.close()
+                except Exception:
+                    pass
+        for name, value in before.items():
+            setattr(Log, name, value)
+
+
+@pytest.fixture(autouse=True)
+def _default_source_deploy_mode(monkeypatch):
+    """Run the updater as a plain source install unless a test opts into another mode.
+
+    ``aegisops.updater.deploy.detect_deploy_mode`` takes a runtime root carrying a
+    ``config/deployment.json`` descriptor at its word (a *managed* release
+    package refuses in-place upgrades) and treats a container as ``docker``.
+    Developer machines and CI runners in either situation would otherwise flip
+    every updater test into a refusal path, so pin the default to ``source``
+    here; tests covering docker/managed behaviour set ``AEGISOPS_DEPLOY_MODE``
+    themselves (after this fixture) and clear the detection cache.
+    """
+    from aegisops.updater.deploy import detect_deploy_mode
+
+    if not os.environ.get("AEGISOPS_DEPLOY_MODE"):
+        monkeypatch.setenv("AEGISOPS_DEPLOY_MODE", "source")
+    detect_deploy_mode.cache_clear()
+    yield
+    detect_deploy_mode.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_runtime_root_from_shell(monkeypatch):
+    """Drop a ``AEGISOPS_ROOT`` (and its sibling overrides) inherited from the shell.
+
+    Suites isolate the runtime tree by ``monkeypatch.setenv("HOME", tmp)`` and
+    expect the plugin root / config dir / data dir to follow ``~/.aegisops``.
+    Those paths now resolve from ``AEGISOPS_ROOT`` first, so a developer shell
+    that exports it (e.g. to drive a test instance) would make dozens of
+    HOME-isolated tests read the *real* instance's plugins and config.
+    Tests that need a runtime root set it themselves; this fixture runs before
+    per-directory conftests (``tests/server/conftest.py`` sets its own root).
+    """
+    for name in ("AEGISOPS_ROOT", "AEGISOPS_CONFIG_DIR", "AEGISOPS_DATA_DIR", "AEGISOPS_WORKSPACE_DIR"):
+        monkeypatch.delenv(name, raising=False)

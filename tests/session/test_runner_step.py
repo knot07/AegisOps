@@ -1,0 +1,4222 @@
+"""
+Tests for SessionRunner internals in aegisops/session/runner.py
+
+Covers:
+- _agent_declares_tool(): tool declaration filtering
+- _exception_to_error_dict(): exception to error dict conversion
+- _build_callable_tool_schema(): excluded tools filter
+- RunnerCallbacks dataclass
+- ToolCall / StepResult dataclasses
+- SessionRunner construction and abort behavior (from existing tests)
+"""
+
+import httpcore
+import httpx
+import pytest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch, AsyncMock
+
+import aegisops.session.runner as runner_mod
+from aegisops.provider.sdk.anthropic import AnthropicProvider
+from aegisops.session.message import (
+    Message,
+    MessageRole,
+    PartTime,
+    ReasoningPart,
+    ToolPart,
+    ToolStateRunning,
+    UserMessageInfo,
+)
+from aegisops.session.runner import (
+    RunnerCallbacks,
+    SessionRunner,
+    StepResult,
+    ToolCall,
+)
+from aegisops.session.streaming.tool_accumulator import StreamToolArgumentsTruncatedError
+from aegisops.session.prompt import (
+    SessionPrompt,
+    SystemPromptBlock,
+    TurnPromptContext,
+    get_prompt_aegisops_config_guard,
+)
+from aegisops.session.prompt_strings import PROMPT_MAX_STEPS
+from aegisops.session.session import Session, SessionInfo
+from aegisops.tool.registry import ToolCategory, ToolInfo
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _make_session(session_id="ses_runner_test"):
+    return SessionInfo.model_construct(
+        id=session_id,
+        slug="test",
+        project_id="proj_runner",
+        directory="/tmp",
+        title="Runner Test",
+    )
+
+
+def _make_agent(name="rex", tools=None):
+    agent = MagicMock()
+    agent.name = name
+    agent.tools = tools
+    agent.skills = []
+    agent.prompt_profile = "standard"
+    return agent
+
+
+def _make_runner(session_id="ses_runner_test"):
+    session = _make_session(session_id)
+    return SessionRunner(session=session)
+
+
+def _make_callable_schema_result(*tool_names):
+    return SimpleNamespace(
+        tool_infos=[SimpleNamespace(name=name) for name in tool_names],
+        metadata={},
+    )
+
+
+# ---------------------------------------------------------------------------
+# ToolCall dataclass
+# ---------------------------------------------------------------------------
+
+class TestToolCallDataclass:
+    def test_basic_creation(self):
+        tc = ToolCall(id="call_001", name="bash", arguments={"command": "ls"})
+        assert tc.id == "call_001"
+        assert tc.name == "bash"
+        assert tc.arguments == {"command": "ls"}
+
+    def test_empty_arguments(self):
+        tc = ToolCall(id="call_002", name="noop", arguments={})
+        assert tc.arguments == {}
+
+
+# ---------------------------------------------------------------------------
+# StepResult dataclass
+# ---------------------------------------------------------------------------
+
+class TestStepResult:
+    def test_stop_action(self):
+        result = StepResult(action="stop", content="All done")
+        assert result.action == "stop"
+        assert result.content == "All done"
+        assert result.tool_calls == []
+        assert result.error is None
+
+    def test_continue_with_tool_calls(self):
+        tc = ToolCall(id="c1", name="bash", arguments={})
+        result = StepResult(action="continue", tool_calls=[tc])
+        assert len(result.tool_calls) == 1
+
+    def test_error_action(self):
+        result = StepResult(action="error", error="LLM failed")
+        assert result.error == "LLM failed"
+
+
+class TestToolLoopGuard:
+    def test_halts_after_three_exact_tool_only_steps(self):
+        runner = _make_runner("ses_runner_tool_loop_exact")
+        result = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="c1", name="echo_tool", arguments={"text": "loop"})],
+        )
+
+        first = runner._update_tool_loop_guard(result, last_user_id="user-1")
+        second = runner._update_tool_loop_guard(result, last_user_id="user-1")
+        third = runner._update_tool_loop_guard(result, last_user_id="user-1")
+
+        assert first["action"] == "allow"
+        assert second["action"] == "warn"
+        assert third["action"] == "halt"
+        assert third["reason"] == "repeated_exact_tool_call"
+        assert third["count"] == 3
+
+    def test_allows_same_tool_streak_with_varying_args(self):
+        runner = _make_runner("ses_runner_tool_loop_same_tool")
+        decision = None
+
+        for idx in range(1, 9):
+            decision = runner._update_tool_loop_guard(
+                StepResult(
+                    action="continue",
+                    tool_calls=[ToolCall(id=f"c{idx}", name="echo_tool", arguments={"text": f"loop-{idx}"})],
+                ),
+                last_user_id="user-1",
+            )
+
+        assert decision is not None
+        assert decision["action"] == "allow"
+        assert runner._get_tool_loop_guard_state(last_user_id="user-1")["exact_count"] == 1
+
+    def test_resets_after_text_response(self):
+        runner = _make_runner("ses_runner_tool_loop_reset")
+        tool_only = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="c1", name="echo_tool", arguments={"text": "loop"})],
+        )
+
+        runner._update_tool_loop_guard(tool_only, last_user_id="user-1")
+        warned = runner._update_tool_loop_guard(tool_only, last_user_id="user-1")
+        reset = runner._update_tool_loop_guard(
+            StepResult(action="stop", content="done"),
+            last_user_id="user-1",
+        )
+        restarted = runner._update_tool_loop_guard(tool_only, last_user_id="user-1")
+
+        assert warned["action"] == "warn"
+        assert reset["action"] == "allow"
+        assert restarted["action"] == "allow"
+        assert runner._get_tool_loop_guard_state(last_user_id="user-1")["exact_count"] == 1
+
+    def test_allows_four_identical_successful_sleep_turns(self):
+        runner = _make_runner("ses_runner_successful_sleep")
+        for index in range(4):
+            result = StepResult(
+                action="continue",
+                tool_calls=[ToolCall(id=f"sleep-{index}", name="sleep", arguments={"timeout_s": 60})],
+                _successful_sleep=True,
+            )
+            assert runner._update_tool_loop_guard(result, last_user_id="user-1")["action"] == "allow"
+        assert runner._get_tool_loop_guard_state(last_user_id="user-1")["exact_count"] == 0
+        assert runner._should_warn_about_tool_loop(last_user_id="user-1") is False
+
+    def test_successful_sleep_resets_previous_streak_and_warning(self):
+        runner = _make_runner("ses_runner_sleep_resets_guard")
+        repeated_tool = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="echo", name="echo_tool", arguments={"text": "loop"})],
+        )
+        runner._update_tool_loop_guard(repeated_tool, last_user_id="user-1")
+        assert runner._update_tool_loop_guard(repeated_tool, last_user_id="user-1")["action"] == "warn"
+        assert runner._should_warn_about_tool_loop(last_user_id="user-1") is True
+
+        decision = runner._update_tool_loop_guard(StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="sleep", name="sleep", arguments={"timeout_s": 60})],
+            _successful_sleep=True,
+        ), last_user_id="user-1")
+
+        assert decision["action"] == "allow"
+        assert runner._should_warn_about_tool_loop(last_user_id="user-1") is False
+        state = runner._get_tool_loop_guard_state(last_user_id="user-1")
+        assert state["exact_count"] == 0
+        assert state["last_signature"] == ""
+        assert runner._update_tool_loop_guard(repeated_tool, last_user_id="user-1")["action"] == "allow"
+        assert state["exact_count"] == 1
+
+    @pytest.mark.parametrize("tool_name,successful_sleep", [("sleep", False), ("echo_tool", True)])
+    def test_does_not_exempt_unsuccessful_sleep_or_other_tools(self, tool_name, successful_sleep):
+        runner = _make_runner("ses_runner_sleep_guard_failures")
+        result = StepResult(
+            action="continue",
+            tool_calls=[ToolCall(id="call", name=tool_name, arguments={})],
+            _successful_sleep=successful_sleep,
+        )
+        decisions = [runner._update_tool_loop_guard(result, last_user_id="user-1") for _ in range(3)]
+        assert [decision["action"] for decision in decisions] == ["allow", "warn", "halt"]
+
+
+# ---------------------------------------------------------------------------
+# RunnerCallbacks dataclass
+# ---------------------------------------------------------------------------
+
+class TestRunnerCallbacks:
+    def test_all_defaults_none(self):
+        cb = RunnerCallbacks()
+        assert cb.on_step_start is None
+        assert cb.on_step_end is None
+        assert cb.on_text_delta is None
+        assert cb.on_reasoning_delta is None
+        assert cb.on_tool_start is None
+        assert cb.on_tool_end is None
+        assert cb.on_permission_request is None
+        assert cb.on_error is None
+        assert cb.event_publish_callback is None
+
+    def test_set_callbacks(self):
+        async def my_callback(x):
+            pass
+
+        cb = RunnerCallbacks(on_text_delta=my_callback, on_error=my_callback)
+        assert cb.on_text_delta is my_callback
+        assert cb.on_error is my_callback
+        assert cb.on_step_start is None
+
+
+# ---------------------------------------------------------------------------
+# _agent_declares_tool()
+# ---------------------------------------------------------------------------
+
+class TestAgentDeclaresTool:
+    def test_agent_with_explicit_tools_allows_declared_tools(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex", tools=["bash", "read"])
+        assert runner._agent_declares_tool(agent, "bash") is True
+        assert runner._agent_declares_tool(agent, "read") is True
+        assert runner._agent_declares_tool(agent, "any_tool") is False
+
+    def test_agent_without_tools_defaults_to_deny(self):
+        runner = _make_runner()
+        agent = _make_agent(name="plan", tools=None)
+        assert runner._agent_declares_tool(agent, "bash") is False
+
+    def test_agent_with_empty_tools_allows_nothing(self):
+        runner = _make_runner()
+        agent = _make_agent(name="explore", tools=[])
+        assert runner._agent_declares_tool(agent, "bash") is False
+
+    def test_non_rex_agent_defaults_to_deny(self):
+        runner = _make_runner()
+        agent = _make_agent(name="custom_agent", tools=None)
+        # Without an explicit tools list, only always-load tools remain available.
+        assert runner._agent_declares_tool(agent, "read") is False
+
+
+# ---------------------------------------------------------------------------
+# _exception_to_error_dict()
+# ---------------------------------------------------------------------------
+
+class TestExceptionToErrorDict:
+    def test_basic_exception(self):
+        runner = _make_runner()
+        exc = ValueError("something went wrong")
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "ValueError"
+        assert "something went wrong" in result["data"]["message"]
+
+    def test_rate_limit_exception_is_retryable(self):
+        runner = _make_runner()
+        exc = Exception("429 Too Many Requests - rate limit exceeded")
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+
+    def test_overloaded_exception_is_retryable(self):
+        runner = _make_runner()
+        exc = Exception("Provider is overloaded, please retry")
+        result = runner._exception_to_error_dict(exc)
+        assert result["data"]["isRetryable"] is True
+
+    def test_timeout_exception_is_retryable(self):
+        runner = _make_runner()
+        exc = Exception("Connection timed out after 30s")
+        result = runner._exception_to_error_dict(exc)
+        assert result["data"]["isRetryable"] is True
+
+    def test_connection_error_exception_is_retryable(self):
+        runner = _make_runner()
+        exc = Exception("Connection error.")
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    def test_stream_tool_arguments_truncated_exception_is_not_retryable(self):
+        runner = _make_runner()
+        exc = StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+        result = runner._exception_to_error_dict(exc)
+
+        assert result["name"] == "StreamToolArgumentsTruncatedError"
+        assert result["data"]["isRetryable"] is False
+        assert result["data"]["streamToolArgumentsTruncated"] is True
+        assert result["data"]["toolCallID"] == "call_trunc"
+        assert result["data"]["toolName"] == "write"
+
+    def test_incomplete_chunked_read_exception_is_retryable_connection_error(self):
+        runner = _make_runner()
+        exc = Exception(
+            "peer closed connection without sending complete message body "
+            "(incomplete chunked read)"
+        )
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ReadError("", request=httpx.Request("GET", "https://example.test")),
+            httpx.RemoteProtocolError(
+                "",
+                request=httpx.Request("GET", "https://example.test"),
+            ),
+            httpcore.ReadError(),
+            httpcore.RemoteProtocolError(),
+        ],
+    )
+    def test_empty_transport_exception_is_retryable_connection_error(self, exc):
+        runner = _make_runner()
+
+        result = runner._exception_to_error_dict(exc)
+
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["isConnectionError"] is True
+        assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+        assert result["data"]["exceptionType"] == type(exc).__name__
+
+    def test_wrapped_transport_exception_is_retryable_connection_error(self):
+        runner = _make_runner()
+        transport_error = httpcore.ReadError()
+        exc = RuntimeError("stream failed")
+        exc.__cause__ = transport_error
+
+        result = runner._exception_to_error_dict(exc)
+
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["isConnectionError"] is True
+        assert result["data"]["exceptionType"] == "RuntimeError"
+        assert result["data"]["transportExceptionType"] == "ReadError"
+
+    def test_empty_non_transport_exception_is_not_retryable(self):
+        runner = _make_runner()
+
+        result = runner._exception_to_error_dict(RuntimeError())
+
+        assert result["name"] == "RuntimeError"
+        assert result["data"].get("isRetryable") is not True
+
+    def test_exception_with_status_code_429(self):
+        runner = _make_runner()
+        exc = Exception("Rate limited")
+        exc.status_code = 429
+        result = runner._exception_to_error_dict(exc)
+        assert result["name"] == "APIError"
+        assert result["data"]["statusCode"] == 429
+        assert result["data"]["isRetryable"] is True
+
+    def test_exception_with_status_code_400_not_retryable(self):
+        runner = _make_runner()
+        exc = Exception("Bad request")
+        exc.status_code = 400
+        result = runner._exception_to_error_dict(exc)
+        assert result["data"]["isRetryable"] is False
+
+    def test_exception_with_status_code_500_retryable(self):
+        runner = _make_runner()
+        exc = Exception("Internal server error")
+        exc.status_code = 500
+        result = runner._exception_to_error_dict(exc)
+        assert result["data"]["isRetryable"] is True
+
+    def test_exception_with_response_headers(self):
+        runner = _make_runner()
+        exc = Exception("Rate limited")
+        exc.status_code = 429
+        exc.response = MagicMock()
+        exc.response.headers = {"retry-after-ms": "5000"}
+        result = runner._exception_to_error_dict(exc)
+        assert result["data"]["responseHeaders"]["retry-after-ms"] == "5000"
+
+    def test_generic_exception_name_preserved(self):
+        runner = _make_runner()
+        exc = RuntimeError("Something happened")
+        result = runner._exception_to_error_dict(exc)
+        assert "message" in result["data"]
+
+
+# ---------------------------------------------------------------------------
+# _build_callable_tool_schema(): excluded tools filter
+# ---------------------------------------------------------------------------
+
+class TestBuildTools:
+    @pytest.mark.asyncio
+    async def test_excludes_invalid_tool(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+
+        invalid_tool = ToolInfo(
+            name="invalid",
+            description="invalid",
+            category=ToolCategory.SYSTEM,
+            native=True,
+            enabled=True,
+        )
+        bash_tool = ToolInfo(
+            name="bash",
+            description="Execute bash",
+            category=ToolCategory.CODE,
+            native=True,
+            enabled=True,
+        )
+
+        with patch(
+            "aegisops.session.runner.ToolRegistry.list_tools",
+            return_value=[invalid_tool, bash_tool],
+        ):
+            tools = await runner._build_callable_tool_schema(agent)
+
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "invalid" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_build_callable_tool_schema_reuses_cached_schema(self):
+        runner = _make_runner("ses_runner_cache")
+        agent = _make_agent(name="rex")
+        schema_calls = 0
+
+        class _Schema:
+            def to_json_schema(self):
+                nonlocal schema_calls
+                schema_calls += 1
+                return {"type": "object", "properties": {"path": {"type": "string"}}}
+
+        tool_info = SimpleNamespace(
+            name="read",
+            description="Read a file",
+            get_schema=lambda: _Schema(),
+            provider_version=None,
+        )
+
+        with patch.object(
+            runner,
+            "_list_callable_tool_infos_for_turn",
+            new=AsyncMock(return_value=([tool_info], {"enabledToolCount": 1})),
+        ), patch.object(
+            runner,
+            "_publish_turn_tools_event",
+            new=AsyncMock(),
+        ):
+            tools_first = await runner._build_callable_tool_schema(agent)
+            tools_second = await runner._build_callable_tool_schema(agent)
+
+        assert schema_calls == 1
+        assert tools_first == tools_second
+        assert tools_first is not tools_second
+        assert tools_first[0]["function"]["name"] == "read"
+
+    @pytest.mark.asyncio
+    async def test_excludes_noop_tool(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+
+        noop_tool = ToolInfo(
+            name="_noop",
+            description="noop",
+            category=ToolCategory.SYSTEM,
+            native=True,
+            enabled=True,
+        )
+        real_tool = ToolInfo(
+            name="read",
+            description="Read a file",
+            category=ToolCategory.FILE,
+            native=True,
+            enabled=True,
+        )
+
+        with patch(
+            "aegisops.session.runner.ToolRegistry.list_tools",
+            return_value=[noop_tool, real_tool],
+        ):
+            tools = await runner._build_callable_tool_schema(agent)
+
+        tool_names = [t["function"]["name"] for t in tools]
+        assert "_noop" not in tool_names
+
+    @pytest.mark.asyncio
+    async def test_disabled_tools_excluded(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+
+        disabled_tool = ToolInfo(
+            name="disabled_tool",
+            description="disabled",
+            category=ToolCategory.SYSTEM,
+            native=True,
+            enabled=False,
+        )
+
+        with patch(
+            "aegisops.session.runner.ToolRegistry.list_tools",
+            return_value=[disabled_tool],
+        ):
+            tools = await runner._build_callable_tool_schema(agent)
+
+        assert tools == []
+
+    @pytest.mark.asyncio
+    async def test_tool_format_is_function_type(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex", tools=["bash"])
+
+        tool_info = ToolInfo(
+            name="bash",
+            description="Execute bash commands",
+            category=ToolCategory.CODE,
+            native=True,
+            enabled=True,
+        )
+
+        with patch(
+            "aegisops.session.runner.SessionRunner._list_callable_tool_infos_for_turn",
+            AsyncMock(return_value=([tool_info], {"enabledToolCount": 1})),
+        ):
+            tools = await runner._build_callable_tool_schema(agent)
+
+        assert len(tools) == 1
+        assert tools[0]["type"] == "function"
+        assert tools[0]["function"]["name"] == "bash"
+        assert tools[0]["function"]["description"] == "Execute bash commands"
+
+    @pytest.mark.asyncio
+    async def test_build_tools_reflects_latest_selector_result(self):
+        runner = _make_runner("ses_tools_selector_refresh")
+        agent = _make_agent(name="rex")
+
+        tool_v1 = ToolInfo(
+            name="bash",
+            description="Execute bash commands",
+            category=ToolCategory.CODE,
+            native=True,
+            enabled=True,
+        )
+        tool_v2 = ToolInfo(
+            name="read",
+            description="Read file contents",
+            category=ToolCategory.FILE,
+            native=True,
+            enabled=True,
+        )
+
+        selector_mock = AsyncMock(side_effect=[
+            ([tool_v1], {"enabledToolCount": 3}),
+            ([tool_v2], {"enabledToolCount": 3}),
+        ])
+        with patch.object(SessionRunner, "_list_callable_tool_infos_for_turn", selector_mock):
+            tools1 = await runner._build_callable_tool_schema(agent, [])
+            tools2 = await runner._build_callable_tool_schema(agent, [])
+
+        assert [tool["function"]["name"] for tool in tools1] == ["bash"]
+        assert [tool["function"]["name"] for tool in tools2] == ["read"]
+        assert selector_mock.await_count == 2
+
+    def test_prompt_tool_names_from_schema_uses_loaded_tool_names(self):
+        runner = _make_runner()
+
+        prompt_tool_names = runner._get_prompt_tool_names_from_schema([
+            {"type": "function", "function": {"name": "memory_search"}},
+            {"type": "function", "function": {"name": "bash"}},
+            {"type": "function", "function": {"name": "bash"}},
+            {"type": "function", "function": {}},
+            {"type": "other"},
+        ])
+
+        assert prompt_tool_names == ("bash", "memory_search")
+
+    @pytest.mark.asyncio
+    async def test_build_tools_calls_selector_for_each_runner_instance(self):
+        shared_cache = {}
+        session = _make_session("ses_tools_runner_instances")
+        runner1 = SessionRunner(session=session, static_cache=shared_cache)
+        runner2 = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+
+        selected_tool = ToolInfo(
+            name="bash",
+            description="Execute bash commands",
+            category=ToolCategory.CODE,
+            native=True,
+            enabled=True,
+        )
+
+        selector_mock = AsyncMock(return_value=([selected_tool], {"enabledToolCount": 3}))
+        with patch.object(SessionRunner, "_list_callable_tool_infos_for_turn", selector_mock):
+            tools1 = await runner1._build_callable_tool_schema(agent, [])
+            tools2 = await runner2._build_callable_tool_schema(agent, [])
+
+        assert tools1 == tools2
+        assert selector_mock.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_build_tools_uses_selector_results_and_emits_event(self):
+        runner = _make_runner()
+        event_callback = AsyncMock()
+        runner.callbacks.event_publish_callback = event_callback
+        agent = _make_agent(name="rex")
+
+        selected_tool = ToolInfo(
+            name="read",
+            description="Read file contents",
+            category=ToolCategory.FILE,
+            native=True,
+            enabled=True,
+        )
+
+        with patch.object(
+            SessionRunner,
+            "_list_callable_tool_infos_for_turn",
+            AsyncMock(return_value=(
+                [selected_tool],
+                {"enabledToolCount": 3},
+            )),
+        ):
+            tools = await runner._build_callable_tool_schema(agent, [])
+
+        assert [tool["function"]["name"] for tool in tools] == ["read"]
+        event_callback.assert_awaited_once()
+        assert event_callback.await_args.args[0] == "turn.tools_selected"
+        assert event_callback.await_args.args[1]["enabledToolCount"] == 3
+
+    @pytest.mark.asyncio
+    async def test_build_tools_refreshes_skill_description_from_enabled_skills(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+        skill_tool = ToolInfo(
+            name="skill_load",
+            description="Original skill description",
+            category=ToolCategory.SYSTEM,
+            native=True,
+            enabled=True,
+        )
+
+        with patch.object(
+            SessionRunner,
+            "_list_callable_tool_infos_for_turn",
+            AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
+        ), patch(
+            "aegisops.skill.skill.Skill.list_enabled",
+            AsyncMock(return_value=[SimpleNamespace(name="agent-builder")]),
+        ), patch(
+            "aegisops.tool.skill.skill_load.build_description",
+            return_value="Refreshed skill description",
+        ):
+            tools = await runner._build_callable_tool_schema(agent, [])
+
+        assert tools[0]["function"]["name"] == "skill_load"
+        assert tools[0]["function"]["description"] == "Original skill description"
+
+
+class TestBuildSystemPrompts:
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_accepts_legacy_context_factories(self):
+        sandbox_mock = AsyncMock(return_value="legacy sandbox prompt")
+        channel_mock = AsyncMock(return_value="legacy channel prompt")
+        device_mock = AsyncMock(return_value="legacy device prompt")
+
+        with (
+            patch.object(
+                SessionPrompt,
+                "_is_builtin_system_subagent_session",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "aegisops.session.prompt.SystemPrompt.custom",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses_legacy_prompt_context",
+                session_directory="/tmp",
+                agent_name="rex",
+                agent_prompt="agent prompt",
+                provider_id="openai",
+                model_id="gpt-5",
+                tool_revision=3,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: "legacy tool catalog",
+                device_asset_prompt_factory=device_mock,
+                device_revision=5,
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "legacy tool catalog" in combined
+        assert "legacy device prompt" in combined
+        assert "legacy sandbox prompt" in combined
+        assert "legacy channel prompt" in combined
+        sandbox_mock.assert_awaited_once()
+        channel_mock.assert_awaited_once()
+        device_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_reuses_loop_static_cache(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_cache")
+        runner1 = SessionRunner(session=session, static_cache=shared_cache)
+        runner2 = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+        turn_context = TurnPromptContext(
+            sandbox_context="sandbox prompt",
+            channel_context="channel prompt",
+            tool_catalog="tool catalog",
+            device_asset_hint="device prompt",
+            tool_revision=1,
+            device_revision=7,
+        )
+
+        with (
+            patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("aegisops.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner1.provider_id,
+                model_id=runner1.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=turn_context,
+            )
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner2.provider_id,
+                model_id=runner2.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=turn_context,
+            )
+
+        assert prompts1 == prompts2
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_orders_stable_prefix_before_runtime_tail(self):
+        session = _make_session("ses_prompts_order")
+        runner = SessionRunner(session=session)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+        memory_bootstrap_data = {
+            "instructions": "memory guidance",
+            "main_memory": {
+                "path": "MEMORY.md",
+                "content": "remembered context",
+                "inject": True,
+            },
+        }
+        with (
+            patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch.object(SessionPrompt, "_build_tool_guidance_prompt", return_value="tool protocol"),
+            patch("aegisops.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=(
+                    "bash",
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
+                memory_bootstrap_data=memory_bootstrap_data,
+                turn_context=TurnPromptContext(
+                    tool_catalog="tool catalog",
+                    device_asset_hint="device prompt",
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    additional_context="additional prompt",
+                    text_tool_catalog="text tool catalog",
+                    tool_results_reminder="tool results reminder",
+                    repeated_tool_calls_reminder="tool loop reminder",
+                    device_revision=3,
+                ),
+            )
+
+        assert prompts == [
+            "provider prompt",
+            get_prompt_aegisops_config_guard().strip(),
+            "tool protocol",
+            "memory guidance",
+            "agent prompt",
+            "## MEMORY.md\n\nremembered context",
+            "tool catalog",
+            "device prompt",
+            "env prompt",
+            "custom prompt",
+            "sandbox prompt",
+            "channel prompt",
+            "runtime prompt",
+            "additional prompt",
+            "text tool catalog",
+            "tool results reminder",
+            "tool loop reminder",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_rebuilds_when_tool_revision_changes(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_revision")
+        runner = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt v1"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+        with (
+            patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("aegisops.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog v1",
+                    device_asset_hint="device prompt",
+                    tool_revision=1,
+                    device_revision=1,
+                ),
+            )
+            agent.prompt = "agent prompt v2"
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog v2",
+                    device_asset_hint="device prompt",
+                    tool_revision=2,
+                    device_revision=1,
+                ),
+            )
+
+        assert prompts1 != prompts2
+        assert "agent prompt v1" in prompts1
+        assert "agent prompt v2" in prompts2
+        assert "tool catalog v1" in prompts1
+        assert "tool catalog v2" in prompts2
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_reuses_static_device_hint_cache(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_static_device_hint")
+        runner = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+        turn_context = TurnPromptContext(
+            sandbox_context="sandbox prompt",
+            channel_context="channel prompt",
+            tool_catalog="tool catalog",
+            device_asset_hint="device prompt",
+            tool_revision=1,
+        )
+
+        with (
+            patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("aegisops.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=turn_context,
+            )
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=turn_context,
+            )
+
+        assert prompts1 == prompts2
+        assert "device prompt" in prompts1
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_rebuilds_when_device_revision_changes(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_device_revision")
+        runner = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+        with (
+            patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("aegisops.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog",
+                    device_asset_hint="device prompt v1",
+                    tool_revision=1,
+                    device_revision=1,
+                ),
+            )
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(
+                    sandbox_context="sandbox prompt",
+                    channel_context="channel prompt",
+                    tool_catalog="tool catalog",
+                    device_asset_hint="device prompt v2",
+                    tool_revision=1,
+                    device_revision=2,
+                ),
+            )
+
+        assert prompts1 != prompts2
+        assert "device prompt v1" in prompts1
+        assert "device prompt v2" in prompts2
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_rebuilds_when_agent_prompt_changes(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_agent_prompt")
+        runner = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt v1"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+
+        with (
+            patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("aegisops.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
+            )
+            agent.prompt = "agent prompt v2"
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
+            )
+
+        assert prompts1 != prompts2
+        assert "agent prompt v1" in prompts1
+        assert "agent prompt v2" in prompts2
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_includes_filesystem_memory_guidance(self):
+        session = _make_session("ses_prompts_memory_guidance")
+        runner = SessionRunner(
+            session=session,
+            memory_bootstrap_data={
+                "instructions": "memory guidance",
+                "main_memory": {
+                    "path": "MEMORY.md",
+                    "content": "remembered context",
+                    "inject": True,
+                },
+            },
+        )
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        with patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=(
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+            )
+
+        assert "memory guidance" in "\n\n".join(prompts)
+        assert "## MEMORY.md\n\nremembered context" in prompts
+        assert prompts.index("memory guidance") < prompts.index("agent prompt")
+        assert prompts.index("memory guidance") < prompts.index("## MEMORY.md\n\nremembered context")
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_does_not_add_bash_guidance_prompt_when_bash_loaded(self):
+        session = _make_session("ses_prompts_no_bash_guidance")
+        runner = SessionRunner(session=session)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        with patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("bash", "read"),
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "## Bash Tool Guidance" not in combined
+        assert "PowerShell syntax" not in combined
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_skips_memory_guidance_without_management_tools(self):
+        session = _make_session("ses_prompts_no_memory_guidance")
+        runner = SessionRunner(
+            session=session,
+            memory_bootstrap_data={
+                "instructions": "memory guidance",
+                "main_memory": {
+                    "path": "MEMORY.md",
+                    "content": "remembered context",
+                    "inject": True,
+                },
+            },
+        )
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        with patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
+             patch("aegisops.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+            )
+
+        assert "memory guidance" not in "\n\n".join(prompts)
+        assert "## MEMORY.md\n\nremembered context" in prompts
+
+    @pytest.mark.asyncio
+    async def test_filesystem_memory_guidance_depends_on_tool_names(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_tool_names")
+        runner = SessionRunner(
+            session=session,
+            static_cache=shared_cache,
+            memory_bootstrap_data={
+                "instructions": "memory guidance",
+                "main_memory": None,
+            },
+        )
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+
+        with (
+            patch("aegisops.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("aegisops.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("aegisops.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("aegisops.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
+            prompts_with_memory = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=(
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
+            )
+            prompts_without_memory = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                memory_bootstrap_data=runner._memory_bootstrap_data,
+                static_cache=shared_cache,
+                turn_context=TurnPromptContext(tool_revision=1),
+            )
+
+        assert prompts_with_memory != prompts_without_memory
+        assert "memory guidance" in "\n\n".join(prompts_with_memory)
+        assert "memory guidance" not in "\n\n".join(prompts_without_memory)
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
+
+    def test_build_tool_catalog_prompt_for_rex(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+        agent.mode = "primary"
+
+        with patch(
+            "aegisops.session.runner.SessionRunner._list_catalog_tool_infos",
+            return_value=[ToolInfo(
+                name="plugin_memory",
+                description="Access project memory",
+                category=ToolCategory.CUSTOM,
+                native=False,
+                enabled=True,
+            )],
+        ), patch(
+            "aegisops.agent.toolset.get_all_enabled_builtin_tool_names",
+            return_value=["read", "bash"],
+        ), patch(
+            "aegisops.session.runner.get_always_load_tool_names",
+            return_value={"question", "tool_search"},
+        ), patch(
+            "aegisops.command.direct.format_tools_catalog_summary",
+            return_value="Available Tools (grouped by category):\n\n**custom**\n- plugin_memory: Access project memory",
+        ):
+            prompt = runner._build_tool_catalog_prompt(agent)
+
+        assert prompt is not None
+        assert "Tool Catalog Awareness" in prompt
+        assert "tool_search" in prompt
+        assert "InputValidationError" in prompt
+        assert "select:<name>[,<name>...]" in prompt
+        assert "- plugin_memory: Access project memory" in prompt
+
+    def test_build_tool_catalog_prompt_for_subagent_returns_none(self):
+        runner = _make_runner()
+        agent = _make_agent(name="plan")
+        agent.mode = "subagent"
+
+        prompt = runner._build_tool_catalog_prompt(agent)
+
+        assert prompt is None
+
+    def test_build_tool_catalog_prompt_for_rex_excludes_builtin_and_always_load_tools(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+        agent.mode = "primary"
+        catalog_tools = [
+            ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
+            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="plugin_memory", description="Access project memory", category=ToolCategory.CUSTOM, native=False, enabled=True),
+        ]
+
+        with patch(
+            "aegisops.session.runner.SessionRunner._list_catalog_tool_infos",
+            return_value=catalog_tools,
+        ), patch(
+            "aegisops.agent.toolset.get_all_enabled_builtin_tool_names",
+            return_value=["bash", "read"],
+        ), patch(
+            "aegisops.session.runner.get_always_load_tool_names",
+            return_value={"question", "tool_search"},
+        ), patch(
+            "aegisops.command.direct.format_tools_catalog_summary",
+            side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
+        ) as formatter_mock:
+            prompt = runner._build_tool_catalog_prompt(agent)
+
+        assert prompt is not None
+        assert "plugin_memory" in prompt
+        assert "bash" not in prompt
+        assert "question" not in prompt
+        formatter_tools = formatter_mock.call_args.kwargs["tools"]
+        assert [tool.name for tool in formatter_tools] == ["plugin_memory"]
+
+    def test_build_tool_catalog_prompt_for_rex_excludes_device_tools(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+        agent.mode = "primary"
+        catalog_tools = [
+            ToolInfo(
+                name="tdp_event_list",
+                description="List TDP events",
+                category=ToolCategory.CUSTOM,
+                native=False,
+                enabled=True,
+                source="device",
+            ),
+            ToolInfo(
+                name="plugin_memory",
+                description="Access project memory",
+                category=ToolCategory.CUSTOM,
+                native=False,
+                enabled=True,
+            ),
+        ]
+
+        with patch(
+            "aegisops.session.runner.SessionRunner._list_catalog_tool_infos",
+            return_value=catalog_tools,
+        ), patch(
+            "aegisops.agent.toolset.get_all_enabled_builtin_tool_names",
+            return_value=["bash", "read"],
+        ), patch(
+            "aegisops.session.runner.get_always_load_tool_names",
+            return_value={"question", "tool_search"},
+        ), patch(
+            "aegisops.command.direct.format_tools_catalog_summary",
+            side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
+        ) as formatter_mock:
+            prompt = runner._build_tool_catalog_prompt(agent)
+
+        assert prompt is not None
+        assert "plugin_memory" in prompt
+        assert "tdp_event_list" not in prompt
+        formatter_tools = formatter_mock.call_args.kwargs["tools"]
+        assert [tool.name for tool in formatter_tools] == ["plugin_memory"]
+
+    def test_list_catalog_tool_infos_returns_full_catalog_for_rex(self):
+        runner = _make_runner()
+        agent = _make_agent(name="rex")
+        agent.mode = "primary"
+        shell_tool = ToolInfo(
+            name="bash",
+            description="Run commands",
+            category=ToolCategory.CODE,
+            native=True,
+            enabled=True,
+        )
+        helper_tool = ToolInfo(
+            name="read",
+            description="Read file contents",
+            category=ToolCategory.FILE,
+            native=True,
+            enabled=True,
+        )
+
+        with patch(
+            "aegisops.session.runner.list_tool_catalog_infos",
+            return_value=[shell_tool, helper_tool],
+        ):
+            infos = runner._list_catalog_tool_infos(agent)
+
+        assert [tool.name for tool in infos] == ["bash", "read"]
+
+    def test_list_catalog_tool_infos_filters_subagent_boundaries(self):
+        runner = _make_runner()
+        agent = _make_agent(name="plan")
+        agent.mode = "subagent"
+        agent.tools = ["read"]
+        tool_infos = [
+            ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
+            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
+            ToolInfo(name="websearch", description="Search web", category=ToolCategory.BROWSER, native=True, enabled=True),
+        ]
+
+        with patch("aegisops.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+            infos = runner._list_catalog_tool_infos(agent)
+
+        assert [tool.name for tool in infos] == ["read"]
+
+    def test_list_catalog_tool_infos_keeps_always_load_tools_for_subagent(self):
+        runner = _make_runner()
+        agent = _make_agent(name="plan")
+        agent.mode = "subagent"
+        agent.tools = ["read"]
+        tool_infos = [
+            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
+            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
+        ]
+
+        with patch("aegisops.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+            infos = runner._list_catalog_tool_infos(agent)
+
+        assert [tool.name for tool in infos] == ["read", "question", "tool_search"]
+
+    def test_list_catalog_tool_infos_does_not_fall_back_to_full_catalog_when_tools_missing(self):
+        runner = _make_runner()
+        agent = _make_agent(name="plan", tools=None)
+        agent.mode = "subagent"
+        tool_infos = [
+            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
+            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
+        ]
+
+        with patch("aegisops.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+            infos = runner._list_catalog_tool_infos(agent)
+
+        assert [tool.name for tool in infos] == ["question", "tool_search"]
+
+
+class TestMiniMaxTextToolMode:
+    def test_disabled_for_custom_threatbook_minimax(self):
+        session = _make_session("ses_minimax_mode")
+        runner = SessionRunner(
+            session=session,
+            provider_id="custom-threatbook-internal",
+            model_id="minimax:MiniMax-M2.5",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
+    def test_disabled_for_custom_tb_inner_minimax(self):
+        session = _make_session("ses_minimax_mode_tb_inner")
+        runner = SessionRunner(
+            session=session,
+            provider_id="custom-tb-inner",
+            model_id="minimax:MiniMax-M2.7",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
+    def test_disabled_for_threatbook_cn_llm_minimax(self):
+        session = _make_session("ses_minimax_threatbook_cn_llm")
+        runner = SessionRunner(
+            session=session,
+            provider_id="threatbook-cn-llm",
+            model_id="minimax-m2.7",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
+    def test_disabled_for_threatbook_cn_llm_minimax_case_insensitive(self):
+        session = _make_session("ses_minimax_threatbook_cn_llm_case")
+        runner = SessionRunner(
+            session=session,
+            provider_id="ThreatBook-CN-LLM",
+            model_id="MiniMax-M2.5",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
+    def test_disabled_for_threatbook_cn_llm_non_minimax(self):
+        # Other models routed through the same gateway (e.g. qwen, GLM) keep
+        # the standard OpenAI native function-calling path.
+        session = _make_session("ses_threatbook_cn_llm_qwen")
+        runner = SessionRunner(
+            session=session,
+            provider_id="threatbook-cn-llm",
+            model_id="qwen3.6-plus",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
+    def test_disabled_for_other_models(self):
+        session = _make_session("ses_normal_mode")
+        runner = SessionRunner(
+            session=session,
+            provider_id="anthropic",
+            model_id="claude-sonnet-4-5-20250929",
+        )
+        assert runner._should_use_text_tool_call_mode() is False
+
+    @pytest.mark.asyncio
+    async def test_system_prompts_add_minimax_native_tool_guidance(self):
+        session = _make_session("ses_minimax_prompt")
+        runner = SessionRunner(
+            session=session,
+            provider_id="custom-tb-inner",
+            model_id="minimax:MiniMax-M2.5",
+        )
+
+        with patch("aegisops.session.prompt.SystemPrompt.environment", AsyncMock(return_value=["env prompt"])), \
+             patch("aegisops.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name="rex",
+                agent_prompt=None,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                prompt_tool_names=("read",),
+                use_text_tool_call_mode=runner._should_use_text_tool_call_mode(),
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "native API tool-calling" in combined
+        assert "prefer actually invoking the needed tool" in combined
+        assert "Misleading behavior" in combined
+        assert "<minimax:tool_call>" not in combined
+
+    def test_build_text_tool_call_catalog_prompt(self):
+        session = _make_session("ses_minimax_catalog")
+        runner = SessionRunner(
+            session=session,
+            provider_id="custom-threatbook-internal",
+            model_id="minimax:MiniMax-M2.5",
+        )
+        prompt = runner._build_text_tool_call_catalog_prompt([
+            {
+                "type": "function",
+                "function": {
+                    "name": "onesec_ops",
+                    "description": "Grouped OneSEC ops tool",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "action": {"type": "string", "description": "OPS action"},
+                            "cur_page": {"type": "integer", "description": "Page number"},
+                            "page_size": {"type": "integer", "description": "Page size"},
+                        },
+                        "required": ["action"],
+                    },
+                },
+            }
+        ])
+        assert "onesec_ops" in prompt
+        assert "authoritative callable schema" in prompt
+        assert "Parameter names must match exactly" in prompt
+        assert "action" in prompt
+        assert "cur_page" in prompt
+        assert "required" in prompt
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_uses_structured_anthropic_system_blocks(monkeypatch):
+    runner = SessionRunner(
+        session=_make_session("ses_anthropic_system_blocks"),
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+    )
+    message = SimpleNamespace(id="msg_user", role="user", content="hello")
+
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hello"))
+
+    prompt_blocks = [
+        SystemPromptBlock(name, content, cache_scope)
+        for name, content, cache_scope in (
+            ("provider", "provider prompt", "global"),
+            ("agent", "agent prompt", "agent"),
+            ("context", "context prompt", "workspace"),
+            ("sandbox", "sandbox prompt", "runtime_tail"),
+            ("runtime", "runtime prompt", "runtime_tail"),
+            ("reminder", "reminder prompt", "runtime_tail"),
+        )
+    ]
+
+    chat_messages = await runner._to_chat_messages([message], prompt_blocks)
+
+    assert chat_messages[0].role == "system"
+    assert isinstance(chat_messages[0].content, list)
+    assert chat_messages[0].content[2]["cache_control"] == {"type": "ephemeral"}
+    assert "cache_control" not in chat_messages[0].content[3]
+    assert chat_messages[0].content[-1]["text"] == "reminder prompt"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_keeps_joined_system_prompt_for_openai(monkeypatch):
+    runner = SessionRunner(
+        session=_make_session("ses_openai_system_blocks"),
+        provider_id="openai",
+        model_id="gpt-5",
+    )
+    message = SimpleNamespace(id="msg_user", role="user", content="hello")
+
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hello"))
+
+    chat_messages = await runner._to_chat_messages(
+        [message],
+        ["provider prompt", "agent prompt"],
+    )
+
+    assert chat_messages[0].role == "system"
+    assert chat_messages[0].content == "provider prompt\n\nagent prompt"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_change():
+    session = await Session.create(
+        project_id="test_runner_chat_cache_invalidation",
+        directory="/tmp/runner-cache",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="starting",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+
+    first_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(first_messages) == 1
+    assert first_messages[0].role == "assistant"
+    assert first_messages[0].tool_calls is None
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_cache_fix",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    second_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(second_messages) == 2
+    assert second_messages[0].role == "assistant"
+    assert second_messages[0].tool_calls is not None
+    assert second_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert second_messages[1].role == "tool"
+    assert second_messages[1].tool_call_id == "call_cache_fix"
+    assert second_messages[1].content == "Error: Tool execution was interrupted"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_excludes_ignored_assistant_text():
+    session = await Session.create(
+        project_id="test_runner_ignored_command_output",
+        directory="/tmp/runner-ignored-command-output",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="Available Tools\n" + ("x" * 400),
+        providerID="builtin",
+        modelID="command",
+        ignored=True,
+    )
+    runner = SessionRunner(session=session, static_cache={})
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert chat_messages == []
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
+    session = await Session.create(
+        project_id="test_runner_reasoning_replay",
+        directory="/tmp/runner-reasoning",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Need to call the tool first.",
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_reasoning_replay",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].role == "assistant"
+    assert chat_messages[0].reasoning == "Need to call the tool first."
+    assert chat_messages[0].tool_calls is not None
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert chat_messages[1].role == "tool"
+    assert chat_messages[1].tool_call_id == "call_reasoning_replay"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_provider_reasoning_fields_from_metadata(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_reasoning_metadata_replay",
+        directory="/tmp/runner-reasoning-metadata",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "alibaba"
+    runner.model_id = "qwen3.6-plus"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Need to call the tool first.",
+            metadata={
+                "reasoningContent": "Need to call the tool first.",
+                "reasoningSource": "native_reasoning_content",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_reasoning_metadata",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].reasoning == "Need to call the tool first."
+    assert chat_messages[0].reasoning_content == "Need to call the tool first."
+    assert chat_messages[0].reasoning_source == "native_reasoning_content"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_redacted_thinking",
+        directory="/tmp/runner-redacted-thinking",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_redacted_thinking",
+                "redactedThinkingData": "opaque_blob",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_redacted_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
+        {"type": "redacted_thinking", "data": "opaque_blob"}
+    ]
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_signed_anthropic_thinking_blocks(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_signed_thinking",
+        directory="/tmp/runner-signed-thinking",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Plan before tool use.",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_thinking",
+                "thinkingSignature": "sig123",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_signed_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
+        {
+            "type": "thinking",
+            "thinking": "Plan before tool use.",
+            "signature": "sig123",
+        }
+    ]
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_restores_unsigned_anthropic_thinking_blocks(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_unsigned_thinking",
+        directory="/tmp/runner-unsigned-thinking",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Unsigned plan before tool use.",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_thinking",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_unsigned_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
+        {
+            "type": "thinking",
+            "thinking": "Unsigned plan before tool use.",
+        }
+    ]
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+
+
+@pytest.mark.asyncio
+async def test_runner_history_round_trip_formats_anthropic_payload(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_anthropic_payload_roundtrip",
+        directory="/tmp/runner-anthropic-payload-roundtrip",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="Done",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "anthropic"
+    runner.model_id = "claude-sonnet-4-6"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(interleaved=None)
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Plan before tool use.",
+            metadata={
+                "reasoningField": "thinking",
+                "reasoningSource": "anthropic_thinking",
+                "thinkingSignature": "sig123",
+            },
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_signed_reasoning",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+    formatted = AnthropicProvider._format_messages_anthropic(chat_messages[:1])
+
+    assert formatted[0]["content"][0] == {
+        "type": "thinking",
+        "thinking": "Plan before tool use.",
+        "signature": "sig123",
+    }
+    assert formatted[0]["content"][1] == {"type": "text", "text": "Done"}
+    assert formatted[0]["content"][2]["type"] == "tool_use"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_prefers_provider_specific_interleaved_resolution(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_provider_specific_interleaved",
+        directory="/tmp/runner-provider-interleaved",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "deepseek"
+    runner.model_id = "shared-model"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: (
+            SimpleNamespace(
+                capabilities=SimpleNamespace(
+                    interleaved={
+                        "field": "reasoning_content",
+                        "echo": "tool_calls",
+                        "placeholder": " ",
+                        "cross_provider_policy": "placeholder",
+                    }
+                )
+            )
+            if provider_id == "deepseek" and model_id == "shared-model"
+            else None
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "get_model",
+        lambda _model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_details",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Prior provider chain of thought",
+            time=PartTime(start=1),
+        ),
+    )
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ToolPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            callID="call_provider_specific_interleaved",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "continue"},
+                time={"start": 1},
+            ),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 2
+    assert chat_messages[0].reasoning_content == " "
+    assert chat_messages[0].reasoning_details is None
+    assert chat_messages[0].reasoning_source == "placeholder"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_keeps_reasoning_only_assistant_message(monkeypatch):
+    session = await Session.create(
+        project_id="test_runner_reasoning_only_assistant",
+        directory="/tmp/runner-reasoning-only",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+    )
+    runner = SessionRunner(session=session, static_cache={})
+    runner.provider_id = "alibaba"
+    runner.model_id = "qwen3.6-plus"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+
+    await Message.add_part(
+        session.id,
+        assistant_message.id,
+        ReasoningPart(
+            sessionID=session.id,
+            messageID=assistant_message.id,
+            text="Need to think before replying.",
+            time=PartTime(start=1),
+        ),
+    )
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert len(chat_messages) == 1
+    assert chat_messages[0].role == "assistant"
+    assert chat_messages[0].content == ""
+    assert chat_messages[0].reasoning == "Need to think before replying."
+    assert chat_messages[0].reasoning_content == "Need to think before replying."
+    assert chat_messages[0].reasoning_source == "promoted_reasoning"
+
+
+def test_get_queued_user_message_ids_only_marks_newly_queued_turns():
+    runner = _make_runner("ses_runner_queued_users")
+    runner._step = 3
+
+    queued_user_ids = runner._get_queued_user_message_ids([
+        SimpleNamespace(id="msg_100", role="assistant", finish="stop"),
+        SimpleNamespace(id="msg_200", role="user"),
+        SimpleNamespace(id="msg_300", role="user"),
+        SimpleNamespace(id="msg_400", role="user"),
+    ])
+
+    assert queued_user_ids == {"msg_300", "msg_400"}
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_wraps_only_queued_user_messages():
+    session = await Session.create(
+        project_id="test_runner_queued_wrap",
+        directory="/tmp/runner-queued-wrap",
+    )
+    finished_assistant = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="Initial answer",
+    )
+    root_user = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content="Continue fixing the bug",
+    )
+    queued_user = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content="What version is installed?",
+    )
+
+    runner = SessionRunner(session=session, static_cache={})
+    runner._step = 3
+    runner._queued_user_message_ids = {queued_user.id}
+
+    chat_messages = await runner._to_chat_messages(
+        [
+            SimpleNamespace(
+                id=finished_assistant.id,
+                role=MessageRole.ASSISTANT,
+                finish="stop",
+                error=None,
+                compacted=False,
+            ),
+            root_user,
+            queued_user,
+        ],
+        [],
+    )
+
+    user_messages = [message for message in chat_messages if message.role == "user"]
+    assert len(user_messages) == 2
+    assert user_messages[0].content == "Continue fixing the bug"
+    assert isinstance(user_messages[1].content, str)
+    assert user_messages[1].content.startswith("<system-reminder>")
+    assert "What version is installed?" in user_messages[1].content
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypatch):
+    runner = _make_runner("ses_runner_aborted_reasoning_only")
+    runner.provider_id = "alibaba"
+    runner.model_id = "qwen3.6-plus"
+
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "cross_provider_policy": "promote",
+                }
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod.Message,
+        "parts_many",
+        AsyncMock(return_value={"msg_aborted_reasoning_only": [
+            ReasoningPart(
+                sessionID=runner.session.id,
+                messageID="msg_aborted_reasoning_only",
+                text="This should not leak into replay history.",
+                time=PartTime(start=1),
+            )
+        ]}),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_parts_revision", lambda *_args: 1)
+
+    chat_messages = await runner._to_chat_messages(
+        [
+            SimpleNamespace(
+                id="msg_aborted_reasoning_only",
+                role=MessageRole.ASSISTANT,
+                finish="error",
+                error={"name": "MessageAbortedError"},
+                compacted=False,
+            )
+        ],
+        [],
+    )
+
+    assert chat_messages == []
+
+
+def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
+    runner = _make_runner("ses_runner_interleaved_capability_key")
+    runner.provider_id = "deepseek"
+    runner.model_id = "deepseek-v4-pro"
+
+    monkeypatch.setattr(SessionRunner, "_model_supports_vision", lambda self: False)
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model",
+        lambda provider_id, model_id: SimpleNamespace(
+            capabilities=SimpleNamespace(
+                interleaved={
+                    "field": "reasoning_content",
+                    "echo": "tool_calls",
+                    "placeholder": " ",
+                    "cross_provider_policy": "placeholder",
+                }
+            )
+        ),
+    )
+
+    capability_key = runner._provider_capability_key()
+
+    assert "interleaved=" in capability_key
+    assert '"field": "reasoning_content"' in capability_key
+    assert '"cross_provider_policy": "placeholder"' in capability_key
+
+
+@pytest.mark.asyncio
+async def test_process_step_creates_assistant_message_with_provider_and_model(monkeypatch):
+    runner = _make_runner("ses_runner_provider_model")
+    runner.callbacks = RunnerCallbacks(
+        on_text_delta=AsyncMock(),
+        on_error=AsyncMock(),
+    )
+
+    last_user = UserMessageInfo(
+        id="msg_user_runner",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, permission=None)
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    captured_kwargs = {}
+
+    async def fake_create(*args, **kwargs):
+        captured_kwargs.update(kwargs)
+        raise RuntimeError("assistant message created")
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", fake_create)
+
+    with pytest.raises(RuntimeError, match="assistant message created"):
+        await runner._process_step([last_user], last_user)
+
+    assert captured_kwargs["model_id"] == runner.model_id
+    assert captured_kwargs["provider_id"] == runner.provider_id
+
+
+@pytest.mark.asyncio
+async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypatch):
+    runner = _make_runner("ses_runner_queued_cache_invalidation")
+    runner._step = 3
+    runner._static_cache["chat_context_cache"] = {
+        "latest": {
+            "system_cache_key": "cached",
+            "message_signatures": [],
+            "chat_messages": [{"role": "user", "content": "stale"}],
+        }
+    }
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    root_user = SimpleNamespace(id="msg_200", role="user")
+    last_user = UserMessageInfo(
+        id="msg_300",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    messages = [
+        SimpleNamespace(id="msg_100", role="assistant", finish="stop"),
+        root_user,
+        last_user,
+    ]
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_queued_cache")
+
+    async def fake_to_chat_messages(_messages, _system_prompts):  # noqa: ANN001
+        assert "chat_context_cache" not in runner._static_cache
+        assert runner._queued_user_message_ids == {last_user.id}
+        return [SimpleNamespace(role="user", content="queued")]
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_to_chat_messages", fake_to_chat_messages)
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="queued"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done")),
+    )
+
+    result = await runner._process_step(messages, last_user)
+
+    assert result.action == "stop"
+    assert result.content == "done"
+
+
+def _truncated_write_stream_provider(text_before: str, partial_args: str):
+    """Provider whose stream ends mid-way through a write call's arguments.
+
+    Mirrors a gateway dropping the stream: no finish_reason at all, and the
+    JSON arguments stop inside the ``content`` string.
+    """
+
+    class _Provider:
+        def is_configured(self):
+            return True
+
+        async def chat_stream(self, **_kwargs):  # noqa: ANN003
+            yield SimpleNamespace(delta=text_before, finish_reason=None)
+            step = max(1, len(partial_args) // 4)
+            for index in range(0, len(partial_args), step):
+                yield SimpleNamespace(
+                    delta="",
+                    finish_reason=None,
+                    tool_calls=[{
+                        "index": 0,
+                        "id": "call_write_cut" if index == 0 else None,
+                        "type": "function",
+                        "function": {
+                            "name": "write" if index == 0 else None,
+                            "arguments": partial_args[index:index + step],
+                        },
+                    }],
+                )
+
+    return _Provider()
+
+
+def _patch_step_environment(monkeypatch, runner, provider, agent):
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[runner_mod.ChatMessage(role="user", content="write the doc")]),
+    )
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+
+
+@pytest.mark.asyncio
+async def test_process_step_keeps_truncated_tool_call_step_and_continues(monkeypatch):
+    """A cut-off write must not wipe the step and replay the whole request.
+
+    Regression: the step used to be deleted (``message.removed``) and the
+    identical request replayed up to five times; every replay regenerated the
+    same oversized call, got cut at the same place, and the visible progress
+    vanished each time.
+    """
+    runner = _make_runner("ses_runner_truncated_tool_call_continue")
+    events = []
+
+    async def capture_event(event_type, data):
+        events.append((event_type, data))
+
+    runner.callbacks = RunnerCallbacks(
+        on_error=AsyncMock(),
+        event_publish_callback=capture_event,
+    )
+    last_user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "write the CRM doc",
+        agent="rex",
+        model={"providerID": "gateway", "modelID": "gpt-test"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    partial_args = '{"filePath": "/tmp/crm.md", "content": "# AegisOps CRM\\n' + "x" * 400
+    provider = _truncated_write_stream_provider("Now I have the full doc.", partial_args)
+    _patch_step_environment(monkeypatch, runner, provider, agent)
+    call_llm = AsyncMock(wraps=runner._call_llm)
+    monkeypatch.setattr(runner, "_call_llm", call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_llm.await_count == 1, "the truncated request must not be replayed"
+    assert result.action == "continue"
+    assert result.tool_args_truncated is True
+    assert result.error is None
+    runner.callbacks.on_error.assert_not_awaited()
+    assert not any(event_type == "message.removed" for event_type, _ in events)
+
+    assistant = next(
+        msg for msg in await Message.list(runner.session.id)
+        if getattr(msg, "role", None) == "assistant"
+    )
+    assert assistant.finish == "tool-calls"
+    parts = await Message.parts(assistant.id, runner.session.id)
+    assert any(
+        getattr(part, "type", None) == "text"
+        and "Now I have the full doc." in getattr(part, "text", "")
+        for part in parts
+    ), "text produced before the cut must stay visible"
+    tool_parts = [part for part in parts if getattr(part, "type", None) == "tool"]
+    assert len(tool_parts) == 1
+    assert tool_parts[0].state.status == "error"
+    assert "not executed" in tool_parts[0].state.error
+    # Resend with a raised output limit or split; either way not a replay.
+    assert "split the content" in tool_parts[0].state.error.lower()
+
+
+class _CappedGatewayProvider:
+    """A gateway model configured with an 8192-token output limit.
+
+    ``streams`` holds one callable per request; each returns the chunks to
+    stream (or raises to fail the request before any output).
+    """
+
+    def __init__(self, streams):
+        self._streams = list(streams)
+        self.max_tokens_sent = []
+        self._config_models = [
+            SimpleNamespace(id="gpt-test", capabilities=SimpleNamespace(max_tokens=8192)),
+        ]
+
+    def is_configured(self):
+        return True
+
+    async def chat_stream(self, **kwargs):  # noqa: ANN003
+        self.max_tokens_sent.append(kwargs.get("max_tokens"))
+        for chunk in self._streams.pop(0)():
+            yield chunk
+
+
+def _cut_off_write_chunks():
+    partial_args = '{"filePath": "/tmp/crm.md", "content": "# AegisOps CRM\\n' + "x" * 400
+    return [
+        SimpleNamespace(delta="Writing the doc.", finish_reason=None),
+        SimpleNamespace(
+            delta="",
+            finish_reason=None,
+            tool_calls=[{
+                "index": 0,
+                "id": "call_write_cut",
+                "type": "function",
+                "function": {"name": "write", "arguments": partial_args},
+            }],
+        ),
+    ]
+
+
+async def _gateway_step(
+    monkeypatch,
+    session_id,
+    provider,
+    *,
+    context_window=128_000,
+    defer_step_errors=False,
+    prior_truncations=0,
+    prior_truncation_user_id=None,
+):
+    runner = SessionRunner(
+        session=_make_session(session_id),
+        provider_id="gateway",
+        model_id="gpt-test",
+        callbacks=RunnerCallbacks(on_error=AsyncMock()),
+        defer_step_errors=defer_step_errors,
+    )
+    monkeypatch.setattr(
+        runner_mod.Provider,
+        "resolve_model_info",
+        lambda *_args: (context_window, 8192, None),
+    )
+    last_user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "write the CRM doc",
+        agent="rex",
+        model={"providerID": "gateway", "modelID": "gpt-test"},
+    )
+    if prior_truncations:
+        runner._static_cache["tool_args_truncation_guard"] = {
+            "last_user_id": prior_truncation_user_id or last_user.id,
+            "count": prior_truncations,
+        }
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    _patch_step_environment(monkeypatch, runner, provider, agent)
+    monkeypatch.setattr(
+        "aegisops.provider.options._resolve_reasoning_transport",
+        lambda *_args: None,
+    )
+    result = await runner._process_step([last_user], last_user)
+    parts = []
+    for msg in await Message.list(runner.session.id):
+        if getattr(msg, "role", None) == "assistant":
+            parts.extend(await Message.parts(msg.id, runner.session.id))
+    return result, parts
+
+
+@pytest.mark.asyncio
+async def test_cut_off_at_the_output_limit_raises_it_for_the_next_request(monkeypatch):
+    """Root cause of the repeated cut-offs: a gateway model keeps its guessed
+    8192-token output limit, reasoning spends part of it, and a long write
+    call is cut at the same place every time.  After one cut the model gets
+    more room instead of the same limit again."""
+    from aegisops.provider import output_limits
+    from aegisops.provider.options import build_provider_options
+
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    result, parts = await _gateway_step(monkeypatch, "ses_runner_output_limit_raise", provider)
+
+    assert result.tool_args_truncated is True
+    assert provider.max_tokens_sent == [8192]
+    [tool_part] = [part for part in parts if getattr(part, "type", None) == "tool"]
+    assert "output token limit (8192 tokens)" in tool_part.state.error
+    assert "raised to 16384 tokens" in tool_part.state.error
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 16384
+    assert build_provider_options("gateway", "gpt-test")["max_tokens"] == 16384
+
+
+@pytest.mark.asyncio
+async def test_rejected_raised_limit_is_retried_with_the_configured_one(monkeypatch):
+    from aegisops.provider import output_limits
+
+    output_limits.effective_max_tokens("gateway", "gpt-test", 8192)
+    output_limits.raise_max_tokens("gateway", "gpt-test", 16384)
+
+    def rejected():
+        raise RuntimeError(
+            "Error code: 400 - max_tokens is too large: 16384. "
+            "This model supports at most 8192 completion tokens"
+        )
+
+    def answered():
+        return [SimpleNamespace(delta="Done.", finish_reason="stop")]
+
+    provider = _CappedGatewayProvider([rejected, answered])
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+
+    result, parts = await _gateway_step(monkeypatch, "ses_runner_output_limit_rejected", provider)
+
+    assert provider.max_tokens_sent == [16384, 8192]
+    assert result.error is None
+    assert any(
+        getattr(part, "type", None) == "text" and "Done." in getattr(part, "text", "")
+        for part in parts
+    )
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 8192
+    assert output_limits.next_max_tokens("gateway", "gpt-test", 8192) is None
+
+
+def _tool_error(parts):
+    [tool_part] = [part for part in parts if getattr(part, "type", None) == "tool"]
+    return tool_part.state.error
+
+
+@pytest.mark.asyncio
+async def test_output_limit_is_not_raised_past_the_room_the_window_leaves(monkeypatch):
+    """A 40K window leaves 6,000 tokens above the 85% overflow threshold; a
+    larger output limit would let prompt plus output exceed the window."""
+    from aegisops.provider import output_limits
+
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    result, parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_window",
+        provider,
+        context_window=40_000,
+    )
+
+    assert result.tool_args_truncated is True
+    assert "Split the content" in _tool_error(parts)
+    assert "raised" not in _tool_error(parts)
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 8192
+
+
+@pytest.mark.asyncio
+async def test_repeated_cut_off_in_a_turn_is_told_to_split(monkeypatch):
+    """A second cut-off in a row suggests the limit was not the cause, so
+    resending would only use up the turn's consecutive cut-off budget."""
+    from aegisops.provider import output_limits
+
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    result, parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_repeat",
+        provider,
+        prior_truncations=1,
+    )
+
+    assert result.tool_args_truncated is True
+    assert "Split the content" in _tool_error(parts)
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 16384
+
+
+@pytest.mark.asyncio
+async def test_cut_off_counted_for_an_earlier_turn_still_gets_resend(monkeypatch):
+    """A summary or a queued prompt starts a new user turn inside the same
+    run; the previous turn's cut-off must not turn this one's hint into
+    "split"."""
+    provider = _CappedGatewayProvider([_cut_off_write_chunks])
+
+    _result, parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_new_turn",
+        provider,
+        prior_truncations=1,
+        prior_truncation_user_id="msg_user_previous_turn",
+    )
+
+    assert "Send the call again" in _tool_error(parts)
+
+
+def _rejected_before_output(message, status):
+    def rejected():
+        error = RuntimeError(message)
+        error.status_code = status
+        raise error
+
+    return rejected
+
+
+def _answered():
+    return [SimpleNamespace(delta="Done.", finish_reason="stop")]
+
+
+@pytest.mark.parametrize("defer_step_errors", [False, True], ids=["single", "auto"])
+@pytest.mark.asyncio
+async def test_bare_bad_request_for_a_raised_limit_retries_on_the_same_model(
+    monkeypatch,
+    defer_step_errors,
+):
+    """Gateways often reject an oversized max_tokens with a plain 400. Auto
+    mode must retry on the same model with the configured limit rather than
+    fail over."""
+    from aegisops.provider import output_limits
+
+    output_limits.effective_max_tokens("gateway", "gpt-test", 8192)
+    output_limits.raise_max_tokens("gateway", "gpt-test", 16384)
+    provider = _CappedGatewayProvider([_rejected_before_output("Bad Request", 400), _answered])
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+
+    result, parts = await _gateway_step(
+        monkeypatch,
+        f"ses_runner_output_limit_bare_400_{defer_step_errors}",
+        provider,
+        defer_step_errors=defer_step_errors,
+    )
+
+    assert provider.max_tokens_sent == [16384, 8192]
+    assert result.error is None
+    assert getattr(result, "failure", None) is None
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 8192
+
+
+@pytest.mark.asyncio
+async def test_error_after_output_started_keeps_the_raised_limit(monkeypatch):
+    """Once the response has started, the limit was accepted; a later error
+    is something else and must not pin the model back."""
+    from aegisops.provider import output_limits
+
+    output_limits.effective_max_tokens("gateway", "gpt-test", 8192)
+    output_limits.raise_max_tokens("gateway", "gpt-test", 16384)
+
+    def fails_mid_stream():
+        yield SimpleNamespace(delta="Writing", finish_reason=None)
+        raise RuntimeError("Error code: 400 - max_tokens is too large")
+
+    provider = _CappedGatewayProvider([fails_mid_stream])
+
+    result, _parts = await _gateway_step(
+        monkeypatch,
+        "ses_runner_output_limit_mid_stream_error",
+        provider,
+    )
+
+    assert provider.max_tokens_sent == [16384]
+    assert result.error is not None
+    assert output_limits.effective_max_tokens("gateway", "gpt-test", 8192) == 16384
+
+
+@pytest.mark.asyncio
+async def test_process_step_stops_after_consecutive_truncated_tool_calls(monkeypatch):
+    shared_cache = {}
+    last_user = UserMessageInfo(
+        id="msg_user_truncation_guard",
+        sessionID="ses_runner_truncation_guard",
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "gateway", "modelID": "gpt-test"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    truncated = ToolCall(id="call_cut", name="write", arguments={"tool": "write"})
+    step_results = iter([
+        StepResult(action="continue", tool_calls=[truncated], tool_args_truncated=True),
+        # A normal step in between resets the streak.
+        StepResult(action="continue", tool_calls=[ToolCall(id="call_ok", name="read", arguments={})]),
+        StepResult(action="continue", tool_calls=[truncated], tool_args_truncated=True),
+        StepResult(action="continue", tool_calls=[truncated], tool_args_truncated=True),
+        StepResult(action="continue", tool_calls=[truncated], tool_args_truncated=True),
+    ])
+    outcomes = []
+    for index in range(5):
+        runner = SessionRunner(
+            session=_make_session("ses_runner_truncation_guard"),
+            static_cache=shared_cache,
+        )
+        runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+        assistant = SimpleNamespace(id=f"msg_assistant_truncation_guard_{index}")
+        update_mock = AsyncMock(return_value=None)
+        monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+        monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+        monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            runner,
+            "_to_chat_messages",
+            AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+        )
+        monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant))
+        monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+        monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner, "_call_llm", AsyncMock(return_value=next(step_results)))
+
+        result = await runner._process_step([last_user], last_user)
+        outcomes.append((result.action, runner.callbacks.on_error.await_count, update_mock))
+
+    assert [action for action, _, _ in outcomes] == [
+        "continue", "continue", "continue", "continue", "stop",
+    ]
+    assert [errors for _, errors, _ in outcomes] == [0, 0, 0, 0, 1]
+    final_update = outcomes[-1][2].await_args_list[-1]
+    assert final_update.kwargs["finish"] == "error"
+    assert final_update.kwargs["error"]["name"] == "StreamToolArgumentsTruncatedError"
+    assert "3 consecutive steps" in result.error
+
+
+@pytest.mark.asyncio
+async def test_process_step_does_not_retry_truncated_tool_arguments_after_tool_started(monkeypatch):
+    runner = _make_runner("ses_runner_stream_tool_args_no_retry_after_tool")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_no_retry_after_tool",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant = SimpleNamespace(id="msg_assistant_no_retry_after_tool")
+    update_mock = AsyncMock(return_value=None)
+    delete_mock = AsyncMock(return_value=True)
+    call_count = 0
+
+    async def fake_call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        runner._attempt_state.observable_output_started = True
+        runner._attempt_state.tool_execution_started = True
+        raise StreamToolArgumentsTruncatedError(
+            tool_call_id="call_trunc",
+            tool_name="write",
+            finish_reason="length",
+            arguments_len=42,
+            arguments_preview='{"path":',
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "store_part", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant))
+    monkeypatch.setattr(runner_mod.Message, "delete", delete_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 1
+    assert result.action == "stop"
+    assert "truncated" in result.error.lower()
+    delete_mock.assert_not_awaited()
+    runner.callbacks.on_error.assert_awaited_once()
+    assert update_mock.await_args_list[-1].args[1] == assistant.id
+    assert update_mock.await_args_list[-1].kwargs["finish"] == "error"
+
+
+async def _run_deferred_truncation_streak(monkeypatch, *, tool_ran: bool):
+    shared_cache = {}
+    last_user = UserMessageInfo(
+        id="msg_user_stream_tool_args_fallback",
+        sessionID="ses_runner_stream_tool_args_fallback",
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    truncated = StepResult(
+        action="continue",
+        tool_calls=[ToolCall(id="call_cut", name="write", arguments={"tool": "write"})],
+        tool_args_truncated=True,
+    )
+
+    result = None
+    for index in range(3):
+        runner = SessionRunner(
+            session=_make_session("ses_runner_stream_tool_args_fallback"),
+            provider_id="primary",
+            model_id="primary-model",
+            static_cache=shared_cache,
+            defer_step_errors=True,
+            failover_available=True,
+        )
+
+        async def fake_call_llm(*_args, _runner=runner, **_kwargs):
+            _runner._attempt_state.observable_output_started = True
+            _runner._attempt_state.tool_execution_started = tool_ran
+            return truncated
+
+        monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+        monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+        monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            runner,
+            "_to_chat_messages",
+            AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+        )
+        monkeypatch.setattr(
+            runner_mod.Message,
+            "create",
+            AsyncMock(return_value=SimpleNamespace(id=f"msg_assistant_fallback_{index}")),
+        )
+        monkeypatch.setattr(runner_mod.Message, "delete", AsyncMock(return_value=True))
+        monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+        result = await runner._process_step([last_user], last_user)
+        runner_mod.Message.delete.assert_not_awaited()
+    return result
+
+
+@pytest.mark.asyncio
+async def test_deferred_truncation_streak_allows_fallback_when_no_tool_ran(monkeypatch):
+    """Auto failover may hand a step that keeps getting cut off to another
+    candidate (possibly with a larger output limit), as before the change."""
+    result = await _run_deferred_truncation_streak(monkeypatch, tool_ran=False)
+
+    assert result.failure is not None
+    assert result.failure.reason == "stream_truncated"
+    assert result.failure.assistant_message_id == "msg_assistant_fallback_2"
+    assert result.failure.allow_fallback is True
+
+
+@pytest.mark.asyncio
+async def test_deferred_truncation_streak_blocks_fallback_after_a_tool_ran(monkeypatch):
+    result = await _run_deferred_truncation_streak(monkeypatch, tool_ran=True)
+
+    assert result.failure is not None
+    assert result.failure.allow_fallback is False
+
+
+@pytest.mark.asyncio
+async def test_persisting_tool_compaction_invalidates_token_estimate(monkeypatch):
+    """A compacted tool part must not keep its pre-compaction token count.
+
+    The composer meter and the compaction trigger both subtract what cleanup
+    freed since the last model call; a stale cached estimate hid that.
+    """
+    runner = _make_runner("ses_runner_compaction_cache")
+    SessionPrompt._message_token_cache["msg_budget_compacted"] = 12_345
+    part = SimpleNamespace(
+        id="part_budget",
+        state=SimpleNamespace(model_dump=lambda: {"status": "completed"}),
+    )
+    monkeypatch.setattr(runner_mod.Message, "update_part", AsyncMock(return_value=None))
+
+    updated = await runner._persist_tool_compaction([
+        {"dirty": True, "part": part, "message_id": "msg_budget_compacted"},
+    ])
+
+    assert updated == 1
+    assert "msg_budget_compacted" not in SessionPrompt._message_token_cache
+
+
+@pytest.mark.asyncio
+async def test_process_step_limits_connection_error_retries(monkeypatch):
+    runner = _make_runner("ses_runner_connection_error")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_connection_error",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "bailian", "modelID": "deepseek-v4-flash"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_connection_error")
+    update_mock = AsyncMock(return_value=None)
+    warn_log = MagicMock()
+    error_log = MagicMock()
+    call_count = 0
+
+    async def fake_call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        raise Exception("Connection error.")
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+    monkeypatch.setattr(runner_mod.log, "warn", warn_log)
+    monkeypatch.setattr(runner_mod.log, "error", error_log)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 6
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    runner.callbacks.on_error.assert_awaited_with(runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE)
+
+    final_update = update_mock.await_args_list[-1].kwargs
+    assert final_update["finish"] == "error"
+    assert final_update["error"]["data"]["message"] == "Connection error."
+    assert final_update["error"]["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    retry_logs = [
+        call for call in warn_log.call_args_list
+        if call.args and call.args[0] == "runner.step.retry"
+    ]
+    max_retry_logs = [
+        call for call in error_log.call_args_list
+        if call.args and call.args[0] == "runner.step.max_retries_exceeded"
+    ]
+    assert len(retry_logs) == 5
+    assert len(max_retry_logs) == 1
+    assert not any(
+        call.args and call.args[0] == "runner.step.error"
+        for call in [*warn_log.call_args_list, *error_log.call_args_list]
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_step_marks_aborted_llm_message_as_error(monkeypatch):
+    runner = _make_runner("ses_runner_aborted_result")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_aborted_result",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_aborted_result")
+    update_mock = AsyncMock(return_value=None)
+    record_usage_mock = AsyncMock(return_value=None)
+    usage = {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+
+    async def fake_call_llm(*_args, **_kwargs):
+        runner._llm_call_aborted = True
+        return StepResult(
+            action="continue",
+            content="partial answer",
+            tool_calls=[ToolCall(id="call_1", name="read", arguments={})],
+            usage=usage,
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner, "_record_usage_if_available", record_usage_mock)
+    monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    assert result.content == "partial answer"
+    assert any(
+        call.args[1] == assistant_msg.id
+        and call.kwargs.get("finish") == "error"
+        and call.kwargs.get("error", {}).get("name") == "MessageAbortedError"
+        for call in update_mock.await_args_list
+    )
+    assert not any(
+        call.args[1] == assistant_msg.id and call.kwargs.get("finish") in {"stop", "tool-calls"}
+        for call in update_mock.await_args_list
+    )
+    record_usage_mock.assert_awaited_once_with(usage, message_id=assistant_msg.id)
+
+
+@pytest.mark.asyncio
+async def test_call_llm_skips_observability_when_langfuse_inactive(monkeypatch):
+    runner = _make_runner("ses_runner_langfuse_inactive")
+    runner.callbacks = RunnerCallbacks()
+
+    agent = SimpleNamespace(name="rex")
+    assistant_msg = SimpleNamespace(id="msg_assistant_langfuse")
+    provider = MagicMock()
+
+    trace_mock = MagicMock()
+    generation_mock = MagicMock()
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod, "trace_scope", trace_mock)
+    monkeypatch.setattr(runner_mod, "generation_scope", generation_mock)
+
+    result = await runner._call_llm(
+        provider=provider,
+        messages=[runner_mod.ChatMessage(role="system", content="system only")],
+        tools=[],
+        agent=agent,
+        assistant_msg=assistant_msg,
+    )
+
+    assert result.action == "stop"
+    assert result.error == "No valid messages to send to LLM"
+    trace_mock.assert_not_called()
+    generation_mock.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_call_llm_skips_llm_hook_payload_preparation_without_handlers(monkeypatch):
+    runner = _make_runner("ses_runner_no_llm_hooks")
+    runner.callbacks = RunnerCallbacks()
+
+    class _ProviderStub:
+        async def chat_stream(self, **kwargs):  # noqa: ANN003
+            del kwargs
+            yield SimpleNamespace(delta="done", finish_reason="stop")
+
+    user_message = SimpleNamespace(
+        role="user",
+        content="hi",
+        model_dump=MagicMock(side_effect=AssertionError("message serialization should be skipped")),
+    )
+    deep_copy_mock = MagicMock(side_effect=AssertionError("tool deepcopy should be skipped"))
+    run_before_mock = AsyncMock()
+    run_after_mock = AsyncMock()
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.HookPipeline, "has_stage_handlers", AsyncMock(return_value=False))
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_before", run_before_mock)
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_after", run_after_mock)
+    monkeypatch.setattr(runner_mod.copy, "deepcopy", deep_copy_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    result = await runner._call_llm(
+        provider=_ProviderStub(),
+        messages=[user_message],
+        tools=[{"type": "function", "function": {"name": "read"}}],
+        agent=SimpleNamespace(name="rex"),
+        assistant_msg=SimpleNamespace(id="msg_assistant_no_llm_hooks"),
+    )
+
+    assert result.action == "stop"
+    assert result.content == "done"
+    deep_copy_mock.assert_not_called()
+    run_before_mock.assert_not_awaited()
+    run_after_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_provider_missing(monkeypatch):
+    runner = _make_runner("ses_runner_missing_provider_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "missing-provider", "modelID": "missing-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None)
+    events = []
+    callback_errors = []
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    async def on_error(error):
+        callback_errors.append(error)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: None))
+
+    runner.provider_id = "missing-provider"
+    runner.model_id = "missing-model"
+    runner.callbacks = RunnerCallbacks(
+        on_error=on_error,
+        event_publish_callback=publish_event,
+    )
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text_parts = [
+        part for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    ]
+
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "ProviderUnavailableError"
+    assert visible_text_parts
+    assert visible_text_parts[0].text == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert any(event_name == "message.part.updated" for event_name, _payload in events)
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_provider_not_configured(monkeypatch):
+    runner = _make_runner("ses_runner_unconfigured_provider_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "unconfigured-provider", "modelID": "unconfigured-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None)
+    events = []
+    callback_errors = []
+
+    class UnconfiguredProvider:
+        def is_configured(self):
+            return False
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    async def on_error(error):
+        callback_errors.append(error)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: UnconfiguredProvider()))
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+
+    runner.provider_id = "unconfigured-provider"
+    runner.model_id = "unconfigured-model"
+    runner.callbacks = RunnerCallbacks(
+        on_error=on_error,
+        event_publish_callback=publish_event,
+    )
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text_parts = [
+        part for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    ]
+
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "ProviderConfigurationError"
+    assert visible_text_parts
+    assert visible_text_parts[0].text == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert any(event_name == "message.part.updated" for event_name, _payload in events)
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_model_returns_empty_stream(monkeypatch):
+    runner = _make_runner("ses_runner_empty_stream_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "empty-provider", "modelID": "empty-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None, model=None)
+    events = []
+
+    class EmptyProvider:
+        def is_configured(self):
+            return True
+
+        async def chat_stream(self, **kwargs):
+            del kwargs
+            if False:
+                yield None
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: EmptyProvider()))
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+
+    runner.provider_id = "empty-provider"
+    runner.model_id = "empty-model"
+    runner.callbacks = RunnerCallbacks(event_publish_callback=publish_event)
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text = "\n".join(
+        getattr(part, "text", "")
+        for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    )
+
+    assert result.action == "stop"
+    assert "returned an empty response" in result.error
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "EmptyResponseError"
+    assert "returned an empty response" in visible_text
+    assert any(
+        event_name == "message.part.updated"
+        and "returned an empty response" in _payload["part"].get("text", "")
+        for event_name, _payload in events
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(monkeypatch):
+    runner = _make_runner("ses_runner_prompt_guidance_tool_names")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_prompt_guidance",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=["read"])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_prompt_guidance")
+    build_system_prompt_blocks = AsyncMock(return_value=[])
+    tool_schema = [
+        {"type": "function", "function": {"name": "memory_search", "description": "", "parameters": {}}},
+        {"type": "function", "function": {"name": "bash", "description": "", "parameters": {}}},
+    ]
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", build_system_prompt_blocks)
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=tool_schema))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done")),
+    )
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "done"
+    build_system_prompt_blocks.assert_awaited_once()
+    assert build_system_prompt_blocks.await_args.kwargs["prompt_tool_names"] == ("bash", "memory_search")
+    assert isinstance(
+        build_system_prompt_blocks.await_args.kwargs["turn_context"],
+        TurnPromptContext,
+    )
+
+
+@pytest.mark.asyncio
+async def test_process_step_records_usage_after_success(monkeypatch):
+    runner = _make_runner("ses_runner_usage_success")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_usage_success",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_usage_success")
+    update_mock = AsyncMock(return_value=None)
+    record_mock = AsyncMock(return_value=None)
+    usage = {"prompt_tokens": 12, "completion_tokens": 8, "total_tokens": 20}
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done", usage=usage)),
+    )
+    monkeypatch.setattr(runner, "_record_usage_if_available", record_mock)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "done"
+    record_mock.assert_awaited_once_with(usage, message_id=assistant_msg.id)
+    update_mock.assert_any_await(runner.session.id, assistant_msg.id, finish="stop")
+
+
+@pytest.mark.asyncio
+async def test_process_step_passes_resolved_device_hint_into_turn_context(monkeypatch):
+    runner = _make_runner("ses_runner_device_hint_order")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_device_hint_order",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_device_hint_order")
+    build_system_prompt_blocks = AsyncMock(return_value=["provider", "tool catalog awareness", "device hint"])
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", build_system_prompt_blocks)
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    device_hint_mock = AsyncMock(return_value="device hint")
+    monkeypatch.setattr(runner, "_build_device_asset_hint", device_hint_mock)
+    monkeypatch.setattr("aegisops.tool.device.store.device_revision", lambda: 9)
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done")),
+    )
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "done"
+    build_system_prompt_blocks.assert_awaited_once()
+    turn_context = build_system_prompt_blocks.await_args.kwargs["turn_context"]
+    assert turn_context.device_revision == 9
+    assert turn_context.device_asset_hint == "device hint"
+    device_hint_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
+    """Each empty-response attempt records its own usage so that provider
+    charges are not lost when the model returns tokens but no content."""
+    runner = _make_runner("ses_runner_usage_retry")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_usage_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_usage_retry")
+    record_mock = AsyncMock(return_value=None)
+    sleep_mock = AsyncMock(return_value=None)
+    first_usage = {"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6}
+    second_usage = {"prompt_tokens": 9, "completion_tokens": 4, "total_tokens": 13}
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(
+            side_effect=[
+                StepResult(action="stop", content="", usage=first_usage),
+                StepResult(action="stop", content="recovered", usage=second_usage),
+            ]
+        ),
+    )
+    monkeypatch.setattr(runner, "_record_usage_if_available", record_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "recovered"
+    sleep_mock.assert_awaited_once()
+    # Both the empty attempt and the successful attempt must be recorded so
+    # that provider charges are not silently dropped during retries.
+    assert record_mock.await_count == 2
+    record_mock.assert_any_await(first_usage, message_id=assistant_msg.id)
+    record_mock.assert_any_await(second_usage, message_id=assistant_msg.id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["transport", "throttle", "quota", "quota_deferred", "alibaba", "alibaba_exhausted"])
+async def test_process_step_retries_only_transient_provider_errors(monkeypatch, failure):
+    runner = _make_runner("ses_runner_transport_retry")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._defer_step_errors = failure == "quota_deferred"
+    if failure.startswith("alibaba"):
+        runner.provider_id = "alibaba"
+
+    last_user = UserMessageInfo(
+        id="msg_user_transport_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "openai", "modelID": "gpt-5"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_transport_retry")
+    error = httpcore.ReadError() if failure == "transport" else RuntimeError(
+        "429 insufficient_quota" if failure.startswith("quota") else "429 rate limit exceeded"
+    )
+    if failure.startswith("alibaba"):
+        error = type("SdkError", (RuntimeError,), {
+            "status_code": 429,
+            "response": SimpleNamespace(headers={"Retry-After": "90"}),
+        })("429 insufficient_quota")
+    call_llm_mock = AsyncMock(
+        side_effect=[
+            error,
+            StepResult(action="stop", content="recovered"),
+        ]
+    )
+    if failure == "alibaba_exhausted":
+        call_llm_mock.side_effect = [error] * 6
+    sleep_mock = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", call_llm_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+    monkeypatch.setattr(runner, "_ensure_visible_error_text", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_publish_assistant_error_message", AsyncMock())
+
+    result = await runner._process_step([last_user], last_user)
+
+    if failure == "alibaba_exhausted":
+        assert result.error is not None
+        assert result.error_code != "model_quota_exhausted"
+        assert call_llm_mock.await_count == 6
+        assert sleep_mock.await_count == 5
+        return
+    if failure == "alibaba":
+        # Retry-After: 90 is honoured up to the runtime-wide cap that also
+        # bounds the provider cooldown (see SessionRetry.jittered_delay).
+        from aegisops.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
+
+        assert sleep_mock.await_args.args[0] == RETRY_MAX_DELAY_NO_HEADERS
+    if failure.startswith("quota"):
+        assert result.action == "stop"
+        assert result.error_code == "model_quota_exhausted"
+        call_llm_mock.assert_awaited_once()
+        sleep_mock.assert_not_awaited()
+        return
+    assert result.content == "recovered"
+    assert call_llm_mock.await_count == 2
+    sleep_mock.assert_awaited_once()
+    runner.callbacks.on_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_step_does_not_retry_after_tool_execution_started(monkeypatch):
+    runner = _make_runner("ses_runner_tool_side_effect_no_retry")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_tool_side_effect_no_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "openai", "modelID": "gpt-5"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_tool_side_effect_no_retry")
+    call_count = 0
+    sleep_mock = AsyncMock(return_value=None)
+
+    async def _call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        runner._attempt_state.tool_execution_started = True
+        raise httpcore.ReadError()
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner_mod.SessionPrompt,
+        "build_system_prompt_blocks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+    monkeypatch.setattr(runner, "_call_llm", _call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 1
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    sleep_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "defer", "suppressed"),
+    [
+        (httpcore.ReadError(), False, True),
+        (httpcore.ReadError(), True, True),
+        (ValueError("invalid request body"), False, False),
+    ],
+    ids=["retryable", "retryable-deferred", "not-retryable"],
+)
+async def test_process_step_records_why_a_retryable_error_stopped_after_a_tool(
+    monkeypatch, error, defer, suppressed,
+):
+    # INC-BCFF390A: the stored error says the retry was held back because a
+    # tool had already run, so the WebUI can show why the turn stopped.
+    runner = _make_runner("ses_runner_tool_retry_suppressed")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._defer_step_errors = defer
+
+    last_user = UserMessageInfo(
+        id="msg_user_tool_retry_suppressed",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "openai", "modelID": "gpt-5"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_tool_retry_suppressed")
+    update_mock = AsyncMock(return_value=None)
+
+    async def _call_llm(*_args, **_kwargs):
+        runner._attempt_state.tool_execution_started = True
+        raise error
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner_mod.SessionPrompt,
+        "build_system_prompt_blocks",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", _call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    if defer:
+        stored = result.failure.error_data
+        assert result.failure.allow_fallback is False
+    else:
+        stored = update_mock.await_args.kwargs["error"]
+    if suppressed:
+        assert stored["data"]["retrySuppressed"] == "tool_execution_started"
+    else:
+        assert "retrySuppressed" not in stored["data"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", [1000, 1001, 100_000])
+@pytest.mark.parametrize("steps_missing", [True, False], ids=["missing", "none"])
+async def test_process_step_has_no_default_max_steps(monkeypatch, step, steps_missing):
+    runner = _make_runner("ses_runner_default_max_steps")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._step = step
+
+    last_user = UserMessageInfo(
+        id="msg_user_default_max_steps",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", mode="primary", prompt="", tools=["read"])
+    if not steps_missing:
+        agent.steps = None
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_default_max_steps")
+    sentinel_tools = [{"type": "function", "function": {"name": "read", "description": "", "parameters": {}}}]
+    captured = {}
+    warn_mock = MagicMock()
+    monkeypatch.setattr(runner_mod.log, "warn", warn_mock)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=sentinel_tools))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
+        captured["tools"] = tools
+        captured["messages"] = messages
+        return StepResult(action="stop", content="done")
+
+    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    assert captured["tools"] == sentinel_tools
+    assert all(message.content != PROMPT_MAX_STEPS for message in captured["messages"])
+    assert not any(call.args[0] == "runner.max_steps_reached" for call in warn_mock.call_args_list)
+    assert runner.max_steps_reached is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("step", [2, 3, 4])
+async def test_process_step_respects_explicit_agent_steps(monkeypatch, step):
+    runner = _make_runner("ses_runner_explicit_max_steps")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner._step = step
+
+    last_user = UserMessageInfo(
+        id="msg_user_explicit_max_steps",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    agent = SimpleNamespace(name="rex", steps=3, mode="primary", prompt="", tools=["read"])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_explicit_max_steps")
+    sentinel_tools = [{"type": "function", "function": {"name": "read", "description": "", "parameters": {}}}]
+    captured = {}
+    warn_mock = MagicMock()
+    monkeypatch.setattr(runner_mod.log, "warn", warn_mock)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=sentinel_tools))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
+        captured["tools"] = tools
+        captured["messages"] = messages
+        return StepResult(action="stop", content="done")
+
+    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.action == "stop"
+    limit_reached = step >= agent.steps
+    assert captured["tools"] == ([] if limit_reached else sentinel_tools)
+    assert any(message.content == PROMPT_MAX_STEPS for message in captured["messages"]) == limit_reached
+    max_steps_warnings = [
+        call for call in warn_mock.call_args_list if call.args[0] == "runner.max_steps_reached"
+    ]
+    assert len(max_steps_warnings) == int(limit_reached)
+    if limit_reached:
+        assert max_steps_warnings[0].args[1] == {
+            "step": step, "max_steps": agent.steps, "session_id": runner.session.id,
+        }
+    assert runner.max_steps_reached is limit_reached
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "tool_name,successful_sleep,turn_count",
+    [("echo_tool", False, 3), ("sleep", False, 3), ("sleep", True, 4)],
+    ids=["ordinary-tool", "failed-sleep", "successful-sleep"],
+)
+async def test_process_step_tool_loop_guard_across_runner_instances(
+    monkeypatch, tool_name, successful_sleep, turn_count,
+):
+    shared_cache = {}
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    update_mock = AsyncMock(return_value=None)
+    create_mock = AsyncMock(
+        side_effect=[
+            SimpleNamespace(id=f"msg_assistant_tool_loop_{idx}")
+            for idx in range(1, turn_count + 1)
+        ]
+    )
+
+    async def fake_call_llm(self, provider, messages, tools, agent, assistant_msg):  # noqa: ANN001
+        del provider, messages, tools, agent, assistant_msg
+        return StepResult(
+            action="continue",
+            tool_calls=[ToolCall(
+                id="c-loop", name=tool_name,
+                arguments={"timeout_s": 60} if tool_name == "sleep" else {"text": "loop"},
+            )],
+            _successful_sleep=successful_sleep,
+        )
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=SimpleNamespace(
+        name="rex",
+        steps=None,
+        mode="primary",
+        prompt="",
+        tools=[tool_name],
+    )))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", create_mock)
+    monkeypatch.setattr(runner_mod.Message, "update", update_mock)
+    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+
+    last_user = UserMessageInfo(
+        id="msg_user_tool_loop_guard",
+        sessionID="ses_runner_tool_loop_guard",
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    for idx in range(1, turn_count + 1):
+        runner = SessionRunner(session=_make_session("ses_runner_tool_loop_guard"), static_cache=shared_cache)
+        runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+        monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[
+            {"type": "function", "function": {"name": tool_name, "description": "", "parameters": {}}}
+        ]))
+        monkeypatch.setattr(
+            runner,
+            "_to_chat_messages",
+            AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+        )
+        result = await runner._process_step([last_user], last_user)
+        if successful_sleep or idx < 3:
+            assert result.action == "continue"
+        else:
+            assert result.action == "stop"
+            assert f"Stopped the loop because `{tool_name}` was called 3 times in a row" in result.content
+            assert result.error == f"runner_tool_loop_guard_halt:repeated_exact_tool_call:{tool_name}"
+
+    if successful_sleep:
+        assert shared_cache["tool_loop_guard"]["exact_count"] == 0
+        assert runner._should_warn_about_tool_loop(last_user_id=last_user.id) is False
+    else:
+        assert update_mock.await_args_list[-2].kwargs["content"].startswith(f"Stopped the loop because `{tool_name}`")
+        assert update_mock.await_args_list[-1].kwargs["finish"] == "stop"
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_swallows_import_error():
+    """ImportError from the usage service import must not propagate out of
+    _record_usage_if_available so that a CLI-only environment (where fastapi /
+    server deps may be absent) never turns a successful step into an error."""
+    runner = _make_runner("ses_runner_import_error")
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    with patch.dict("sys.modules", {"aegisops.provider.usage_service": None}):
+        # Should complete without raising, even though the import will fail.
+        await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_passes_message_id():
+    runner = _make_runner("ses_runner_message_id")
+    usage = {
+        "prompt_tokens": 3,
+        "completion_tokens": 2,
+        "total_tokens": 5,
+        "cache_creation_input_tokens": 4,
+    }
+    request_cls = MagicMock(return_value=SimpleNamespace())
+    record_usage_mock = AsyncMock(return_value=None)
+    fake_module = SimpleNamespace(
+        RecordUsageRequest=request_cls,
+        record_usage=record_usage_mock,
+    )
+    runner._resolve_usage_pricing = MagicMock(return_value=None)
+
+    with patch.dict("sys.modules", {"aegisops.provider.usage_service": fake_module}):
+        await runner._record_usage_if_available(usage, message_id="msg_assistant")
+
+    request_cls.assert_called_once()
+    kwargs = request_cls.call_args.kwargs
+    assert kwargs["session_id"] == runner.session.id
+    assert kwargs["message_id"] == "msg_assistant"
+    assert kwargs["cache_write_tokens"] == 4
+    record_usage_mock.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_record_usage_if_available_swallows_runtime_error():
+    """Any exception raised by record_usage() itself must also be silently
+    swallowed so that usage-recording failures never corrupt step results."""
+    runner = _make_runner("ses_runner_record_error")
+    usage = {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5}
+
+    fake_module = SimpleNamespace(
+        RecordUsageRequest=MagicMock(return_value=SimpleNamespace()),
+        record_usage=AsyncMock(side_effect=RuntimeError("db unavailable")),
+    )
+    with patch.dict("sys.modules", {"aegisops.provider.usage_service": fake_module}):
+        await runner._record_usage_if_available(usage)
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
+    runner = _make_runner("ses_runner_node_ref")
+    user_message = UserMessageInfo(
+        id="msg_user_node_ref",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+    )
+
+    monkeypatch.setattr(
+        runner_mod.Message,
+        "parts_many",
+        AsyncMock(return_value={"msg_user_node_ref": [
+            SimpleNamespace(
+                type="text",
+                text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
+            ),
+        ]}),
+    )
+
+    chat_messages = await runner._to_chat_messages([user_message], [])
+
+    assert len(chat_messages) == 1
+    assert chat_messages[0].role == "user"
+    assert isinstance(chat_messages[0].content, str)
+    assert "Selected workflow node context:" in chat_messages[0].content
+    assert "node_id: query_fofa" in chat_messages[0].content
+    assert "node_type: python" in chat_messages[0].content
+    assert "只修改这个节点的代码并保留其他节点不变" in chat_messages[0].content
+
+
+def _auto_failover_step(monkeypatch, session_id, *, provider, call_llm=None):
+    """A step in Auto mode: errors are handed back to the loop's failover."""
+    runner = SessionRunner(
+        session=_make_session(session_id),
+        provider_id="primary",
+        model_id="primary-model",
+        defer_step_errors=True,
+        failover_available=True,
+    )
+    last_user = UserMessageInfo(
+        id=f"msg_user_{session_id}",
+        sessionID=session_id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    if call_llm is not None:
+        monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompt_blocks", AsyncMock(return_value=[]))
+        monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+        monkeypatch.setattr(
+            runner,
+            "_to_chat_messages",
+            AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+        )
+        monkeypatch.setattr(
+            runner_mod.Message,
+            "create",
+            AsyncMock(return_value=SimpleNamespace(id=f"msg_assistant_{session_id}")),
+        )
+        monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+        monkeypatch.setattr(runner, "_call_llm", call_llm)
+    return runner._process_step([last_user], last_user)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("configured", [None, False], ids=["not-found", "not-configured"])
+async def test_auto_mode_hands_an_unavailable_provider_to_failover(monkeypatch, configured):
+    provider = None
+    if configured is False:
+        provider = MagicMock()
+        provider.is_configured.return_value = False
+
+    result = await _auto_failover_step(
+        monkeypatch,
+        "ses_runner_auto_provider_unavailable",
+        provider=provider,
+    )
+
+    assert result.failure is not None
+    assert result.failure.reason == "provider_unavailable"
+    assert result.failure.allow_fallback is True
+
+
+@pytest.mark.asyncio
+async def test_auto_mode_hands_repeated_empty_responses_to_failover(monkeypatch):
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    call_llm = AsyncMock(return_value=StepResult(action="stop", content=""))
+
+    result = await _auto_failover_step(
+        monkeypatch,
+        "ses_runner_auto_empty_response",
+        provider=provider,
+        call_llm=call_llm,
+    )
+
+    assert result.failure is not None
+    assert result.failure.reason == "empty_response"
+    assert result.failure.allow_fallback is True
+    assert call_llm.await_count == 4  # the first call and three retries

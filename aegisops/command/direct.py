@@ -1,0 +1,560 @@
+"""
+Shared execution logic for direct slash commands.
+"""
+
+from __future__ import annotations
+
+from collections import defaultdict
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, Optional
+
+from aegisops.agent.agent import AvailableAgent
+from aegisops.agent.registry import Agent
+from aegisops.command.command import Command, CommandInfo, CommandSurface
+from aegisops.command.help import format_help
+from aegisops.session.goal import GoalManager
+from aegisops.skill.skill import Skill
+from aegisops.tool.registry import ToolRegistry
+
+AGENT_SAFE_DIRECT_COMMANDS = frozenset({"help", "tools", "skills", "agents", "workflows", "mcp"})
+_TOOL_CATEGORY_ORDER = ["file", "code", "search", "browser", "terminal", "system", "api", "mcp", "device", "plugin_py", "plugin_yaml", "custom"]
+_SOURCE_AWARE_GROUPS = frozenset({"api", "mcp", "device", "plugin_py", "plugin_yaml"})
+
+
+@dataclass
+class DirectCommandResult:
+    handled: bool
+    success: bool = True
+    text: Optional[str] = None
+    prompt: Optional[str] = None
+    clear_screen: bool = False
+    clear_history: bool = False
+
+
+CommandStatusCallback = Callable[[str, Optional[str]], Awaitable[None]]
+
+
+async def _publish_command_status(
+    callback: Optional[CommandStatusCallback],
+    status: str,
+    message: Optional[str] = None,
+) -> None:
+    """Publish best-effort foreground status for a long-running command."""
+    if callback is None:
+        return
+    try:
+        await callback(status, message)
+    except Exception:
+        return
+
+
+def _format_dream_result(result: Any, target_label: str) -> str:
+    """Format the visible result of one manual Dream run."""
+    changed_memory_files = tuple(getattr(result, "changed_memory_files", ()) or ())
+    changed_skills = tuple(getattr(result, "changed_skills", ()) or ())
+    memory_result = (
+        f"Updated {', '.join(changed_memory_files)}"
+        if changed_memory_files
+        else "Updated"
+        if getattr(result, "memory_changed", False)
+        else "No changes"
+    )
+    skill_result = (
+        f"Updated {', '.join(changed_skills)}"
+        if changed_skills
+        else "Updated"
+        if getattr(result, "skill_changed", False)
+        else "No changes"
+    )
+    lines = [
+        "Dream completed",
+        "",
+        f"- Target: {target_label}",
+        f"- Evidence processed: {result.processed_sources}",
+        f"- Memory: {memory_result}",
+        f"- Skill: {skill_result}",
+    ]
+    if getattr(result, "backlog", False):
+        lines.append("- Backlog: More evidence remains for a later Dream")
+    return "\n".join(lines)
+
+
+def is_agent_safe_direct_command(command: CommandInfo) -> bool:
+    return (
+        command.execution_kind == "direct"
+        and command.name in AGENT_SAFE_DIRECT_COMMANDS
+    )
+
+
+def list_agent_safe_direct_commands() -> list[CommandInfo]:
+    return [cmd for cmd in Command.list_all() if is_agent_safe_direct_command(cmd)]
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return "No description provided."
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[: max(0, max_chars - 3)].rstrip() + "..."
+
+
+def _tool_catalog_group_key(tool: object) -> str:
+    source = str(getattr(tool, "source", "") or "").strip().lower()
+    if source in _SOURCE_AWARE_GROUPS:
+        return source
+    category = getattr(getattr(tool, "category", None), "value", getattr(tool, "category", "custom"))
+    return str(category)
+
+
+def format_tools_catalog_summary(
+    tools: list,
+    max_description_chars: int = 100,
+    include_tip: bool = True,
+) -> str:
+    grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for tool in tools:
+        if tool.name in {"invalid", "_noop"} or not getattr(tool, "enabled", True):
+            continue
+        group_key = _tool_catalog_group_key(tool)
+        grouped[group_key].append((
+            tool.name,
+            _truncate_text(getattr(tool, "description", ""), max_description_chars),
+        ))
+
+    lines = ["Available Tools (grouped by category/source):", ""]
+    seen: set[str] = set()
+    for category in _TOOL_CATEGORY_ORDER:
+        if category not in grouped:
+            continue
+        lines.append(f"**{category}**")
+        for name, description in sorted(grouped[category], key=lambda item: item[0]):
+            lines.append(f"- {name}: {description}")
+        lines.append("")
+        seen.add(category)
+
+    for category, items in grouped.items():
+        if category in seen:
+            continue
+        lines.append(f"**{category}**")
+        for name, description in sorted(items, key=lambda item: item[0]):
+            lines.append(f"- {name}: {description}")
+        lines.append("")
+
+    if include_tip:
+        lines.append("Tip: use /tools info `name` for full details.")
+
+    return "\n".join(lines).strip()
+
+
+def build_tools_catalog_summary(
+    max_description_chars: int = 100,
+    include_tip: bool = True,
+) -> str:
+    ToolRegistry.init()
+    tools = ToolRegistry.list_tools()
+    return format_tools_catalog_summary(
+        tools=tools,
+        max_description_chars=max_description_chars,
+        include_tip=include_tip,
+    )
+
+
+def format_available_agents_summary(agents: list[AvailableAgent]) -> str:
+    if not agents:
+        return "No available agents."
+
+    lines = ["Available agents:", ""]
+    for agent in agents:
+        metadata_bits = []
+        if agent.metadata.category:
+            metadata_bits.append(agent.metadata.category)
+        if agent.metadata.cost:
+            metadata_bits.append(agent.metadata.cost)
+        metadata_suffix = f" ({', '.join(metadata_bits)})" if metadata_bits else ""
+        description = agent.description.strip() or "No description provided."
+        lines.append(f"- `{agent.name}`{metadata_suffix}: {description}")
+    return "\n".join(lines)
+
+
+async def run_direct_command(
+    name: str,
+    *,
+    args: str = "",
+    args_json: Optional[Any] = None,
+    surface: Optional[CommandSurface] = None,
+    session_id: Optional[str] = None,
+    status_callback: Optional[CommandStatusCallback] = None,
+) -> DirectCommandResult:
+    """Execute a direct command and return its result."""
+    resolved = Command.resolve(name)
+    if not resolved or resolved.execution_kind != "direct":
+        return DirectCommandResult(handled=False)
+
+    name = resolved.name
+    args = (args or "").strip()
+    _ = args_json
+
+    if name == "help":
+        return DirectCommandResult(handled=True, text=format_help(surface=surface))
+
+    if name == "clear":
+        return DirectCommandResult(handled=True, clear_history=True)
+
+    if name == "goal":
+        if not session_id:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /goal requires an active session.",
+            )
+
+        try:
+            state = await GoalManager.set_goal(session_id, args)
+        except ValueError:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /goal <objective>",
+            )
+        return DirectCommandResult(
+            handled=True,
+            prompt=GoalManager.goal_prompt(state.objective),
+        )
+
+    if name == "dream":
+        if not session_id:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /dream requires an active session.",
+            )
+        from aegisops.config import Config
+        from aegisops.memory.config import resolve_memory_config
+        from aegisops.memory.evolution.common import DreamTarget
+        from aegisops.memory.evolution.dream import run_dream_bridge
+        from aegisops.memory.paths import is_registered_project_id
+        from aegisops.session.session import Session
+
+        session = await Session.get_by_id(session_id)
+        if session is None:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Session not found.",
+            )
+        memory_config = resolve_memory_config(await Config.get())
+        if not memory_config.dream.enabled:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Dream is disabled",
+            )
+        target = (
+            DreamTarget.project(session.project_id)
+            if is_registered_project_id(session.project_id)
+            else DreamTarget.global_only()
+        )
+        target_label = (
+            f"Project {target.scope_id}"
+            if is_registered_project_id(target.scope_id)
+            else "Global"
+        )
+        await _publish_command_status(
+            status_callback,
+            "dreaming",
+            f"Dream is reviewing {target_label} evidence for durable Memory and Skill updates…",
+        )
+        try:
+            result = await run_dream_bridge(
+                target,
+                parent_session_id=session.id,
+            )
+        except Exception as exc:
+            command_result = DirectCommandResult(
+                handled=True,
+                success=False,
+                text=f"Dream failed: {exc}",
+            )
+        else:
+            command_result = DirectCommandResult(
+                handled=True,
+                text=_format_dream_result(result, target_label),
+            )
+        finally:
+            await _publish_command_status(status_callback, "idle")
+        return command_result
+
+    if name == "tools":
+        if not args or args == "list":
+            return DirectCommandResult(handled=True, text=build_tools_catalog_summary())
+
+        if args == "refresh":
+            ToolRegistry.refresh_dynamic_tools()
+            summary = build_tools_catalog_summary()
+            text = "Dynamic tools refreshed. Current summary:\n\n" + summary.split("\n", 1)[1]
+            return DirectCommandResult(handled=True, text=text)
+
+        if args.startswith("info"):
+            tool_name = args[len("info"):].strip()
+            if not tool_name:
+                return DirectCommandResult(handled=True, text="Usage: /tools info `name`")
+
+            ToolRegistry.init()
+            tool = ToolRegistry.get(tool_name)
+            if not tool:
+                return DirectCommandResult(handled=True, text=f'Tool not found: "{tool_name}"')
+
+            info = tool.info
+            lines = [
+                f"Tool details: {info.name}",
+                "",
+                f"- Category: {info.category.value}",
+                f"- Description: {info.description.strip()}",
+                f"- Enabled: {info.enabled}",
+                f"- Requires confirmation: {info.requires_confirmation}",
+                "",
+            ]
+            if info.parameters:
+                lines.append("Parameters:")
+                for param in info.parameters:
+                    required = "required" if param.required else "optional"
+                    enum = f" Values: {param.enum}" if param.enum else ""
+                    lines.append(
+                        f"- {param.name} ({param.type.value}, {required}){enum}: {param.description}"
+                    )
+            else:
+                lines.append("Parameters: none")
+
+            return DirectCommandResult(handled=True, text="\n".join(lines))
+
+        if args.startswith("create"):
+            requirement = args[len("create"):].strip()
+            if not requirement:
+                return DirectCommandResult(
+                    handled=True,
+                    text="Usage: /tools create `requirement`",
+                )
+
+            skill = await Skill.get("tool-builder")
+            if not skill:
+                return DirectCommandResult(
+                    handled=True,
+                    text='Skill not found: "tool-builder". Check whether skills are loaded.',
+                )
+
+            try:
+                skill_content = (await Skill.read_body(skill, scope=session_id)).strip()
+            except Exception as exc:
+                return DirectCommandResult(handled=True, text=f"Failed to load skill: {str(exc)}")
+
+            create_prompt = "\n\n".join([
+                "Please follow this skill exactly to create the tool:",
+                skill_content,
+                f"User requirement: {requirement}",
+            ])
+            return DirectCommandResult(handled=True, prompt=create_prompt)
+
+        return DirectCommandResult(
+            handled=True,
+            text="Usage: /tools [list|refresh|info `name`|create `requirement`]",
+        )
+
+    if name == "skills":
+        # `surface` distinguishes user-driven calls (CLI/TUI/WebUI input
+        # dispatcher passes its sink surface) from agent-driven calls (the
+        # `slash_command` tool calls `run_direct_command` without a surface).
+        # We want the agent path to be strictly "enabled-only" so a toggled
+        # off skill cannot be rediscovered through this listing, while keeping
+        # the user path showing the full inventory with a `[disabled]` marker
+        # so users can tell at a glance what they have turned off.
+        is_user_surface = surface is not None
+        if not args or args == "list":
+            if is_user_surface:
+                skills = await Skill.all()
+                disabled = Skill.load_disabled()
+            else:
+                skills = await Skill.list_enabled()
+                disabled = set()
+            if not skills:
+                return DirectCommandResult(handled=True, text="No skills available.")
+            lines = ["Available skills:", ""]
+            for index, skill in enumerate(skills, 1):
+                suffix = " [disabled]" if skill.name in disabled else ""
+                lines.append(f"{index}. {skill.name}{suffix}: {skill.description}")
+            return DirectCommandResult(handled=True, text="\n".join(lines))
+
+        if args == "refresh":
+            # `Skill.refresh()` repopulates the discovery cache; the user
+            # path then re-lists everything with the `[disabled]` marker so
+            # the refresh output matches what the user actually sees.
+            await Skill.refresh()
+            if is_user_surface:
+                skills = await Skill.all()
+                disabled = Skill.load_disabled()
+            else:
+                skills = await Skill.list_enabled()
+                disabled = set()
+            lines = ["Skills refreshed. Current list:", ""]
+            for index, skill in enumerate(skills, 1):
+                suffix = " [disabled]" if skill.name in disabled else ""
+                lines.append(f"{index}. {skill.name}{suffix}: {skill.description}")
+            return DirectCommandResult(handled=True, text="\n".join(lines))
+
+        return DirectCommandResult(handled=True, text="Usage: /skills [list|refresh]")
+
+    if name == "agents":
+        if args:
+            return DirectCommandResult(handled=True, text="Usage: /agents")
+        agents = await Agent.list_available_agents()
+        return DirectCommandResult(
+            handled=True,
+            text=format_available_agents_summary(agents),
+        )
+
+    if name == "workflows":
+        from aegisops.workflow.center import format_workflow_entries, scan_skill_workflows
+
+        try:
+            entries = await scan_skill_workflows()
+        except Exception as exc:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text=f"Error scanning workflows: {exc}",
+            )
+
+        if not entries:
+            return DirectCommandResult(
+                handled=True,
+                text=(
+                    "No workflows found.\n"
+                    "Create a workflow.json in .aegisops/workflow/<name>/ to get started."
+                ),
+            )
+
+        body = format_workflow_entries(entries)
+        return DirectCommandResult(
+            handled=True,
+            text=(
+                "Available Workflows:\n\n"
+                + body
+                + "\n\nTip: use run_workflow with the path shown above to execute a workflow."
+            ),
+        )
+
+    if name == "mcp":
+        from aegisops.mcp import MCP, McpStatus
+
+        if not args or args == "list":
+            try:
+                status = await MCP.status()
+                if not status:
+                    lines = [
+                        "No MCP servers configured.",
+                        "",
+                        "To add servers, configure them in ~/.aegisops/config/aegisops.json under the 'mcp' key.",
+                        "Example:",
+                        '  "mcp": {',
+                        '    "my_server": {',
+                        '      "type": "remote",',
+                        '      "url": "https://example.com/mcp",',
+                        '      "enabled": true',
+                        '    }',
+                        '  }',
+                    ]
+                else:
+                    lines = ["MCP Servers:", ""]
+                    for server_name, info in status.items():
+                        status_icon = "✓" if info.status == McpStatus.CONNECTED else "✗"
+                        lines.append(
+                            f"{status_icon} {server_name}: {info.status.value} "
+                            f"({info.tools_count} tools, {info.resources_count} resources)"
+                        )
+                    lines.append("")
+                    lines.append("Tip: use /mcp tools to list all available MCP tools")
+                return DirectCommandResult(handled=True, text="\n".join(lines))
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error listing MCP servers: {str(exc)}",
+                )
+
+        if args == "status":
+            try:
+                status = await MCP.status()
+                if not status:
+                    return DirectCommandResult(handled=True, text="No MCP servers configured.")
+
+                lines = ["MCP Server Status:", ""]
+                for server_name, info in status.items():
+                    lines.append(f"Server: {server_name}")
+                    lines.append(f"  Status: {info.status.value}")
+                    lines.append(f"  Tools: {info.tools_count}")
+                    lines.append(f"  Resources: {info.resources_count}")
+                    if info.error:
+                        lines.append(f"  Error: {info.error}")
+                    lines.append("")
+                return DirectCommandResult(handled=True, text="\n".join(lines))
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error getting MCP status: {str(exc)}",
+                )
+
+        if args == "tools":
+            try:
+                from aegisops.mcp import McpToolRegistry
+
+                all_servers = McpToolRegistry.get_all_servers()
+                if not all_servers:
+                    return DirectCommandResult(
+                        handled=True,
+                        text="No MCP tools available. Connect to an MCP server first.",
+                    )
+
+                lines = ["MCP Tools:", ""]
+                for server_name in all_servers:
+                    tools = McpToolRegistry.get_server_tools(server_name)
+                    lines.append(f"From {server_name}: ({len(tools)} tools)")
+                    for tool_name in tools:
+                        source = McpToolRegistry.get_source(tool_name)
+                        if source:
+                            lines.append(f"  - {tool_name} (original: {source.mcp_tool})")
+                    lines.append("")
+
+                lines.append("Tip: use /tools info `name` to see tool details")
+                return DirectCommandResult(handled=True, text="\n".join(lines))
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error listing MCP tools: {str(exc)}",
+                )
+
+        if args.startswith("refresh"):
+            server_name = args[len("refresh"):].strip()
+            if not server_name:
+                return DirectCommandResult(handled=True, text="Usage: /mcp refresh `server`")
+
+            try:
+                count = await MCP.refresh_tools(server_name)
+                return DirectCommandResult(
+                    handled=True,
+                    text=f"Refreshed {count} tools from {server_name}",
+                )
+            except Exception as exc:
+                return DirectCommandResult(
+                    handled=True,
+                    success=False,
+                    text=f"Error refreshing MCP tools: {str(exc)}",
+                )
+
+        return DirectCommandResult(
+            handled=True,
+            text="Usage: /mcp [list|status|tools|refresh `server`]",
+        )
+
+    return DirectCommandResult(handled=False)

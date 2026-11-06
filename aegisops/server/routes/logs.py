@@ -1,0 +1,220 @@
+"""
+Log viewing routes for WebUI.
+
+Provides endpoints to list and read log files from ~/.aegisops/logs.
+"""
+
+from datetime import date, datetime
+from pathlib import Path
+from typing import List
+
+from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
+
+from aegisops.utils.log import get_log_dir
+from aegisops.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
+
+router = APIRouter()
+
+
+class LogFileInfo(BaseModel):
+    name: str
+    size: int
+    modified: float
+
+
+class LogListResponse(BaseModel):
+    files: List[LogFileInfo]
+    log_dir: str
+
+
+class LogContentResponse(BaseModel):
+    filename: str
+    content: str
+    total_lines: int
+    truncated: bool
+
+
+@router.get(
+    "",
+    response_model=LogListResponse,
+    summary="List log files",
+)
+async def list_logs():
+    """List all log files sorted by modification time (newest first)."""
+    log_dir = get_log_dir()
+    require_http_private_path_access(log_dir)
+    if not log_dir.is_dir():
+        return LogListResponse(files=[], log_dir=str(log_dir))
+
+    # One stat per file: it feeds both the sort key and the response.
+    stats = [(p, p.stat()) for p in _iter_log_files(log_dir) if not http_private_path_is_blocked(p)]
+    stats.sort(key=lambda item: item[1].st_mtime, reverse=True)
+    files = [
+        LogFileInfo(name=p.relative_to(log_dir).as_posix(), size=st.st_size, modified=st.st_mtime)
+        for p, st in stats
+    ]
+    return LogListResponse(files=files, log_dir=str(log_dir))
+
+
+@router.get(
+    "/latest",
+    response_model=LogContentResponse,
+    summary="Read latest log file",
+)
+async def read_latest_log(
+    tail: int = Query(200, ge=1, le=5000, description="Number of lines from the end"),
+):
+    """Read the last N lines of the most recent log file."""
+    log_dir = get_log_dir()
+    if not log_dir.is_dir():
+        raise HTTPException(status_code=404, detail="Log directory not found")
+
+    today_log = log_dir / date.today().isoformat() / "aegisops.log"
+    if today_log.is_file() and not http_private_path_is_blocked(today_log):
+        return _read_log_file(today_log, tail, filename=_relative_log_name(log_dir, today_log))
+
+    for day_dir in sorted(_iter_date_dirs(log_dir), reverse=True):
+        main_log = day_dir / "aegisops.log"
+        if main_log.is_file() and not http_private_path_is_blocked(main_log):
+            return _read_log_file(main_log, tail, filename=_relative_log_name(log_dir, main_log))
+
+    log_files = sorted((path for path in _iter_log_files(log_dir) if not http_private_path_is_blocked(path)),
+                       key=lambda f: f.stat().st_mtime, reverse=True)
+    if not log_files:
+        raise HTTPException(status_code=404, detail="No log files found")
+
+    return _read_log_file(log_files[0], tail, filename=_relative_log_name(log_dir, log_files[0]))
+
+
+@router.get(
+    "/{filename:path}",
+    response_model=LogContentResponse,
+    summary="Read a specific log file",
+)
+async def read_log(
+    filename: str,
+    tail: int = Query(200, ge=1, le=5000, description="Number of lines from the end"),
+):
+    """Read the last N lines of a specific log file."""
+    log_dir = get_log_dir()
+    log_path = log_dir / filename
+
+    if not log_path.is_file() or not _is_allowed_log_path(log_dir, log_path):
+        raise HTTPException(status_code=404, detail=f"Log file not found: {filename}")
+
+    if not log_path.resolve().is_relative_to(log_dir.resolve()):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return _read_log_file(log_path, tail, filename=filename)
+
+
+def _is_date_name(name: str) -> bool:
+    """Strict ``YYYY-MM-DD`` — strptime alone also accepts ``2026-9-13``."""
+    try:
+        return datetime.strptime(name, "%Y-%m-%d").strftime("%Y-%m-%d") == name
+    except ValueError:
+        return False
+
+
+def _is_date_dir(path: Path) -> bool:
+    return _is_date_name(path.name) and path.is_dir()
+
+
+def _iter_date_dirs(log_dir: Path) -> List[Path]:
+    return [p for p in log_dir.iterdir() if _is_date_dir(p)]
+
+
+def _is_allowed_log_path(log_dir: Path, path: Path) -> bool:
+    try:
+        relative = path.relative_to(log_dir)
+    except ValueError:
+        return False
+    parts = relative.parts
+    if len(parts) == 1:
+        return parts[0] in {"backend.log", "webui.log"}
+    if len(parts) == 2:
+        day, filename = parts
+        if not _is_date_name(day):
+            return False
+        return filename in {"aegisops.log", "errors.log"}
+    return False
+
+
+def _iter_log_files(log_dir: Path) -> List[Path]:
+    files = []
+    for name in ("backend.log", "webui.log"):
+        path = log_dir / name
+        if path.is_file():
+            files.append(path)
+    for day_dir in _iter_date_dirs(log_dir):
+        for name in ("aegisops.log", "errors.log"):
+            path = day_dir / name
+            if path.is_file():
+                files.append(path)
+    return files
+
+
+def _relative_log_name(log_dir: Path, path: Path) -> str:
+    return path.relative_to(log_dir).as_posix()
+
+
+_COUNT_CHUNK = 1 << 20
+_TAIL_CHUNK = 1 << 16
+
+
+def _count_lines(path: Path) -> int:
+    """Count lines the way text-mode iteration would, without decoding."""
+    total = 0
+    last = b""
+    with path.open("rb") as handle:
+        while True:
+            buf = handle.read(_COUNT_CHUNK)
+            if not buf:
+                break
+            total += buf.count(b"\n")
+            last = buf[-1:]
+    if last and last != b"\n":
+        total += 1
+    return total
+
+
+def _tail_lines(path: Path, tail: int) -> list[str]:
+    """Return the last ``tail`` lines by reading blocks from the end of the file.
+
+    Log files grow to hundreds of MB; walking the whole file line by line just
+    to keep the last 200 made the request time linear in file size.
+    """
+    with path.open("rb") as handle:
+        handle.seek(0, 2)
+        pos = handle.tell()
+        data = b""
+        # ``tail`` complete lines need ``tail + 1`` newlines (or the file start).
+        while pos > 0 and data.count(b"\n") <= tail:
+            step = min(_TAIL_CHUNK, pos)
+            pos -= step
+            handle.seek(pos)
+            data = handle.read(step) + data
+    lines = data.decode("utf-8", errors="replace").split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return [line.rstrip("\r") for line in lines[-tail:]]
+
+
+def _read_log_file(path: Path, tail: int, filename: str | None = None) -> LogContentResponse:
+    require_http_private_path_access(path)
+    try:
+        total = _count_lines(path)
+        lines = _tail_lines(path, tail)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to read log: {e}")
+
+    truncated = total > tail
+    content = "\n".join(lines)
+
+    return LogContentResponse(
+        filename=filename or path.name,
+        content=content,
+        total_lines=total,
+        truncated=truncated,
+    )

@@ -1,0 +1,37 @@
+.aegis-hub-filters{position:relative;border-bottom:1px solid #e5e8e2;padding:0 4px 16px;color:#50584e}
+.aegis-hub-types{display:flex;gap:6px;overflow-x:auto;padding:2px 0 14px;scrollbar-width:thin}
+.aegis-hub-types button{flex-shrink:0;display:flex;align-items:center;gap:9px;padding:8px 13px;border-radius:9px;font-size:13px;font-weight:550;transition:background .18s,color .18s}
+.aegis-hub-types button:hover{background:#edf1e8}
+.aegis-hub-types button[aria-pressed=true]{background:#e5edcf;color:#40501e}
+.aegis-hub-types button span{font-size:11px;font-weight:500;color:#879080;font-variant-numeric:tabular-nums}
+.aegis-hub-types button[aria-pressed=true] span{color:#63783a}
+.aegis-hub-facet-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.aegis-hub-filter-label{display:flex;align-items:center;gap:7px;font-size:12px;color:#92998d;margin-right:4px}
+.aegis-hub-facet{position:relative}
+.aegis-hub-facet-trigger{display:flex;align-items:center;gap:9px;height:34px;padding:0 11px;border:1px solid #e1e6db;border-radius:8px;background:#fff;font-size:12px;color:#879080;transition:all .18s}
+.aegis-hub-facet-trigger span{color:#4d5647;font-weight:500;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aegis-hub-facet-trigger:hover,.aegis-hub-facet-trigger[aria-expanded=true]{border-color:#9eaf7c;background:#f9fbf5}
+.aegis-hub-facet-trigger[data-active=true]{border-color:#bfcea0;background:#f2f6e9}
+.aegis-hub-facet-trigger[data-active=true] span{color:#546c29}
+.aegis-hub-facet-trigger[aria-expanded=true] svg{transform:rotate(180deg)}
+.aegis-hub-facet-panel{position:absolute;top:calc(100% + 7px);left:0;z-index:60;width:268px;max-width:calc(100vw - 40px);border:1px solid #e1e6da;border-radius:12px;padding:7px;background:rgba(255,255,255,.98);box-shadow:0 14px 40px #2635191c;animation:aegis-facet-in .16s ease-out}
+.aegis-hub-facet-search{display:flex;align-items:center;gap:8px;padding:9px;background:#f4f6f0;border-radius:7px;margin-bottom:6px;color:#96a08b}
+.aegis-hub-facet-search input{width:100%;font-size:12px;outline:none;background:transparent;color:#46513b}
+.aegis-hub-facet-options{max-height:276px;overflow-y:auto;padding-right:3px;scrollbar-width:thin;scrollbar-color:#d0d9c3 transparent}
+.aegis-hub-facet-options button{display:flex;align-items:center;gap:9px;width:100%;padding:9px;border-radius:7px;text-align:left;font-size:12px;transition:background .15s}
+.aegis-hub-facet-options button:hover{background:#f1f5e9}
+.aegis-hub-facet-options button[aria-pressed=true]{background:#edf3e0;color:#526b29}
+.aegis-hub-facet-options button:disabled{opacity:.38;cursor:not-allowed}
+.aegis-hub-check{width:16px;height:16px;border:1px solid #dce2d3;border-radius:50%;display:grid;place-items:center;flex-shrink:0}
+[aria-pressed=true]>.aegis-hub-check{background:#dce9bf;border-color:#baca99}
+.aegis-hub-option-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.aegis-hub-option-count{font-size:11px;color:#939c88;font-variant-numeric:tabular-nums}
+.aegis-hub-facet-options p{padding:20px;text-align:center;font-size:12px;color:#92998d}
+.aegis-hub-clear{margin-left:auto;font-size:12px;color:#859078;padding:5px}
+.aegis-hub-clear:hover{color:#526b29}
+.aegis-hub-active-filters{display:flex;gap:7px;flex-wrap:wrap;margin-top:12px}
+.aegis-hub-active-filters button{display:flex;align-items:center;gap:5px;padding:4px 8px;border-radius:5px;background:#eaf0df;color:#536a30;font-size:11px;animation:aegis-facet-in .16s ease-out}
+.aegis-hub-active-filters button span{opacity:.65}
+.aegis-hub-filters button:focus-visible{outline:2px solid #92aa63;outline-offset:2px}
+@keyframes aegis-facet-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.aegis-hub-filters *{animation:none!important;transition:none!important}}

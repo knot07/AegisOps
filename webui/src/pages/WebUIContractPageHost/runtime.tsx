@@ -1,0 +1,258 @@
+import React, { lazy, Suspense, useContext, type ComponentProps, type ComponentType, type ReactNode } from 'react';
+import { jsx, jsxs } from 'react/jsx-runtime';
+import { useTranslation } from 'react-i18next';
+import type { AxiosRequestConfig, AxiosResponse } from 'axios';
+import apiClient from '@/api/client';
+import WorkbenchChat from '@/components/common/WorkbenchChat';
+import WorkbenchPanel from '@/components/common/WorkbenchPanel';
+import type SessionTranscriptComponent from '@/components/common/SessionTranscript';
+import type { WorkbenchModelPickerProps } from '@/components/common/WorkbenchModelPicker';
+import { useAuth } from '@/contexts/AuthContext';
+import { PaneActiveContext } from '@/components/layout/PaneActiveContext';
+import { useSSE, type SSEConnectionStatus, type SSEEvent } from '@/hooks/useSSE';
+
+const LazyWorkbenchModelPicker = lazy(() => import('@/components/common/WorkbenchModelPicker'));
+export function WorkbenchModelPicker(props: WorkbenchModelPickerProps) {
+  return <Suspense fallback={<div aria-busy="true" />}><LazyWorkbenchModelPicker {...props} /></Suspense>;
+}
+
+const LazySessionTranscript = lazy(() => import('@/components/common/SessionTranscript'));
+export function SessionTranscript(props: ComponentProps<typeof SessionTranscriptComponent>) {
+  return <Suspense fallback={<div aria-busy="true" />}><LazySessionTranscript {...props} /></Suspense>;
+}
+/** Lets page bundles check that this host renders `variant="inline"` (older hosts ignore it). */
+SessionTranscript.supportsInline = true;
+
+interface MarkdownRendererProps {
+  content: string;
+}
+
+const LazyMarkdownRenderer = lazy(async () => {
+  const [{ default: ReactMarkdown }, { default: remarkGfm }] = await Promise.all([
+    import('react-markdown'),
+    import('remark-gfm'),
+  ]);
+  const MarkdownRenderer = ({ content }: MarkdownRendererProps) => (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} skipHtml>
+      {content}
+    </ReactMarkdown>
+  );
+  return { default: MarkdownRenderer };
+});
+
+const MAX_CACHED_PAGE_BUNDLES = 20;
+const pageBundleCache = new Map<string, Promise<ComponentType>>();
+
+interface WebUIContractPageScopedApi {
+  get<T = unknown>(path: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  post<T = unknown>(path: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  put<T = unknown>(path: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  patch<T = unknown>(path: string, data?: unknown, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+  delete<T = unknown>(path: string, config?: AxiosRequestConfig): Promise<AxiosResponse<T>>;
+}
+
+interface WebUIContractOperationApi {
+  operation<T = unknown>(
+    operationName: string,
+    data?: unknown,
+    config?: AxiosRequestConfig,
+  ): Promise<AxiosResponse<T>>;
+}
+
+type WebUIContractPageApiClient = typeof apiClient & {
+  page: WebUIContractPageScopedApi;
+  contract(pagePath: string, contractId: string): WebUIContractOperationApi;
+};
+
+export interface WebUIContractPageSdk {
+  React: typeof React;
+  jsx: typeof jsx;
+  jsxs: typeof jsxs;
+  api: WebUIContractPageApiClient;
+  Card: typeof Card;
+  Markdown: typeof Markdown;
+  SessionTranscript: typeof SessionTranscript;
+  WorkbenchPanel: typeof WorkbenchPanel;
+  WorkbenchChat: typeof WorkbenchChat;
+  WorkbenchModelPicker: typeof WorkbenchModelPicker;
+  useCurrentUser: typeof useCurrentUser;
+  useLanguage: typeof useLanguage;
+  usePaneActive: typeof usePaneActive;
+  useServerEvents: typeof useServerEvents;
+}
+
+declare global {
+  interface Window {
+    __AEGISOPS_WEBUI_CONTRACT_SDK__?: WebUIContractPageSdk;
+  }
+}
+
+export function Card({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="rounded-xl border border-zinc-200 bg-white p-4 shadow-sm">
+      <h2 className="mb-2 text-lg font-semibold text-zinc-900">{title}</h2>
+      <div className="text-sm text-zinc-700">{children}</div>
+    </div>
+  );
+}
+
+export function Markdown({ content }: { content: string }) {
+  return (
+    <Suspense
+      fallback={(
+        <pre className="whitespace-pre-wrap text-sm" aria-busy="true">
+          {content}
+        </pre>
+      )}
+    >
+      <LazyMarkdownRenderer content={content} />
+    </Suspense>
+  );
+}
+
+export function useCurrentUser() {
+  const { user } = useAuth();
+  return user;
+}
+
+export function useLanguage() {
+  const { i18n } = useTranslation();
+  return i18n.resolvedLanguage || i18n.language || 'en-US';
+}
+
+/** False while the page sits in a hidden keep-alive tab; pages pause polling then. */
+export function usePaneActive(): boolean {
+  return useContext(PaneActiveContext);
+}
+
+/**
+ * Server events from the host's shared stream. A page that opened its own
+ * EventSource held a second long-lived connection per browser tab, and
+ * browsers allow only six per host over HTTP/1.1.
+ */
+export function useServerEvents(
+  onEvent: (event: SSEEvent) => void,
+  options: { enabled?: boolean; onReconnect?: () => void } = {},
+): SSEConnectionStatus {
+  return useSSE({ url: '/api/event', onEvent, enabled: options.enabled, onReconnect: options.onReconnect }).status;
+}
+
+function normalizePageApiPath(path: string): string {
+  if (!path) return '/';
+  return path.startsWith('/') ? path : `/${path}`;
+}
+
+function encodePagePath(pagePath: string): string {
+  return pagePath
+    .split('/')
+    .filter(Boolean)
+    .map((part) => encodeURIComponent(part))
+    .join('/');
+}
+
+function createScopedApi(pageId: string): WebUIContractPageScopedApi {
+  const base = `/api/contracts/webui/pages/${encodeURIComponent(pageId)}/api`;
+  return {
+    get(path, config) {
+      return apiClient.get(`${base}${normalizePageApiPath(path)}`, config);
+    },
+    post(path, data, config) {
+      return apiClient.post(`${base}${normalizePageApiPath(path)}`, data, config);
+    },
+    put(path, data, config) {
+      return apiClient.put(`${base}${normalizePageApiPath(path)}`, data, config);
+    },
+    patch(path, data, config) {
+      return apiClient.patch(`${base}${normalizePageApiPath(path)}`, data, config);
+    },
+    delete(path, config) {
+      return apiClient.delete(`${base}${normalizePageApiPath(path)}`, config);
+    },
+  };
+}
+
+function createContractApi(pagePath: string, contractId: string): WebUIContractOperationApi {
+  const base = `/api/contracts/webui/pages/${encodePagePath(pagePath)}/access/${encodeURIComponent(contractId)}/operations`;
+  return {
+    operation(operationName, data, config) {
+      return apiClient.post(`${base}/${encodeURIComponent(operationName)}`, data, config);
+    },
+  };
+}
+
+function createPageApiClient(pageId: string): WebUIContractPageApiClient {
+  // One client object per page. The bundle's SDK shim captures `api` when its
+  // module evaluates, so pages kept alive side by side (SOC 告警态势 while
+  // 告警调查 is open) each keep their own `api.page` scope instead of the
+  // last installed page hijacking everyone's page API calls.
+  const api = Object.create(apiClient) as WebUIContractPageApiClient;
+  api.page = createScopedApi(pageId);
+  api.contract = createContractApi;
+  return api;
+}
+
+export function installWebUIContractPageRuntime(pageId: string): void {
+  if (typeof window === 'undefined') return;
+  window.__AEGISOPS_WEBUI_CONTRACT_SDK__ = {
+    React,
+    jsx,
+    jsxs,
+    api: createPageApiClient(pageId),
+    Card,
+    Markdown,
+    SessionTranscript,
+    WorkbenchPanel,
+    WorkbenchChat,
+    WorkbenchModelPicker,
+    useCurrentUser,
+    useLanguage,
+    usePaneActive,
+    useServerEvents,
+  };
+}
+
+// A bundle must evaluate with its own SDK, even when several panes load at once.
+let bundleImportQueue: Promise<unknown> = Promise.resolve();
+
+export function loadWebUIContractPageBundle(
+  url: string,
+  missingExportMessage = 'Page bundle does not export a default component',
+  pageId?: string,
+): Promise<ComponentType> {
+  const cacheKey = JSON.stringify([url, pageId]);
+  const cached = pageBundleCache.get(cacheKey);
+  if (cached) {
+    pageBundleCache.delete(cacheKey);
+    pageBundleCache.set(cacheKey, cached);
+    return cached;
+  }
+
+  const request = (async () => {
+    const response = await apiClient.get<string>(url, { responseType: 'text' });
+    const source = typeof response.data === 'string' ? response.data : String(response.data ?? '');
+    const moduleUrl = URL.createObjectURL(new Blob([source], { type: 'application/javascript' }));
+    const load = bundleImportQueue.then(async () => {
+      try {
+        if (pageId) installWebUIContractPageRuntime(pageId);
+        const mod = await import(/* @vite-ignore */ moduleUrl);
+        const component = mod.default as ComponentType | undefined;
+        if (!component) throw new Error(missingExportMessage);
+        return component;
+      } finally {
+        URL.revokeObjectURL(moduleUrl);
+      }
+    });
+    bundleImportQueue = load.catch(() => undefined);
+    return load;
+  })().catch((error: unknown) => {
+    if (pageBundleCache.get(cacheKey) === request) pageBundleCache.delete(cacheKey);
+    throw error;
+  });
+  pageBundleCache.set(cacheKey, request);
+  while (pageBundleCache.size > MAX_CACHED_PAGE_BUNDLES) {
+    const oldest = pageBundleCache.keys().next().value;
+    if (typeof oldest !== 'string') break;
+    pageBundleCache.delete(oldest);
+  }
+  return request;
+}

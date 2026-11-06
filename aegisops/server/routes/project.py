@@ -1,0 +1,411 @@
+"""Project registry routes."""
+
+from __future__ import annotations
+
+import asyncio
+import os
+from pathlib import Path
+from typing import List, Optional
+
+from fastapi import APIRouter, HTTPException, Query, Request
+from pydantic import BaseModel, Field
+
+from aegisops.auth.context import AuthUser
+from aegisops.project.project import (
+    DEFAULT_PROJECT_ID,
+    PROJECT_SCOPE_PATTERN,
+    WORKBENCH_PROJECT_SCOPE,
+    Project,
+    ProjectDeletionError,
+    ProjectInfo,
+    ProjectNameConflictError,
+    ProjectPathConflictError,
+)
+from aegisops.server.auth import require_user
+from aegisops.session.policy import SessionPolicy
+from aegisops.session.session import Session, SessionInfo
+from aegisops.utils.log import Log
+
+router = APIRouter()
+log = Log.create(service="routes.project")
+
+_MANAGER_CATEGORIES = {"user", "workflow", "entity-config"}
+
+
+class ProjectUpdateRequest(BaseModel):
+    """Editable project properties."""
+
+    name: str
+
+
+class ProjectCreateRequest(BaseModel):
+    """Register an existing project directory."""
+
+    worktree: str
+    name: Optional[str] = None
+    scope: str = Field(WORKBENCH_PROJECT_SCOPE, pattern=PROJECT_SCOPE_PATTERN)
+
+
+class FolderEntry(BaseModel):
+    """Directory row returned by the server-side folder picker."""
+
+    name: str
+    path: str
+
+
+class FolderBrowserResponse(BaseModel):
+    """Directory listing constrained to configured project roots."""
+
+    path: str
+    parent: Optional[str]
+    roots: List[FolderEntry]
+    entries: List[FolderEntry]
+
+
+async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List[ProjectInfo]:
+    owner_id = user.id
+    projects = await Project.list_visible(owner_id=owner_id)
+    shared_project_ids = Project.shared_project_ids()
+    term = search.strip().casefold() if search else None
+    stats = Project.get_session_stats_cache(owner_id, term or "")
+    if stats is None:
+        registered_ids = {project.id for project in projects}
+        counts = {project.id: 0 for project in projects}
+        matched_counts = {project.id: 0 for project in projects}
+        last_activity: dict[str, int] = {}
+
+        for session in await Session.list_all_unfiltered():
+            if not SessionPolicy.can_read(
+                session,
+                user,
+                shared_project_ids=shared_project_ids,
+            ):
+                continue
+            if session.status != "active":
+                continue
+            metadata = session.metadata if isinstance(session.metadata, dict) else {}
+            if metadata.get("hideFromSessionManager"):
+                continue
+            if session.parent_id or session.category not in _MANAGER_CATEGORIES:
+                continue
+            if session.project_id not in registered_ids:
+                continue
+            project_id = session.project_id
+            counts[project_id] = counts.get(project_id, 0) + 1
+            if term is None or term in session.title.casefold():
+                matched_counts[project_id] = matched_counts.get(project_id, 0) + 1
+            last_activity[project_id] = max(
+                last_activity.get(project_id, 0),
+                session.time.updated,
+            )
+        stats = {
+            project.id: (
+                counts.get(project.id, 0),
+                matched_counts.get(project.id, 0),
+                last_activity.get(project.id),
+            )
+            for project in projects
+        }
+        Project.set_session_stats_cache(owner_id, term or "", stats)
+
+    return [
+        project.model_copy(
+            update={
+                "session_count": stats.get(project.id, (0, 0, None))[0],
+                "matched_session_count": stats.get(project.id, (0, 0, None))[1],
+                "last_activity_at": stats.get(project.id, (0, 0, None))[2],
+            },
+        )
+        for project in projects
+    ]
+
+
+async def list_project_summaries(user: AuthUser, search: Optional[str] = None) -> List[ProjectInfo]:
+    """Every live project of *user* with session counts, whatever its scope."""
+    return await _list_project_summaries(user, search)
+
+
+@router.get("", response_model=List[ProjectInfo], include_in_schema=False)
+@router.get("/", response_model=List[ProjectInfo], summary="List projects")
+async def list_projects(
+    request: Request,
+    search: Optional[str] = Query(None),
+    scope: str = Query(WORKBENCH_PROJECT_SCOPE, pattern=PROJECT_SCOPE_PATTERN),
+    includeSessionStats: bool = Query(
+        True,
+        description="Include session counts and recent activity; false avoids loading sessions",
+    ),
+):
+    """List user-registered project folders.
+
+    The default scope is the session manager's. An extension scope lists only
+    that extension's projects; unscoped legacy entries belong to the workbench.
+    """
+
+    user = require_user(request)
+    try:
+        projects = (
+            await _list_project_summaries(user, search)
+            if includeSessionStats
+            else await Project.list_visible(owner_id=user.id)
+        )
+        return [project for project in projects if (project.scope or WORKBENCH_PROJECT_SCOPE) == scope]
+    except Exception as exc:
+        log.error("project.list.error", {"error": str(exc)})
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("", response_model=ProjectInfo, include_in_schema=False)
+@router.post("/", response_model=ProjectInfo, summary="Create project")
+async def create_project(request: Request, payload: ProjectCreateRequest):
+    """Register an existing directory without writing project database rows."""
+
+    user = require_user(request)
+    try:
+        return await Project.create(
+            owner_id=user.id,
+            name=payload.name,
+            worktree=payload.worktree,
+            scope=payload.scope,
+        )
+    except ProjectPathConflictError as exc:
+        if exc.project.scope != payload.scope:
+            raise HTTPException(status_code=409, detail="该目录已在另一工作区登记，请选择其他目录") from exc
+        return exc.project
+    except ProjectNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("project.create.error", {"error": str(exc)})
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.get("/current", response_model=ProjectInfo, summary="Get current project")
+async def get_current_project(request: Request, project_id: Optional[str] = Query(None, alias="projectID")):
+    """Return a requested project or the current runtime context."""
+
+    user = require_user(request)
+    if project_id:
+        project = await Project.get(project_id, owner_id=user.id)
+    else:
+        from aegisops.project.instance import Instance
+
+        project = Instance.get_project()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Current project is unavailable")
+    return project
+
+
+@router.get("/folders", response_model=FolderBrowserResponse, summary="Browse project folders")
+async def browse_project_folders(request: Request, path: Optional[str] = Query(None)):
+    """List directories under configured roots without exposing file contents."""
+    from aegisops.utils.http_file_read_guard import http_private_path_is_blocked, require_http_private_path_access
+
+    require_user(request)
+    roots = Project.allowed_roots()
+    if not roots:
+        raise HTTPException(status_code=400, detail="No project roots are available")
+
+    try:
+        if path:
+            current = Path(path).expanduser().resolve(strict=True)
+        else:
+            home = Path.home().resolve(strict=True)
+            current = (
+                home
+                if any(home == root or home.is_relative_to(root) for root in roots)
+                else roots[0]
+            )
+    except (OSError, RuntimeError) as exc:
+        raise HTTPException(status_code=400, detail="Directory does not exist") from exc
+    if not current.is_dir():
+        raise HTTPException(status_code=400, detail="Path must be a directory")
+    containing_root = next(
+        (root for root in roots if current == root or current.is_relative_to(root)),
+        None,
+    )
+    if containing_root is None:
+        raise HTTPException(status_code=403, detail="Directory is outside the allowed roots")
+    require_http_private_path_access(current)
+
+    entries: List[FolderEntry] = []
+    try:
+        children = sorted(
+            (child for child in current.iterdir() if child.is_dir()),
+            key=lambda child: (child.name.startswith("."), child.name.casefold()),
+        )
+        for child in children:
+            try:
+                resolved = child.resolve(strict=True)
+            except (OSError, RuntimeError):
+                continue
+            if not (resolved == containing_root or resolved.is_relative_to(containing_root)):
+                continue
+            if http_private_path_is_blocked(resolved, resolved=True):
+                continue
+            if not os.access(resolved, os.R_OK | os.X_OK):
+                continue
+            entries.append(FolderEntry(name=child.name, path=str(resolved)))
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="Directory is not readable") from exc
+
+    parent = current.parent
+    parent_value = (
+        str(parent)
+        if current != containing_root and (parent == containing_root or parent.is_relative_to(containing_root))
+        else None
+    )
+    return FolderBrowserResponse(
+        path=str(current),
+        parent=parent_value,
+        roots=[FolderEntry(name=root.name or str(root), path=str(root)) for root in roots],
+        entries=entries,
+    )
+
+
+@router.patch("/{project_id}", response_model=ProjectInfo, summary="Rename project")
+async def update_project(project_id: str, payload: ProjectUpdateRequest, request: Request):
+    user = require_user(request)
+    if not payload.name or not payload.name.strip():
+        # Project.update raises a plain ValueError for this, which the handler
+        # below maps to 404; a blank name is a client error, not a missing project.
+        raise HTTPException(status_code=400, detail="Project name cannot be empty")
+    try:
+        return await Project.update(project_id, owner_id=user.id, name=payload.name)
+    except ProjectNameConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProjectDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{project_id}/share-local",
+    response_model=ProjectInfo,
+    summary="Share project locally",
+)
+async def share_project_local(project_id: str, request: Request):
+    """Share a project and all of its sessions as read-only."""
+
+    user = require_user(request)
+    try:
+        return await Project.set_local_shared(
+            project_id,
+            owner_id=user.id,
+            shared=True,
+        )
+    except ProjectDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{project_id}/unshare-local",
+    response_model=ProjectInfo,
+    summary="Unshare project locally",
+)
+async def unshare_project_local(project_id: str, request: Request):
+    """Cancel local sharing for a project and all of its sessions."""
+
+    user = require_user(request)
+    try:
+        return await Project.set_local_shared(
+            project_id,
+            owner_id=user.id,
+            shared=False,
+        )
+    except ProjectDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.delete("/{project_id}", response_model=bool, summary="Delete project")
+async def delete_project(
+    project_id: str,
+    request: Request,
+    keep_sessions: bool = Query(False, alias="keepSessions"),
+):
+    """Hide the project while preserving project files.
+
+    By default its tasks are archived with it. With ``keepSessions`` they stay
+    active: tasks of a hidden project are listed as ungrouped, and adding the
+    folder again brings them back under it.
+    """
+
+    user = require_user(request)
+    if project_id == DEFAULT_PROJECT_ID:
+        # Not part of any user registry, so the lookup below would report 404;
+        # the default project is protected, not missing.
+        raise HTTPException(status_code=409, detail="The default project cannot be deleted")
+    try:
+        async with Project.lifecycle_guard(project_id):
+            if await Project.get(project_id, owner_id=user.id) is None:
+                raise ValueError(f"Project {project_id} not found")
+            # Check before archiving sessions as well as in Project.delete:
+            # extension-owned tasks can run without any AegisOps session.
+            await Project.require_deletion_allowed(project_id, owner_id=user.id)
+            if keep_sessions:
+                return await Project.delete(project_id, owner_id=user.id)
+
+            project_sessions = [
+                session
+                for session in await Session.list_all_unfiltered()
+                if session.project_id == project_id
+            ]
+            if any(not SessionPolicy.can_delete(session, user) for session in project_sessions):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only session owners can delete project sessions",
+                )
+
+            root_sessions = [
+                session
+                for session in project_sessions
+                if session.parent_id is None
+            ]
+            if project_sessions and not root_sessions:
+                raise ProjectDeletionError("Project sessions do not contain a restorable root task")
+
+            from aegisops.server.routes.session import archive_session_for_user
+
+            newly_archived: list[SessionInfo] = []
+            try:
+                for session in root_sessions:
+                    await archive_session_for_user(session.id, user)
+                    if session.status != "archived":
+                        newly_archived.append(session)
+
+                return await Project.delete(project_id, owner_id=user.id)
+            except BaseException:
+                for session in reversed(newly_archived):
+                    try:
+                        await asyncio.shield(
+                            Session._unarchive_locked(project_id, session.id)
+                        )
+                    except Exception as rollback_exc:
+                        log.warn("project.delete.rollback_failed", {
+                            "project_id": project_id,
+                            "session_id": session.id,
+                            "error": str(rollback_exc),
+                        })
+                raise
+    except ProjectDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/{project_id}", response_model=ProjectInfo, summary="Get project")
+async def get_project(project_id: str, request: Request):
+    user = require_user(request)
+    project = await Project.get(
+        project_id,
+        owner_id=user.id,
+    )
+    if project is None:
+        raise HTTPException(status_code=404, detail=f"Project {project_id} not found")
+    return project

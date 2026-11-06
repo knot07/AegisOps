@@ -1,0 +1,1837 @@
+"""
+Session Prompt management module
+
+Manages system prompts, context injection, and token counting.
+Based on AegisOps' ported src/session/prompt.ts and src/session/system.ts
+"""
+
+from collections import OrderedDict
+from dataclasses import dataclass, replace
+from typing import Awaitable, Callable, Dict, Any, Iterable, List, Optional, TYPE_CHECKING, Union
+from pydantic import BaseModel, Field
+import hashlib
+import json
+import os
+import re
+import sys
+from pathlib import Path
+from datetime import datetime
+import platform
+
+from . import prompt_strings
+from aegisops.memory.injection import (
+    CURATED_MEMORY_INJECTION_TOKENS,
+    USER_MEMORY_INJECTION_TOKENS,
+    render_memory_snapshot,
+)
+from aegisops.utils.log import Log
+
+
+log = Log.create(service="session.prompt")
+
+if TYPE_CHECKING:
+    from aegisops.session.features.memory import SessionMemory
+
+
+# Output token maximum
+OUTPUT_TOKEN_MAX = int(os.getenv("AEGISOPS_OUTPUT_TOKEN_MAX", "32000"))
+
+# CJK punctuation, ideographs, kana, Hangul and full-width forms.  Tokenizers
+# spend about one token per such character, versus roughly four characters per
+# token for ASCII text, so counting them as chars/4 under-reported Chinese
+# sessions ~4x.
+_CJK_CHAR_RE = re.compile(
+    r"[\u3000-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af\uf900-\ufaff\uff00-\uffef]"
+)
+
+SystemPromptCache = Dict[str, Any]
+AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
+StringPromptFactory = Callable[[], Optional[str]]
+AsyncPromptLoader = AsyncPromptFactory
+
+
+# Prompt template directory (same structure as AegisOps)
+PROMPT_DIR = Path(__file__).parent / "prompt"
+
+
+def _load_prompt_file(filename: str) -> str:
+    """Load prompt content from template file."""
+    filepath = PROMPT_DIR / filename
+    try:
+        if filepath.exists():
+            return filepath.read_text(encoding="utf-8")
+    except Exception as e:
+        log.warn("prompt.load_error", {"file": filename, "error": str(e)})
+    return ""
+
+
+def _compose_provider_block(identity: str, guidance: str = "") -> str:
+    """Compose a single Block 0 prompt string."""
+    identity_text = identity.strip()
+    guidance_text = guidance.strip()
+    if not guidance_text:
+        return identity_text
+    return f"{identity_text}\n\n{guidance_text}"
+
+
+# Lazy-loaded prompt templates (loaded from files like AegisOps)
+def get_prompt_anthropic() -> str:
+    return _load_prompt_file("anthropic.txt")
+
+
+def get_prompt_beast() -> str:
+    return _load_prompt_file("beast.txt")
+
+
+def get_prompt_gemini() -> str:
+    return _load_prompt_file("gemini.txt")
+
+
+def get_prompt_general() -> str:
+    return _load_prompt_file("general.txt")
+
+
+def get_prompt_minimax() -> str:
+    return _load_prompt_file("minimax.txt")
+
+
+def get_prompt_codex() -> str:
+    return _load_prompt_file("codex_header.txt")
+
+
+def get_prompt_aegisops_config_guard() -> str:
+    return _load_prompt_file("aegisops_config_guard.txt")
+
+
+PROMPT_DEFAULT = """You are Atlas, the AI assistant of 御枢 · AegisOps, an AI-Native SecOps Platform.
+
+Current product identity: 御枢 · AegisOps. Your assistant name is Atlas.
+Use only these current names in self-introductions and user-facing product descriptions.
+Legacy project names in historical conversations, installed skills or technical paths do not define your identity. Do not volunteer or repeat legacy branding in your narrative.
+Prefer concise, directly useful replies. Do not expose Worker/session IDs or internal task keys in ordinary user-facing progress summaries unless the user is debugging scheduling or explicitly asks for these details.
+
+You specialize in cybersecurity operations including:
+- Threat detection and analysis (log analysis, IOC identification, behavioral detection)
+- Incident response (investigation, containment, remediation recommendations)
+- Vulnerability assessment (scan analysis, prioritization, security reviews)
+- Security automation (detection rules: SIGMA, YARA, Snort, Suricata)
+- Malware & Forensics (artifact analysis, malware identification)
+- Compliance and hardening (CIS, NIST, PCI-DSS, configuration reviews)
+- Other security operations tasks
+
+IMPORTANT: Accuracy is your core principle. All outputs must be grounded in verifiable evidence, explicit context, or validated reasoning. Do not speculate, fabricate facts, or infer beyond the available information. When uncertainty exists, state it clearly and constrain conclusions accordingly.
+
+For cybersecurity investigations, assessments, and defensive automation, apply this workflow as relevant:
+1. Gather relevant evidence using the available tools.
+2. Analyze and correlate the evidence. Consider operational context and plausible benign explanations, and do not infer beyond what the evidence supports.
+3. Document findings with severity, confidence, and traceable evidence such as timestamps, source paths, and line numbers where applicable. Redact secrets and sensitive data.
+4. Recommend actionable defensive remediation or response steps.
+5. Verify findings before declaring threats or vulnerabilities and, when practical, test detection or remediation logic.
+
+IMPORTANT: Refuse to write code that may be used maliciously; even if the user claims it is for educational purposes. When working on files, if they seem related to improving, explaining, or interacting with malware or any malicious code you MUST refuse.
+IMPORTANT: Before you begin work, think about what the task you're working on is supposed to do. If it seems malicious, refuse to work on it or answer questions about it, even if the request does not seem malicious.
+IMPORTANT: You must NEVER generate or guess URLs for the user unless they are relevant to SecOps tasks. You may use URLs provided by the user in their messages or local files.
+"""
+
+class PromptTemplate(BaseModel):
+    """Prompt template"""
+    name: str = Field(..., description="Template name")
+    content: str = Field(..., description="Template content")
+    variables: List[str] = Field(default_factory=list, description="Template variables")
+
+
+class ContextInfo(BaseModel):
+    """Context information for prompt injection"""
+    project_name: Optional[str] = None
+    project_path: Optional[str] = None
+    current_file: Optional[str] = None
+    file_content: Optional[str] = None
+    file_tree: Optional[List[str]] = None
+    git_branch: Optional[str] = None
+    git_status: Optional[str] = None
+    vcs: Optional[str] = None  # "git" or None
+    custom: Dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SystemPromptBlock:
+    """Assembled system prompt layer."""
+
+    name: str
+    content: str
+    cache_scope: str
+
+
+@dataclass(frozen=True)
+class TurnPromptContext:
+    """Runtime prompt values collected once before deterministic assembly."""
+
+    tool_catalog: Optional[str] = None
+    device_asset_hint: Optional[str] = None
+    sandbox_context: Optional[str] = None
+    channel_context: Optional[str] = None
+    additional_context: Optional[str] = None
+    text_tool_catalog: Optional[str] = None
+    tool_results_reminder: Optional[str] = None
+    repeated_tool_calls_reminder: Optional[str] = None
+    worktree: Optional[str] = None
+    config_instructions: tuple[str, ...] = ()
+    tool_revision: Optional[int] = None
+    device_revision: Optional[int] = None
+    minimal_prompt: Optional[bool] = None
+
+
+class SystemPrompt:
+    """
+    System Prompt generation namespace
+    
+    Mirrors original AegisOps SystemPrompt namespace from system.ts
+    Handles provider-specific prompt generation and environment info
+    """
+    
+    # Rule files to search for custom instructions
+    LOCAL_RULE_FILES = ["AGENTS.md", "CLAUDE.md", "CONTEXT.md"]
+    
+    @classmethod
+    def header(cls, provider_id: str) -> List[str]:
+        """
+        Get provider-specific header prompts
+        
+        Args:
+            provider_id: Provider identifier
+            
+        Returns:
+            List of header strings
+        """
+        # Add spoofing header for non-Anthropic providers using Claude
+        if "anthropic" in provider_id.lower():
+            return []
+        return []
+    
+    @classmethod
+    def provider(cls, model_id: Optional[str]) -> List[str]:
+        """
+        Get Block 0: stable identity + model-specific guidance.
+
+        ``PROMPT_DEFAULT`` is the canonical AegisOps identity block. Model
+        templates contribute only supplemental guidance, and should not
+        redefine the agent identity themselves.
+        
+        Args:
+            model_id: Model identifier
+            
+        Returns:
+            List of prompt strings
+        """
+        model_lower = (model_id or "").lower()
+
+        if "minimax" in model_lower:
+            prompt = get_prompt_minimax()
+            guidance = prompt if prompt else ""
+            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
+
+        # GPT-5: use codex_header.txt
+        if "gpt-5" in model_lower:
+            prompt = get_prompt_codex()
+            guidance = prompt if prompt else ""
+            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
+
+        # GPT/o1/o3: use beast.txt
+        if "gpt-" in model_lower or "o1" in model_lower or "o3" in model_lower:
+            prompt = get_prompt_beast()
+            guidance = prompt if prompt else ""
+            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
+
+        # Gemini: use gemini.txt
+        if "gemini" in model_lower:
+            prompt = get_prompt_gemini()
+            guidance = prompt if prompt else ""
+            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
+
+        # Claude: use anthropic.txt
+        if "claude" in model_lower:
+            prompt = get_prompt_anthropic()
+            guidance = prompt if prompt else ""
+            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
+
+        # Other models: use general.txt
+        prompt = get_prompt_general()
+        guidance = prompt if prompt else ""
+        return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
+    
+    @classmethod
+    async def environment(
+        cls,
+        directory: Optional[str] = None,
+        vcs: Optional[str] = None,
+    ) -> List[str]:
+        """
+        Generate environment information for system prompt
+        
+        Args:
+            directory: Working directory
+            vcs: Version control system type ("git" or None)
+            
+        Returns:
+            List of environment info strings
+        """
+        stable = cls.environment_stable(directory=directory, vcs=vcs)
+        runtime = cls.runtime_metadata(directory=directory, vcs=vcs)
+        return stable + runtime
+
+    @classmethod
+    def environment_stable(
+        cls,
+        directory: Optional[str] = None,
+        vcs: Optional[str] = None,
+    ) -> List[str]:
+        """Build stable workspace metadata that should stay cache-friendly."""
+        working_dir = directory or os.getcwd()
+        source_code_dir = str(
+            Path(
+                os.getenv(
+                    "AEGISOPS_REPO_ROOT",
+                    str(Path(__file__).resolve().parents[2]),
+                )
+            )
+            .expanduser()
+            .resolve()
+        )
+        is_git = vcs == "git"
+
+        env_info = [
+            "Here is some useful information about the environment you are running in:",
+            "<env>",
+            f"  aegisops source code directory: {source_code_dir}",
+            f"  current working directory: {working_dir}",
+            f"  Is directory a git repo: {'yes' if is_git else 'no'}",
+            f"  Platform: {platform.system().lower()}",
+            "   Python executor: uv python",
+            "   Python package manager: uv pip",
+            "</env>",
+        ]
+        return ["\n".join(env_info)]
+
+    @classmethod
+    def runtime_metadata(
+        cls,
+        directory: Optional[str] = None,
+        vcs: Optional[str] = None,
+        session_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        provider_id: Optional[str] = None,
+    ) -> List[str]:
+        """Build dynamic runtime metadata that should stay near the prompt tail."""
+        del directory, vcs  # Reserved for future runtime metadata.
+
+        now = datetime.now()
+
+        lines = [
+            "## Runtime Metadata",
+            f"Today's date: {now.strftime('%A %b %d, %Y')}",
+            (
+                "Agent outputs: use a filename-only path unless the user specifies a path; "
+                "the write tool routes it to this Session's dated Workspace outputs directory."
+            ),
+            f"Platform hint: {platform.system().lower()}",
+        ]
+        if session_id:
+            lines.append(f"Session ID: {session_id}")
+        if model_id:
+            lines.append(f"Model: {model_id}")
+        if provider_id:
+            lines.append(f"Provider: {provider_id}")
+        return ["\n".join(lines)]
+
+    @classmethod
+    def resolve_custom_instruction_paths(
+        cls,
+        directory: Optional[str] = None,
+        worktree: Optional[str] = None,
+        config_instructions: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Resolve custom instruction file paths without reading them."""
+        resolved_paths: List[str] = []
+        seen_paths: set[str] = set()
+
+        search_dir = directory or os.getcwd()
+        root_dir = worktree or search_dir
+
+        for rule_file in cls.LOCAL_RULE_FILES:
+            path = cls._find_file_up(rule_file, search_dir, root_dir)
+            if path and path not in seen_paths:
+                seen_paths.add(path)
+                resolved_paths.append(path)
+                break
+
+        if config_instructions:
+            for instruction_path in config_instructions:
+                if instruction_path.startswith(("http://", "https://")):
+                    continue
+                if instruction_path.startswith("~/"):
+                    instruction_path = os.path.expanduser(instruction_path)
+                if not os.path.isabs(instruction_path):
+                    instruction_path = os.path.join(search_dir, instruction_path)
+                if instruction_path not in seen_paths and os.path.exists(instruction_path):
+                    seen_paths.add(instruction_path)
+                    resolved_paths.append(instruction_path)
+
+        return resolved_paths
+
+    @classmethod
+    def custom_signature(
+        cls,
+        directory: Optional[str] = None,
+        worktree: Optional[str] = None,
+        config_instructions: Optional[List[str]] = None,
+    ) -> List[tuple[str, int, int]]:
+        """Return lightweight signatures for custom instruction files."""
+        signatures: List[tuple[str, int, int]] = []
+        for path in cls.resolve_custom_instruction_paths(
+            directory=directory,
+            worktree=worktree,
+            config_instructions=config_instructions,
+        ):
+            try:
+                stat = Path(path).stat()
+                signatures.append((path, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                continue
+        return signatures
+    
+    @classmethod
+    async def custom(
+        cls,
+        directory: Optional[str] = None,
+        worktree: Optional[str] = None,
+        config_instructions: Optional[List[str]] = None,
+    ) -> List[str]:
+        """
+        Load custom instructions from rule files
+        
+        Searches for AGENTS.md, CLAUDE.md, CONTEXT.md in directory hierarchy
+        
+        Args:
+            directory: Starting directory
+            worktree: Git worktree root
+            config_instructions: Additional instruction paths from config
+            
+        Returns:
+            List of custom instruction strings
+        """
+        results = []
+        for instruction_path in cls.resolve_custom_instruction_paths(
+            directory=directory,
+            worktree=worktree,
+            config_instructions=config_instructions,
+        ):
+            try:
+                content = Path(instruction_path).read_text(encoding="utf-8")
+                results.append(f"Instructions from: {instruction_path}\n{content}")
+            except Exception as e:
+                log.warn("custom.read_error", {"path": instruction_path, "error": str(e)})
+
+        return results
+    
+    @staticmethod
+    def _find_file_up(filename: str, start_dir: str, stop_dir: str) -> Optional[str]:
+        """
+        Search for file upwards from start_dir to stop_dir
+        
+        Args:
+            filename: File to search for
+            start_dir: Starting directory
+            stop_dir: Stop searching at this directory
+            
+        Returns:
+            Full path if found, None otherwise
+        """
+        current = Path(start_dir).resolve()
+        stop = Path(stop_dir).resolve()
+        
+        while True:
+            candidate = current / filename
+            if candidate.exists():
+                return str(candidate)
+            
+            if current == stop or current == current.parent:
+                break
+            current = current.parent
+        
+        return None
+
+
+class SessionPrompt:
+    """
+    Session Prompt management namespace
+    
+    Similar to AegisOps's SessionPrompt namespace
+    """
+    
+    # Output token maximum (exposed for other modules)
+    OUTPUT_TOKEN_MAX = OUTPUT_TOKEN_MAX
+    
+    # Template cache
+    _templates: Dict[str, PromptTemplate] = {}
+
+    @classmethod
+    def count_tokens(cls, text: str) -> int:
+        """Count tokens using a fast character-based estimate.
+
+        ASCII text counts as ``len(text) // 4``; each CJK character counts as
+        one token — no tiktoken, no model call.  Fast enough for every-step
+        overflow detection while staying within the same order of magnitude
+        as provider-side counts.  The fixed 85 % × context_window overflow
+        threshold tolerates the remaining slack without a safety margin.
+        """
+        if not text:
+            return 0
+        if text.isascii():
+            return len(text) // 4
+        # ``sub`` counts in C; iterating matches cost ~2x on long CJK text.
+        cjk_chars = len(text) - len(_CJK_CHAR_RE.sub("", text))
+        return cjk_chars + (len(text) - cjk_chars) // 4
+    
+    @classmethod
+    def count_message_tokens(cls, messages: List[Any]) -> int:
+        """
+        Count total tokens in messages
+        
+        Args:
+            messages: List of messages (can be dict or objects with content attr)
+            
+        Returns:
+            Total token count
+        """
+        total = 0
+        for msg in messages:
+            if isinstance(msg, dict):
+                content = msg.get("content", "")
+            elif hasattr(msg, "content"):
+                content = msg.content
+            else:
+                content = str(msg)
+            total += cls.count_tokens(content)
+        return total
+    
+    @classmethod
+    def estimate_tokens(cls, text: str) -> int:
+        """Alias for :meth:`count_tokens` — both return the same estimate.
+
+        Kept for callers that still import ``estimate_tokens`` by name (pruning,
+        a handful of log statements, legacy tests).  ``count_tokens`` is the
+        canonical entry point; this thin wrapper forwards to it so the two
+        names cannot drift apart.
+        """
+        return cls.count_tokens(text)
+    
+    # ------------------------------------------------------------------
+    # E6 — per-message token cache
+    # ------------------------------------------------------------------
+    # ``estimate_full_context_tokens`` is called once per agent step, and
+    # for long sessions the dominant cost is the message-level
+    # ``count_tokens`` invocations.  98%+ of the messages have not
+    # changed between turns, so we memoise the per-message token total
+    # keyed by message id.  Streaming / in-flight messages are excluded
+    # (they're identified by ``finish is None``) because their content
+    # is still mutating.
+    #
+    # The cache is bounded by ``_MESSAGE_CACHE_MAX``; eviction is FIFO
+    # via ``OrderedDict.popitem(last=False)``.  Callers that mutate a
+    # message in place (e.g. ``pruning.prune`` marks a tool part as
+    # compacted) MUST call :meth:`invalidate_message_cache` so the next
+    # estimate re-counts the message instead of returning the stale
+    # pre-compaction figure.
+    # ------------------------------------------------------------------
+    _MESSAGE_CACHE_MAX = 2_000
+    _message_token_cache: "OrderedDict[str, int]" = OrderedDict()
+
+    @classmethod
+    async def estimate_full_context_tokens(
+        cls,
+        session_id: str,
+        messages: list,
+        *,
+        policy: Optional[Any] = None,
+        apply_safety_margin: Optional[bool] = None,
+    ) -> int:
+        """Estimate total tokens in the context sent to the LLM.
+
+        Sums the message bodies and their parts (tool inputs/outputs,
+        reasoning) using the per-message LRU cache (E6).  Returns a pure
+        chars/4 figure with no overhead or safety multiplier — the fixed
+        85 % × context_window overflow threshold leaves enough headroom
+        for that slack.
+
+        ``policy`` and ``apply_safety_margin`` are accepted for backward
+        compatibility with callers built against the previous v2 contract,
+        but are unused in the current implementation.
+        """
+        del policy, apply_safety_margin  # legacy parameters, kept for ABI
+
+        total = 0
+        for msg in messages:
+            total += await cls._tokens_for_message(session_id, msg)
+        return total
+
+    @classmethod
+    async def estimate_tool_result_tokens(
+        cls,
+        session_id: str,
+        message_id: str,
+    ) -> int:
+        """Estimate tool-result tokens added after an assistant model call."""
+        from aegisops.session.message import Message
+
+        try:
+            parts = await Message.parts(message_id, session_id)
+        except Exception as exc:
+            log.debug("prompt.tool_result_estimate.parts_failed", {
+                "message_id": message_id,
+                "error": str(exc),
+            })
+            return 0
+
+        total = 0
+        for part in parts:
+            if getattr(part, "type", None) != "tool":
+                continue
+            state = getattr(part, "state", None)
+            if state is None:
+                continue
+            time_info = getattr(state, "time", None)
+            if isinstance(time_info, dict) and time_info.get("compacted"):
+                total += 10
+                continue
+
+            status = getattr(state, "status", None)
+            if status == "completed":
+                output = getattr(state, "output", None)
+                if output:
+                    total += cls.count_tokens(
+                        output if isinstance(output, str) else str(output)
+                    )
+            elif status == "error":
+                error = getattr(state, "error", "Unknown error")
+                total += cls.count_tokens(f"Error: {error}")
+            elif status == "running":
+                total += cls.count_tokens("Error: Tool execution was interrupted")
+        return total
+
+    @classmethod
+    async def _tokens_for_message(cls, session_id: str, msg: Any) -> int:
+        """Return the token contribution of a single message (E6).
+
+        Cached by ``msg.id`` for messages that have finished streaming
+        (``finish`` is non-None and not ``"streaming"``).  In-flight
+        messages skip the cache because their content / parts are still
+        mutating.  Tool parts whose ``state.time.compacted`` flag has
+        flipped are NOT re-counted automatically; callers that flip the
+        flag (currently ``pruning.prune`` and
+        ``pruning.truncate_oversized_tool_outputs``) MUST invalidate the
+        affected ``msg.id`` via :meth:`invalidate_message_cache`.
+        """
+        from aegisops.session.message import Message
+
+        msg_id = getattr(msg, 'id', None) if not isinstance(msg, dict) else msg.get('id')
+        finish = getattr(msg, 'finish', None) if not isinstance(msg, dict) else msg.get('finish')
+        # ``finish is None`` means the message is still being streamed.
+        cacheable = bool(msg_id) and finish is not None and finish != "streaming"
+        if cacheable and msg_id in cls._message_token_cache:
+            # Refresh LRU ordering so hot messages stay near the tail.
+            cls._message_token_cache.move_to_end(msg_id)
+            return cls._message_token_cache[msg_id]
+
+        total = 0
+
+        # Message text content
+        content = ""
+        if isinstance(msg, dict):
+            content = msg.get("content", "")
+        elif hasattr(msg, "content"):
+            content = msg.content or ""
+
+        # Message parts (tool inputs/outputs, text parts, reasoning)
+        parts: list = []
+        try:
+            parts = await Message.parts(msg_id or "", session_id)
+            for part in parts:
+                if part.type == "text":
+                    if getattr(part, "ignored", False):
+                        continue
+                    total += cls.count_tokens(getattr(part, 'text', ''))
+                elif part.type == "tool":
+                    state = getattr(part, 'state', None)
+                    if state:
+                        tool_input = getattr(state, 'input', None)
+                        if tool_input:
+                            input_str = (
+                                tool_input
+                                if isinstance(tool_input, str)
+                                else str(tool_input)
+                            )
+                            total += cls.count_tokens(input_str)
+                        time_info = getattr(state, 'time', None)
+                        is_compacted = (
+                            isinstance(time_info, dict)
+                            and time_info.get("compacted")
+                        )
+                        if is_compacted:
+                            total += 10  # post-compaction placeholder
+                        else:
+                            tool_output = getattr(state, 'output', None)
+                            if tool_output:
+                                output_str = (
+                                    tool_output
+                                    if isinstance(tool_output, str)
+                                    else str(tool_output)
+                                )
+                                total += cls.count_tokens(output_str)
+                elif part.type == "reasoning":
+                    total += cls.count_tokens(getattr(part, 'text', ''))
+        except Exception as _e:
+            log.debug("prompt.token_estimate.parts_failed", {
+                "message_id": msg_id or '?', "error": str(_e),
+            })
+            total += 50
+        if not parts:
+            # The runner sends a message's parts.  An in-memory assistant
+            # message also carries its text as ``content`` (set by
+            # ``Message.update``, never persisted), so counting both would
+            # count that text twice.
+            total += cls.count_tokens(content)
+
+        if cacheable:
+            cls._message_token_cache[msg_id] = total
+            cls._message_token_cache.move_to_end(msg_id)
+            while len(cls._message_token_cache) > cls._MESSAGE_CACHE_MAX:
+                cls._message_token_cache.popitem(last=False)
+
+        return total
+
+    @classmethod
+    def invalidate_message_cache(
+        cls,
+        message_ids: Union[str, Iterable[str], None] = None,
+    ) -> None:
+        """Invalidate cached per-message token totals.
+
+        Pass a string for one message, an iterable for several, or
+        ``None`` to clear the whole cache.  Idempotent — silently
+        ignores keys that were never cached.
+        """
+        if message_ids is None:
+            cls._message_token_cache.clear()
+            return
+        if isinstance(message_ids, str):
+            cls._message_token_cache.pop(message_ids, None)
+            return
+        for mid in message_ids:
+            if mid:
+                cls._message_token_cache.pop(mid, None)
+
+    @classmethod
+    def load_template(cls, path: str) -> Optional[PromptTemplate]:
+        """
+        Load prompt template from file
+        
+        Args:
+            path: Path to template file (.txt)
+            
+        Returns:
+            PromptTemplate or None if not found
+        """
+        if path in cls._templates:
+            return cls._templates[path]
+        
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            
+            # Extract variables from template (format: {{variable}})
+            import re
+            variables = re.findall(r'\{\{(\w+)\}\}', content)
+            
+            template = PromptTemplate(
+                name=os.path.basename(path),
+                content=content,
+                variables=list(set(variables)),
+            )
+            cls._templates[path] = template
+            return template
+            
+        except Exception as e:
+            log.error("prompt.load_template.error", {"path": path, "error": str(e)})
+            return None
+    
+    @classmethod
+    def render_template(cls, template: PromptTemplate, variables: Dict[str, str]) -> str:
+        """
+        Render template with variables
+        
+        Args:
+            template: Template to render
+            variables: Variable values
+            
+        Returns:
+            Rendered content
+        """
+        content = template.content
+        for var in template.variables:
+            if var in variables:
+                content = content.replace(f"{{{{{var}}}}}", variables[var])
+        return content
+    
+    @classmethod
+    async def build_memory_context(
+        cls,
+        session_memory: Optional["SessionMemory"],
+        user_message: str,
+        max_results: int = 3,
+    ) -> Optional[str]:
+        """
+        Build memory context section from relevant memories
+        
+        Args:
+            session_memory: SessionMemory instance
+            user_message: Current user message to search against
+            max_results: Maximum memory results to include
+            
+        Returns:
+            Formatted memory context string or None
+        """
+        if not session_memory or not session_memory.enabled:
+            return None
+        
+        try:
+            # Search for relevant memories
+            results = await session_memory.search(
+                query=user_message,
+                max_results=max_results,
+            )
+            
+            if not results:
+                return None
+            
+            # Format memory results
+            memory_parts = ["## Relevant Memory"]
+            memory_parts.append("Here are some relevant memories from previous sessions:\n")
+            
+            for i, result in enumerate(results, 1):
+                memory_parts.append(f"### Memory {i} ({result.path}, score: {result.score:.2f})")
+                memory_parts.append(f"{result.snippet}\n")
+            
+            return "\n".join(memory_parts)
+        
+        except Exception as e:
+            log.warn("prompt.memory.failed", {"error": str(e)})
+            return None
+
+    @classmethod
+    def _system_prompt_cache_digest(cls, payload: Dict[str, Any]) -> str:
+        """Create a stable digest for prompt inputs that can be large."""
+        encoded = json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()[:16]
+
+    @classmethod
+    def _layer_cache_key(
+        cls,
+        *,
+        name: str,
+        digest_inputs: Dict[str, Any],
+    ) -> str:
+        """Build a layer cache key for one prompt block."""
+        return f"system_prompt_block:{name}:{cls._system_prompt_cache_digest(digest_inputs)}"
+
+    @classmethod
+    def _read_cached_prompt_block(
+        cls,
+        static_cache: Optional[SystemPromptCache],
+        cache_key: str,
+    ) -> Optional[str]:
+        """Return a cached prompt block when available."""
+        if static_cache is None:
+            return None
+        cached = static_cache.get(cache_key)
+        if not isinstance(cached, str):
+            return None
+        return cached
+
+    @classmethod
+    def _write_cached_prompt_block(
+        cls,
+        static_cache: Optional[SystemPromptCache],
+        cache_key: str,
+        content: str,
+    ) -> None:
+        """Store a single prompt block in the shared cache."""
+        if static_cache is None:
+            return
+        static_cache[cache_key] = content
+
+    @classmethod
+    def _normalize_prompt_text(cls, content: Optional[str]) -> str:
+        """Trim prompt text and normalize empty values."""
+        return (content or "").strip()
+
+    @classmethod
+    def _join_prompt_parts(cls, parts: Iterable[str]) -> str:
+        """Join prompt fragments while discarding empty values."""
+        return "\n\n".join(
+            part.strip()
+            for part in parts
+            if isinstance(part, str) and part.strip()
+        )
+
+    @classmethod
+    def _build_cached_prompt_block(
+        cls,
+        *,
+        static_cache: Optional[SystemPromptCache],
+        name: str,
+        cache_scope: str,
+        digest_inputs: Dict[str, Any],
+        builder: Callable[[], str],
+    ) -> Optional[SystemPromptBlock]:
+        """Build or reuse a cached sync prompt block."""
+        cache_key = cls._layer_cache_key(name=name, digest_inputs=digest_inputs)
+        content = cls._read_cached_prompt_block(static_cache, cache_key)
+        if content is None:
+            content = cls._normalize_prompt_text(builder())
+            cls._write_cached_prompt_block(static_cache, cache_key, content)
+        if not content:
+            return None
+        return SystemPromptBlock(
+            name=name,
+            content=content,
+            cache_scope=cache_scope,
+        )
+
+    @classmethod
+    async def _build_cached_async_prompt_block(
+        cls,
+        *,
+        static_cache: Optional[SystemPromptCache],
+        name: str,
+        cache_scope: str,
+        digest_inputs: Dict[str, Any],
+        loader: AsyncPromptLoader,
+    ) -> Optional[SystemPromptBlock]:
+        """Build or reuse a cached async prompt block."""
+        cache_key = cls._layer_cache_key(name=name, digest_inputs=digest_inputs)
+        content = cls._read_cached_prompt_block(static_cache, cache_key)
+        if content is None:
+            content = cls._normalize_prompt_text(await loader())
+            if content:
+                cls._write_cached_prompt_block(static_cache, cache_key, content)
+        if not content:
+            return None
+        return SystemPromptBlock(
+            name=name,
+            content=content,
+            cache_scope=cache_scope,
+        )
+
+    @classmethod
+    def _build_tool_guidance_prompt(
+        cls,
+        use_text_tool_call_mode: bool = False,
+    ) -> str:
+        """Build stable protocol guidance for tool use."""
+        return (
+            prompt_strings._build_minimax_tool_instructions()
+            if use_text_tool_call_mode
+            else prompt_strings._build_tool_instructions()
+        )
+
+    @classmethod
+    def _build_isolated_tool_guidance_prompt(
+        cls,
+        use_text_tool_call_mode: bool = False,
+    ) -> str:
+        """Build tool guidance that never references undeclared helper tools."""
+        if use_text_tool_call_mode:
+            return prompt_strings._build_minimax_tool_instructions()
+        return """## Tool Calling Rules
+
+Use only tools whose callable schemas are provided for this turn.
+Treat every schema as strict: copy tool and parameter names exactly, omit unknown parameters, and never call an unavailable tool.
+Invoke tools only through the native API tool-calling mechanism; never print tool-call JSON or XML as response text.
+Do not repeat an identical tool call in the same response."""
+
+    @classmethod
+    def _build_memory_guidance_prompt(
+        cls,
+        prompt_tool_names: Iterable[str],
+        memory_bootstrap_data: Optional[Dict[str, Any]],
+    ) -> Optional[str]:
+        """Build filesystem Memory guidance beside the frozen snapshot."""
+        if not memory_bootstrap_data:
+            return None
+        required_tools = {
+            "read",
+            "write",
+            "edit",
+            "glob",
+            "grep",
+            "memory_search",
+        }
+        if not required_tools.issubset(set(prompt_tool_names)):
+            return None
+        instructions = memory_bootstrap_data.get("instructions", "")
+        return cls._normalize_prompt_text(instructions)
+
+    @classmethod
+    def _build_memory_bootstrap_prompts(
+        cls,
+        *,
+        session_id: str,
+        memory_bootstrap_data: Optional[Dict[str, Any]],
+    ) -> List[str]:
+        """Build memory snapshot prompt blocks from bootstrap data."""
+        if not memory_bootstrap_data:
+            return []
+
+        prompts: List[str] = []
+        user_profile = memory_bootstrap_data.get("user_profile")
+        if user_profile and user_profile.get("inject"):
+            profile_content = user_profile.get("content", "")
+            if profile_content:
+                prompts.append(
+                    render_memory_snapshot(
+                        user_profile,
+                        session_id=session_id,
+                        token_budget=USER_MEMORY_INJECTION_TOKENS,
+                        count_tokens=cls.count_tokens,
+                    )
+                )
+
+        main_memory = memory_bootstrap_data.get("main_memory")
+        if main_memory and main_memory.get("inject"):
+            memory_content = main_memory.get("content", "")
+            if memory_content:
+                prompts.append(
+                    render_memory_snapshot(
+                        main_memory,
+                        session_id=session_id,
+                        token_budget=CURATED_MEMORY_INJECTION_TOKENS,
+                        count_tokens=cls.count_tokens,
+                    )
+                )
+
+        project_memory = memory_bootstrap_data.get("project_memory")
+        if project_memory and project_memory.get("inject"):
+            project_content = project_memory.get("content", "")
+            if project_content:
+                prompts.append(
+                    render_memory_snapshot(
+                        project_memory,
+                        session_id=session_id,
+                        token_budget=CURATED_MEMORY_INJECTION_TOKENS,
+                        count_tokens=cls.count_tokens,
+                    )
+                )
+
+        log.debug("prompt.memory_injected", {
+            "session_id": session_id,
+            "has_user_profile": user_profile is not None,
+            "has_main": main_memory is not None,
+            "has_project": project_memory is not None,
+        })
+        return prompts
+
+    @classmethod
+    def _prompt_blocks_to_list(
+        cls,
+        blocks: Iterable[Optional[SystemPromptBlock]],
+    ) -> List[str]:
+        """Convert prompt blocks back to the external List[str] API."""
+        return [
+            block.content
+            for block in blocks
+            if block is not None and block.content.strip()
+        ]
+
+    @classmethod
+    def _print_system_prompts_for_debug(
+        cls,
+        *,
+        session_id: str,
+        agent_name: str,
+        provider_id: str,
+        model_id: str,
+        blocks: Iterable[SystemPromptBlock],
+    ) -> None:
+        """Print prompt blocks when AEGISOPS_PRINT_SYSTEM_PROMPT is enabled."""
+        if os.getenv("AEGISOPS_PRINT_SYSTEM_PROMPT", "").lower() not in ("1", "true", "yes"):
+            return
+
+        header = (
+            f"\n=== system_prompt session={session_id} "
+            f"agent={agent_name} model={provider_id}/{model_id} ==="
+        )
+        print(header, file=sys.stderr)
+        for idx, block in enumerate(blocks):
+            print(
+                f"\n--- prompt[{idx}] {block.name} scope={block.cache_scope} "
+                f"---\n{block.content}\n",
+                file=sys.stderr,
+            )
+        print("=== end system_prompt ===\n", file=sys.stderr)
+
+    @classmethod
+    def _build_minimal_environment(cls, session_directory: Optional[str]) -> str:
+        """Build the small runtime environment block used by system subagents."""
+        working_dir = session_directory or os.getcwd()
+        today = datetime.now().strftime("%A %b %d, %Y")
+        # Resolve from AegisOps itself, not the audit target or session directory.
+        source_root = Path(__file__).resolve().parents[2]
+        venv = source_root / ".venv"
+        python = venv / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
+        available = (source_root / "pyproject.toml").is_file() and python.is_file()
+        lines = [
+            "## Environment",
+            f"Current working directory: {working_dir}",
+            f"Platform: {platform.system().lower()}",
+            f"Today's date: {today}",
+        ]
+        if not available:
+            # An installed release has no source .venv: a path named here would
+            # be run anyway and fail (R04, 2026-10-26), so none is named.
+            return "\n".join([
+                *lines,
+                "AegisOps source .venv available: no",
+                "This AegisOps installation provides no host Python environment. Do not run an interpreter from a path "
+                "inside the AegisOps installation; report the missing environment before Python-dependent host work. "
+                "Container commands use the container's Python.",
+            ])
+        return "\n".join([
+            *lines,
+            f"Default host Python virtual environment: {venv}",
+            f"Default host Python interpreter: {python}",
+            "AegisOps source .venv available: yes",
+            "For host-side Python work, default to this AegisOps source .venv, independently of the current working directory. "
+            "Invoke its interpreter by a quoted absolute path; use that interpreter with -m pip, -m pytest, or other modules. "
+            "In PowerShell, use the & call operator before the quoted interpreter path. "
+            "No activate command is needed; bare python/pip commands are not guaranteed to select this environment. "
+            "This is the host helper environment, not the environment of the project being worked on. "
+            "Container commands use the container's Python; do not assume this host path exists inside a container.",
+        ])
+
+    @classmethod
+    async def _build_agent_skills_prompt(
+        cls,
+        skill_names: Iterable[str],
+        *,
+        session_id: Optional[str] = None,
+    ) -> str:
+        """Load host-selected Agent skills as trusted system instructions.
+
+        A managed skill keeps the version this session first read, the same
+        one the skill tool hands the session (aegisops.content.managed).
+        """
+        from aegisops.skill.skill import Skill
+
+        names = list(dict.fromkeys(
+            str(name).strip() for name in skill_names if str(name).strip()
+        ))
+        sections: List[str] = []
+        for name in names:
+            skill = await Skill.get(name)
+            if skill is None or Skill.is_disabled(name):
+                raise ValueError(f"Configured Agent skill is unavailable: {name}")
+            try:
+                content = (await Skill.read_body(skill, scope=session_id)).strip()
+            except Exception as exc:
+                raise ValueError(f"Failed to load configured Agent skill {name}: {exc}") from exc
+            if content:
+                sections.append("\n".join([
+                    f"## Trusted Agent Skill: {name}",
+                    f"Base directory: {Skill.base_directory(skill) or '(managed skill: no files on disk)'}",
+                    content,
+                ]))
+        return cls._join_prompt_parts(sections)
+
+    @classmethod
+    async def _is_builtin_system_subagent_session(
+        cls,
+        *,
+        session_id: str,
+        agent_name: str,
+    ) -> bool:
+        """Return true when a built-in child uses the minimal prompt profile."""
+        try:
+            from aegisops.agent.registry import Agent
+            from aegisops.session.session import Session
+
+            agent = await Agent.get(agent_name)
+            if not agent:
+                return False
+            if agent.mode != "subagent" or "system" not in (agent.tags or []):
+                return False
+
+            builtin_agents_dir = Path(__file__).resolve().parents[1] / "agent" / "agents"
+            name_candidates = {
+                agent.name,
+                agent.name.replace("-", "_"),
+                agent_name,
+                agent_name.replace("-", "_"),
+            }
+            if not any((builtin_agents_dir / name / "agent.yaml").exists() for name in name_candidates):
+                return False
+
+            session = await Session.get_by_id(session_id)
+            metadata = getattr(session, "metadata", {}) if session else {}
+            if metadata.get("evolution"):
+                return False
+            return bool(session and session.parent_id)
+        except Exception as exc:
+            log.debug("prompt.subagent_minimal_check_failed", {
+                "session_id": session_id,
+                "agent_name": agent_name,
+                "error": str(exc),
+            })
+            return False
+
+    @classmethod
+    def _append_turn_tail_blocks(
+        cls,
+        *,
+        blocks: List[SystemPromptBlock],
+        turn_context: TurnPromptContext,
+        static_cache: Optional[SystemPromptCache],
+        session_id: str,
+    ) -> None:
+        """Append per-turn values in the exact order sent to the model."""
+        tail_values = [
+            ("turn_additional_context", turn_context.additional_context),
+            ("text_tool_catalog", turn_context.text_tool_catalog),
+            ("tool_results_reminder", turn_context.tool_results_reminder),
+            (
+                "repeated_tool_calls_reminder",
+                turn_context.repeated_tool_calls_reminder,
+            ),
+        ]
+        for name, content in tail_values:
+            normalized_content = cls._normalize_prompt_text(content)
+            block = cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name=name,
+                cache_scope="runtime_tail",
+                digest_inputs={"session_id": session_id, "content": content or ""},
+                builder=lambda: normalized_content,
+            )
+            if block is not None:
+                blocks.append(block)
+
+    @classmethod
+    def _build_subagent_minimal_blocks(
+        cls,
+        *,
+        session_id: str,
+        session_directory: Optional[str],
+        agent_prompt: Optional[str],
+        agent_skills_prompt: str,
+        turn_context: TurnPromptContext,
+        static_cache: Optional[SystemPromptCache],
+    ) -> List[SystemPromptBlock]:
+        """Build minimal prompt blocks for built-in system subagents."""
+        blocks: List[SystemPromptBlock] = []
+        guard_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="aegisops_config_guard",
+            cache_scope="global",
+            digest_inputs={"prompt": get_prompt_aegisops_config_guard()},
+            builder=lambda: get_prompt_aegisops_config_guard().strip(),
+        )
+        if guard_block is not None:
+            blocks.append(guard_block)
+
+        agent_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="agent_identity",
+            cache_scope="agent",
+            digest_inputs={"agent_prompt": agent_prompt or ""},
+            builder=lambda: cls._normalize_prompt_text(agent_prompt),
+        )
+        if agent_block is not None:
+            blocks.append(agent_block)
+
+        skills_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="agent_skills",
+            cache_scope="agent",
+            digest_inputs={"skill_prompt": agent_skills_prompt},
+            builder=lambda: agent_skills_prompt,
+        )
+        if skills_block is not None:
+            blocks.append(skills_block)
+
+        environment_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="minimal_environment",
+            cache_scope="runtime_tail",
+            digest_inputs={
+                "directory": session_directory,
+                "runtime_day": datetime.now().strftime("%Y-%m-%d"),
+                "platform": platform.system().lower(),
+            },
+            builder=lambda: cls._build_minimal_environment(session_directory),
+        )
+        if environment_block is not None:
+            blocks.append(environment_block)
+
+        cls._append_turn_tail_blocks(
+            blocks=blocks,
+            turn_context=turn_context,
+            static_cache=static_cache,
+            session_id=session_id,
+        )
+        return blocks
+
+    @classmethod
+    async def build_system_prompt_blocks(
+        cls,
+        *,
+        session_id: str,
+        session_directory: Optional[str],
+        agent_name: str,
+        agent_prompt: Optional[str],
+        agent_skill_names: Iterable[str] = (),
+        prompt_profile: str = "standard",
+        provider_id: str,
+        model_id: str,
+        execution_mode_prompt: Optional[str] = None,
+        prompt_tool_names: Iterable[str] = (),
+        memory_bootstrap_data: Optional[Dict[str, Any]] = None,
+        static_cache: Optional[SystemPromptCache] = None,
+        turn_context: Optional[TurnPromptContext] = None,
+        use_text_tool_call_mode: bool = False,
+    ) -> List[SystemPromptBlock]:
+        """Build the ordered system prompt blocks for a session turn.
+
+        Stable identity and execution guidance come first, followed by
+        session/workspace context, with runtime-only metadata kept at the
+        prompt tail. Runtime I/O is collected before this method so assembly is
+        deterministic and every downstream consumer sees the same blocks.
+        """
+        turn_context = turn_context or TurnPromptContext()
+        vcs = "git" if session_directory else None
+        normalized_agent_skill_names = tuple(dict.fromkeys(
+            str(name).strip()
+            for name in agent_skill_names
+            if str(name).strip()
+        ))
+        agent_skills_prompt = await cls._build_agent_skills_prompt(
+            normalized_agent_skill_names,
+            session_id=session_id,
+        )
+        if prompt_profile == "isolated":
+            from aegisops.agent.interaction_guidance import build_interaction_guidance
+
+            values = [
+                ("aegisops_config_guard", "global", get_prompt_aegisops_config_guard().strip()),
+                ("tool_protocol", "provider", cls._build_isolated_tool_guidance_prompt(
+                    use_text_tool_call_mode=use_text_tool_call_mode,
+                )),
+                ("agent_identity", "agent", cls._normalize_prompt_text(agent_prompt)),
+                ("interaction_guidance", "global", build_interaction_guidance()),
+                ("agent_skills", "agent", agent_skills_prompt),
+                ("execution_mode", "runtime", cls._normalize_prompt_text(execution_mode_prompt)),
+                ("minimal_environment", "runtime_tail", cls._build_minimal_environment(session_directory)),
+            ]
+            isolated_blocks = []
+            for name, scope, content in values:
+                block = cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name=name,
+                    cache_scope=scope,
+                    digest_inputs={"content": content},
+                    builder=lambda: content,
+                )
+                if block is not None:
+                    isolated_blocks.append(block)
+            cls._append_turn_tail_blocks(
+                blocks=isolated_blocks,
+                turn_context=replace(turn_context, additional_context=None),
+                static_cache=static_cache,
+                session_id=session_id,
+            )
+            cls._print_system_prompts_for_debug(
+                session_id=session_id,
+                agent_name=agent_name,
+                provider_id=provider_id,
+                model_id=model_id,
+                blocks=isolated_blocks,
+            )
+            return isolated_blocks
+        minimal_prompt = turn_context.minimal_prompt
+        if minimal_prompt is None:
+            minimal_prompt = await cls._is_builtin_system_subagent_session(
+                session_id=session_id,
+                agent_name=agent_name,
+            )
+        if minimal_prompt:
+            minimal_blocks = cls._build_subagent_minimal_blocks(
+                session_id=session_id,
+                session_directory=session_directory,
+                agent_prompt=agent_prompt,
+                agent_skills_prompt=agent_skills_prompt,
+                turn_context=turn_context,
+                static_cache=static_cache,
+            )
+            cls._print_system_prompts_for_debug(
+                session_id=session_id,
+                agent_name=agent_name,
+                provider_id=provider_id,
+                model_id=model_id,
+                blocks=minimal_blocks,
+            )
+            return minimal_blocks
+
+        normalized_tool_names = tuple(sorted(prompt_tool_names))
+        runtime_day = datetime.now().strftime("%Y-%m-%d")
+        config_instructions = list(turn_context.config_instructions)
+        custom_signature = SystemPrompt.custom_signature(
+            directory=session_directory,
+            worktree=turn_context.worktree,
+            config_instructions=config_instructions,
+        )
+        memory_guidance = cls._build_memory_guidance_prompt(
+            normalized_tool_names,
+            memory_bootstrap_data,
+        )
+        memory_snapshot = cls._join_prompt_parts(cls._build_memory_bootstrap_prompts(
+            session_id=session_id,
+            memory_bootstrap_data=memory_bootstrap_data,
+        ))
+
+        async def build_custom_context() -> Optional[str]:
+            return cls._join_prompt_parts(
+                await SystemPrompt.custom(
+                    directory=session_directory,
+                    worktree=turn_context.worktree,
+                    config_instructions=config_instructions,
+                ),
+            )
+
+        blocks: List[Optional[SystemPromptBlock]] = [
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="provider_identity",
+                cache_scope="global",
+                digest_inputs={"model_id": model_id},
+                builder=lambda: cls._join_prompt_parts(SystemPrompt.provider(model_id)),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="aegisops_config_guard",
+                cache_scope="global",
+                digest_inputs={"prompt": get_prompt_aegisops_config_guard()},
+                builder=lambda: get_prompt_aegisops_config_guard().strip(),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="tool_protocol",
+                cache_scope="provider",
+                digest_inputs={"use_text_tool_call_mode": use_text_tool_call_mode},
+                builder=lambda: cls._build_tool_guidance_prompt(
+                    use_text_tool_call_mode=use_text_tool_call_mode,
+                ),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="memory_guidance",
+                cache_scope="session",
+                digest_inputs={
+                    "tool_names": normalized_tool_names,
+                    "instructions": memory_guidance or "",
+                },
+                builder=lambda: memory_guidance or "",
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="agent_identity",
+                cache_scope="agent",
+                digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
+                builder=lambda: cls._normalize_prompt_text(agent_prompt),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="agent_skills",
+                cache_scope="agent",
+                digest_inputs={
+                    "agent_name": agent_name,
+                    "skill_names": normalized_agent_skill_names,
+                    "skill_prompt": agent_skills_prompt,
+                },
+                builder=lambda: agent_skills_prompt,
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="execution_mode",
+                cache_scope="runtime",
+                digest_inputs={"prompt": execution_mode_prompt or ""},
+                builder=lambda: cls._normalize_prompt_text(execution_mode_prompt),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="memory_snapshot",
+                cache_scope="session",
+                digest_inputs={"session_id": session_id, "snapshot": memory_snapshot},
+                builder=lambda: memory_snapshot,
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="tool_catalog_awareness",
+                cache_scope="catalog",
+                digest_inputs={
+                    "agent_name": agent_name,
+                    "tool_revision": turn_context.tool_revision,
+                    "content": turn_context.tool_catalog or "",
+                },
+                builder=lambda: cls._normalize_prompt_text(
+                    turn_context.tool_catalog,
+                ),
+            ),
+        ]
+
+        if turn_context.device_asset_hint:
+            blocks.append(
+                cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name="device_asset_hint",
+                    cache_scope="runtime",
+                    digest_inputs={
+                        "session_id": session_id,
+                        "device_revision": turn_context.device_revision,
+                        "tool_revision": turn_context.tool_revision,
+                        "content": turn_context.device_asset_hint,
+                    },
+                    builder=lambda: cls._normalize_prompt_text(
+                        turn_context.device_asset_hint,
+                    ),
+                )
+            )
+
+        blocks.append(
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="environment_stable",
+                cache_scope="workspace",
+                digest_inputs={
+                    "directory": session_directory,
+                    "vcs": vcs,
+                    "platform": platform.system().lower(),
+                },
+                builder=lambda: cls._join_prompt_parts(
+                    SystemPrompt.environment_stable(directory=session_directory, vcs=vcs),
+                ),
+            )
+        )
+
+        custom_block = await cls._build_cached_async_prompt_block(
+            static_cache=static_cache,
+            name="context_files",
+            cache_scope="workspace",
+            digest_inputs={
+                "directory": session_directory,
+                "worktree": turn_context.worktree,
+                "signature": custom_signature,
+            },
+            loader=build_custom_context,
+        )
+        blocks.append(custom_block)
+
+        if turn_context.sandbox_context:
+            blocks.append(
+                cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name="sandbox_context",
+                    cache_scope="runtime_tail",
+                    digest_inputs={
+                        "session_id": session_id,
+                        "agent_name": agent_name,
+                        "content": turn_context.sandbox_context,
+                    },
+                    builder=lambda: cls._normalize_prompt_text(
+                        turn_context.sandbox_context,
+                    ),
+                )
+            )
+
+        if turn_context.channel_context:
+            blocks.append(
+                cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name="channel_context",
+                    cache_scope="runtime_tail",
+                    digest_inputs={
+                        "session_id": session_id,
+                        "content": turn_context.channel_context,
+                    },
+                    builder=lambda: cls._normalize_prompt_text(
+                        turn_context.channel_context,
+                    ),
+                )
+            )
+
+        blocks.append(cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="runtime_metadata",
+            cache_scope="runtime_tail",
+            digest_inputs={
+                "session_id": session_id,
+                "directory": session_directory,
+                "runtime_day": runtime_day,
+                "model_id": model_id,
+                "provider_id": provider_id,
+            },
+            builder=lambda: cls._join_prompt_parts(
+                SystemPrompt.runtime_metadata(
+                    directory=session_directory,
+                    vcs=vcs,
+                    session_id=session_id,
+                    model_id=model_id,
+                    provider_id=provider_id,
+                ),
+            ),
+        ))
+
+        resolved_blocks = [block for block in blocks if block is not None]
+        cls._append_turn_tail_blocks(
+            blocks=resolved_blocks,
+            turn_context=turn_context,
+            static_cache=static_cache,
+            session_id=session_id,
+        )
+        cls._print_system_prompts_for_debug(
+            session_id=session_id,
+            agent_name=agent_name,
+            provider_id=provider_id,
+            model_id=model_id,
+            blocks=resolved_blocks,
+        )
+        return resolved_blocks
+
+    @classmethod
+    async def build_system_prompts(
+        cls,
+        *,
+        session_id: str,
+        session_directory: Optional[str],
+        agent_name: str,
+        agent_prompt: Optional[str],
+        agent_skill_names: Iterable[str] = (),
+        prompt_profile: str = "standard",
+        provider_id: str,
+        model_id: str,
+        execution_mode_prompt: Optional[str] = None,
+        prompt_tool_names: Iterable[str] = (),
+        tool_revision: Optional[int] = None,
+        memory_bootstrap_data: Optional[Dict[str, Any]] = None,
+        static_cache: Optional[SystemPromptCache] = None,
+        sandbox_prompt_factory: Optional[AsyncPromptFactory] = None,
+        channel_context_prompt_factory: Optional[AsyncPromptFactory] = None,
+        tool_catalog_prompt_factory: Optional[StringPromptFactory] = None,
+        device_asset_prompt_factory: Optional[AsyncPromptFactory] = None,
+        device_revision: Optional[int] = None,
+        turn_context: Optional[TurnPromptContext] = None,
+        use_text_tool_call_mode: bool = False,
+    ) -> List[str]:
+        """Compatibility API returning only the assembled prompt text.
+
+        Legacy prompt factories populate missing values in ``turn_context``.
+        Explicit context values take precedence when both APIs are used.
+        """
+        legacy_context_requested = any((
+            tool_revision is not None,
+            sandbox_prompt_factory is not None,
+            channel_context_prompt_factory is not None,
+            tool_catalog_prompt_factory is not None,
+            device_asset_prompt_factory is not None,
+            device_revision is not None,
+        ))
+        if legacy_context_requested and prompt_profile != "isolated":
+            resolved_context = turn_context or TurnPromptContext()
+            minimal_prompt = resolved_context.minimal_prompt
+            if minimal_prompt is None:
+                minimal_prompt = await cls._is_builtin_system_subagent_session(
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+
+            context_updates: Dict[str, Any] = {"minimal_prompt": minimal_prompt}
+            if resolved_context.tool_revision is None and tool_revision is not None:
+                context_updates["tool_revision"] = tool_revision
+            if resolved_context.device_revision is None and device_revision is not None:
+                context_updates["device_revision"] = device_revision
+
+            if not minimal_prompt:
+                if (
+                    resolved_context.tool_catalog is None
+                    and tool_catalog_prompt_factory is not None
+                ):
+                    context_updates["tool_catalog"] = tool_catalog_prompt_factory()
+                if (
+                    resolved_context.device_asset_hint is None
+                    and device_asset_prompt_factory is not None
+                ):
+                    context_updates["device_asset_hint"] = (
+                        await device_asset_prompt_factory()
+                    )
+                if (
+                    resolved_context.sandbox_context is None
+                    and sandbox_prompt_factory is not None
+                ):
+                    context_updates["sandbox_context"] = await sandbox_prompt_factory()
+                if (
+                    resolved_context.channel_context is None
+                    and channel_context_prompt_factory is not None
+                ):
+                    context_updates["channel_context"] = (
+                        await channel_context_prompt_factory()
+                    )
+
+            turn_context = replace(resolved_context, **context_updates)
+
+        blocks = await cls.build_system_prompt_blocks(
+            session_id=session_id,
+            session_directory=session_directory,
+            agent_name=agent_name,
+            agent_prompt=agent_prompt,
+            agent_skill_names=agent_skill_names,
+            prompt_profile=prompt_profile,
+            provider_id=provider_id,
+            model_id=model_id,
+            execution_mode_prompt=execution_mode_prompt,
+            prompt_tool_names=prompt_tool_names,
+            memory_bootstrap_data=memory_bootstrap_data,
+            static_cache=static_cache,
+            turn_context=turn_context,
+            use_text_tool_call_mode=use_text_tool_call_mode,
+        )
+        return cls._prompt_blocks_to_list(blocks)
+
+    @classmethod
+    def _build_context_section(cls, context: ContextInfo) -> str:
+        """Build context section for prompt"""
+        sections = []
+        
+        if context.project_name:
+            sections.append(f"## Project\nYou are working on: {context.project_name}")
+            if context.project_path:
+                sections.append(f"Project path: {context.project_path}")
+        
+        if context.current_file:
+            sections.append(f"\n## Current File\nYou are currently viewing: {context.current_file}")
+            if context.file_content:
+                content = context.file_content
+                if len(content) > 5000:
+                    content = content[:5000] + "\n... (truncated)"
+                sections.append(f"```\n{content}\n```")
+        
+        if context.file_tree:
+            tree = "\n".join(context.file_tree[:50])
+            sections.append(f"\n## File Structure\n```\n{tree}\n```")
+        
+        if context.git_branch:
+            sections.append(f"\n## Git\nBranch: {context.git_branch}")
+            if context.git_status:
+                sections.append(f"Status: {context.git_status}")
+        
+        return "\n".join(sections)
+    
+    @classmethod
+    def inject_context(
+        cls,
+        messages: List[Dict[str, Any]],
+        context: ContextInfo,
+        position: str = "first",  # "first", "last", or "system"
+    ) -> List[Dict[str, Any]]:
+        """
+        Inject context into message list
+        
+        Args:
+            messages: Original messages
+            context: Context to inject
+            position: Where to inject ("first", "last", "system")
+            
+        Returns:
+            Messages with context injected
+        """
+        context_text = cls._build_context_section(context)
+        context_message = {"role": "system", "content": context_text}
+        
+        if position == "first":
+            return [context_message] + list(messages)
+        elif position == "last":
+            return list(messages) + [context_message]
+        elif position == "system":
+            # Replace or add system message
+            result = []
+            has_system = False
+            for msg in messages:
+                if msg.get("role") == "system":
+                    msg = {**msg, "content": msg["content"] + "\n\n" + context_text}
+                    has_system = True
+                result.append(msg)
+            if not has_system:
+                result.insert(0, context_message)
+            return result
+        
+        return list(messages)
+    
+    @classmethod
+    def truncate_messages(
+        cls,
+        messages: List[Dict[str, Any]],
+        max_tokens: int,
+        preserve_last: int = 4,
+    ) -> List[Dict[str, Any]]:
+        """
+        Truncate messages to fit within token limit
+        
+        Args:
+            messages: Messages to truncate
+            max_tokens: Maximum token count
+            preserve_last: Number of recent messages to always keep
+            
+        Returns:
+            Truncated messages
+        """
+        # Always keep system message and last N messages
+        system_msgs = [m for m in messages if m.get("role") == "system"]
+        other_msgs = [m for m in messages if m.get("role") != "system"]
+        
+        # Keep last N
+        preserved = other_msgs[-preserve_last:] if preserve_last > 0 else []
+        middle_msgs = other_msgs[:-preserve_last] if preserve_last > 0 else other_msgs
+        
+        # Count tokens in preserved
+        preserved_tokens = sum(
+            cls.count_tokens(m.get("content", "")) 
+            for m in system_msgs + preserved
+        )
+        
+        remaining_tokens = max_tokens - preserved_tokens
+        
+        # Add middle messages from newest
+        result_middle = []
+        current_tokens = 0
+        
+        for msg in reversed(middle_msgs):
+            msg_tokens = cls.count_tokens(msg.get("content", ""))
+            if current_tokens + msg_tokens <= remaining_tokens:
+                result_middle.insert(0, msg)
+                current_tokens += msg_tokens
+            else:
+                break
+        
+        return system_msgs + result_middle + preserved
+
+
+# Alias for backwards compatibility
+class MessageV2:
+    """Placeholder for message type reference"""
+    content: str = ""

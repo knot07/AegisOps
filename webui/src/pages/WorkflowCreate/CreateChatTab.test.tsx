@@ -1,0 +1,915 @@
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ComponentProps } from 'react';
+
+import CreateChatTab from './CreateChatTab';
+import { workflowAPI } from '@/api/workflow';
+
+const {
+  capturedSessionChatProps,
+  capturedSessionOptions,
+  capturedModelPickerProps,
+  mockCreateAndSend,
+  mockClientGet,
+  mockClientPatch,
+  mockSendPrompt,
+  mockSetSelectedModelAuto,
+  mockSetSelectedModelKey,
+  workflowModelState,
+} = vi.hoisted(() => ({
+  capturedSessionChatProps: [] as any[],
+  capturedSessionOptions: [] as any[],
+  capturedModelPickerProps: [] as any[],
+  mockCreateAndSend: vi.fn(),
+  mockClientGet: vi.fn(),
+  mockClientPatch: vi.fn(),
+  mockSendPrompt: vi.fn(),
+  mockSetSelectedModelAuto: vi.fn(),
+  mockSetSelectedModelKey: vi.fn(),
+  workflowModelState: { auto: false },
+}));
+
+const selectedPromptModel = { providerID: 'provider-1', modelID: 'model-1' };
+const selectedModelOption = {
+  key: 'provider-1:model-1',
+  providerID: 'provider-1',
+  providerName: 'Provider',
+  modelID: 'model-1',
+  label: 'model-1',
+  pricingLabel: '',
+  contextLabel: '',
+  contextWindowTokens: 128000,
+  supportsVision: true,
+};
+
+vi.mock('@/hooks/useDefaultModelVision', () => ({
+  useDefaultModelVision: () => false,
+}));
+
+vi.mock('@/hooks/useSessionChat', () => ({
+  useSessionChat: (options: any) => {
+    capturedSessionOptions.push(options);
+    return {
+      sessionId: options.initialSessionId ?? null,
+      error: null,
+      createAndSend: mockCreateAndSend,
+      retry: vi.fn(),
+    };
+  },
+}));
+
+vi.mock('@/api/client', () => ({
+  default: { get: mockClientGet, patch: mockClientPatch },
+}));
+
+vi.mock('@/api/workflow', () => ({
+  workflowAPI: {
+    listSummaries: vi.fn().mockResolvedValue({ data: [] }),
+    get: vi.fn().mockResolvedValue({ data: null }),
+  },
+}));
+
+vi.mock('@/components/common/ChatPromptSelectors', () => ({
+  useChatAgentOptions: () => ({
+    agents: [{ name: 'rex', description: 'Rex', mode: 'primary', native: true }],
+    loading: false,
+  }),
+  useChatModelOptions: () => ({
+    groupedOptions: [],
+    loading: false,
+    effectiveModelOption: selectedModelOption,
+    modelPickerAutoOption: {
+      selected: workflowModelState.auto,
+      disabled: false,
+      statusLabel: 'Auto',
+      onSelect: () => { workflowModelState.auto = true; },
+    },
+    selectModelKey: (key: string) => {
+      workflowModelState.auto = false;
+      mockSetSelectedModelKey(key);
+    },
+    selectedModelAuto: workflowModelState.auto,
+    selectedModelOption,
+    selectedPromptModel: workflowModelState.auto ? null : selectedPromptModel,
+    setSelectedModelAuto: mockSetSelectedModelAuto,
+    setSelectedModelKey: mockSetSelectedModelKey,
+  }),
+  ChatAgentDisplay: ({ selectedAgent }: { selectedAgent: string }) => (
+    <div>Agent:{selectedAgent}</div>
+  ),
+  ChatModelPicker: (props: any) => {
+    capturedModelPickerProps.push(props);
+    return <div>ModelPicker</div>;
+  },
+}));
+
+vi.mock('@/components/common/SessionChat', () => ({
+  buildInstructionDisplayText: (label: string) => `@@aegisops-instruction:${label}`,
+  default: (props: any) => {
+    capturedSessionChatProps.push(props);
+    return (
+      <div data-testid="session-chat">
+        {typeof props.welcomeContent === 'function'
+          ? props.welcomeContent(vi.fn())
+          : props.welcomeContent}
+        {props.toolbarSlot}
+        {props.centerToolbarSlot}
+        {props.conversationBottomSlot?.({ sendPrompt: mockSendPrompt, sending: false })}
+      </div>
+    );
+  },
+}));
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: (key: string, options?: Record<string, unknown>) => {
+      const translations: Record<string, any> = {
+        'create.chat.sessionTitle': '新建工作流',
+        'create.chat.inputPlaceholder': '描述您想创建的工作流...',
+        'create.chat.contextMessage': '用户希望创建一个 AegisOps 工作流，请使用 workflow-builder skill 来完成。',
+        'create.chat.welcomeMessage': '欢迎创建工作流',
+        'create.chat.emptyStateTitle': '暂无执行记录',
+        'create.chat.guidePanelTitle': 'Rex 辅助创建',
+        'create.chat.guidePanelDesc': '选择一个引导或创建案例，Rex 会按 workflow-builder skill 先确认场景。',
+        'create.chat.guideSectionTitle': '创建引导',
+        'create.chat.caseSectionTitle': '创建案例',
+        'create.chat.guideActions': [
+          {
+            label: '如何创建工作流',
+            description: '从零开始梳理业务目标、输入输出、节点流程、样例和生成步骤。',
+            prompt: '请按 workflow-builder skill 引导我从零创建一个 AegisOps 工作流。',
+          },
+          {
+            label: '编辑工作流节点',
+            description: '调整节点职责、输入输出、代码或连接关系。',
+            prompt: '请帮我编辑工作流节点。',
+          },
+        ],
+        'create.chat.exampleQuestions': [
+          '帮我创建一个 IP 威胁情报查询工作流，输入 IP 地址，查询多个情报源并汇总生成报告',
+          '创建一个域名分析工作流，对域名进行 WHOIS 查询、DNS 解析和历史记录交叉分析',
+        ],
+        'create.chat.exampleQuestionLabels': [
+          '创建 IP 情报工作流',
+          '创建域名分析工作流',
+        ],
+        'detail.chat.welcome.guideCollapse': '收起',
+        'detail.chat.welcome.guideExpand': '展开',
+      };
+      const value = translations[key] ?? key;
+      return options?.returnObjects ? value : String(value);
+    },
+  }),
+}));
+
+function makeWorkflow(id: string, createdAt: number) {
+  return {
+    id,
+    name: id,
+    workflowJson: { start: 'n1', nodes: [], edges: [] },
+    status: 'active',
+    source: 'global',
+    createdAt,
+    updatedAt: createdAt,
+    stats: {
+      callCount: 0,
+      successCount: 0,
+      errorCount: 0,
+      totalRuntime: 0,
+      avgRuntime: 0,
+      thumbsUp: 0,
+      thumbsDown: 0,
+    },
+  };
+}
+
+function toolPart(tool: string, input: Record<string, unknown>, sessionID = 'session-active') {
+  return {
+    id: `part-${tool}-${JSON.stringify(input).length}`,
+    messageID: 'message-1',
+    sessionID,
+    type: 'tool',
+    tool,
+    state: { status: 'completed', input },
+  };
+}
+
+// A write tool call in the chat that targets the workflow's directory.
+function workflowWritePart(workflowId: string, sessionID = 'session-active') {
+  return toolPart(
+    'write',
+    { filePath: `/home/alice/.aegisops/plugins/workflows/${workflowId}/workflow.md` },
+    sessionID,
+  );
+}
+
+function emitToolPart(part: unknown) {
+  latestSessionChatProps()?.onSSEEvent?.({ type: 'message.part.updated', properties: { part } });
+}
+
+function mockStoredConversation(sessionId: string, parts: unknown[]) {
+  mockClientGet.mockImplementation((url: string) => Promise.resolve(
+    url === `/api/session/${sessionId}/message`
+      ? { data: [{ info: { id: 'message-1', role: 'assistant' }, parts }] }
+      : { data: {} },
+  ));
+}
+
+function latestSessionChatProps() {
+  return capturedSessionChatProps[capturedSessionChatProps.length - 1];
+}
+
+function storedConversationFetches(sessionId: string) {
+  return mockClientGet.mock.calls.filter(([url]) => url === `/api/session/${sessionId}/message`).length;
+}
+
+function renderCreateChatTab(props?: Partial<ComponentProps<typeof CreateChatTab>>) {
+  return render(
+    <MemoryRouter>
+      <CreateChatTab onWorkflowCreated={vi.fn()} {...props} />
+    </MemoryRouter>,
+  );
+}
+
+describe('WorkflowCreate CreateChatTab', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    capturedSessionChatProps.length = 0;
+    capturedSessionOptions.length = 0;
+    capturedModelPickerProps.length = 0;
+    workflowModelState.auto = false;
+    mockSetSelectedModelAuto.mockImplementation((enabled: boolean) => {
+      workflowModelState.auto = enabled;
+    });
+    mockCreateAndSend.mockResolvedValue('session-1');
+    mockClientGet.mockResolvedValue({ data: {} });
+    mockClientPatch.mockResolvedValue({ data: {} });
+    vi.mocked(workflowAPI.listSummaries).mockResolvedValue({ data: [] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: null as any });
+  });
+
+  it('renders creation guides and case examples in a centered guide panel', async () => {
+    const user = userEvent.setup();
+    renderCreateChatTab();
+
+    expect(capturedSessionChatProps[0].suggestions).toBeUndefined();
+    expect(document.querySelector('[aria-label="暂无执行记录"]')).toBeInTheDocument();
+    expect(screen.getByText('Rex 辅助创建')).toBeInTheDocument();
+    expect(screen.getByText('创建引导')).toBeInTheDocument();
+    expect(screen.getByText('创建案例')).toBeInTheDocument();
+    expect(screen.getByTestId('create-workflow-guide-scroll')).toHaveClass('yushu-guide-sections');
+    expect(screen.getByRole('button', { name: /如何创建工作流/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /编辑工作流节点/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /创建 IP 情报工作流/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /创建域名分析工作流/ })).toBeInTheDocument();
+    expect(screen.queryByText('帮我创建一个 IP 威胁情报查询工作流，输入 IP 地址，查询多个情报源并汇总生成报告')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /如何创建工作流/ }));
+
+    await waitFor(() => {
+      expect(mockCreateAndSend).toHaveBeenCalledWith({
+        text: '请按 workflow-builder skill 引导我从零创建一个 AegisOps 工作流。',
+        imageParts: [],
+        agent: 'rex',
+        model: selectedPromptModel,
+        modelAuto: false,
+        displayText: '@@aegisops-instruction:如何创建工作流',
+      });
+    });
+    expect(mockSendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('shows the guide dock above the composer once creation starts', () => {
+    renderCreateChatTab();
+
+    const slot = capturedSessionChatProps[0].conversationBottomSlot?.({
+      sendPrompt: mockSendPrompt,
+      setInput: vi.fn(),
+      focusInput: vi.fn(),
+      sending: true,
+      streaming: false,
+      sessionId: null,
+    });
+    const { container } = render(<>{slot}</>);
+
+    expect(within(container).getByRole('button', { name: /如何创建工作流/ })).toBeDisabled();
+    expect(within(container).getByRole('button', { name: /创建 IP 情报工作流/ })).toBeDisabled();
+  });
+
+  it('reuses the workflow workbench chat controls', async () => {
+    renderCreateChatTab();
+
+    expect(screen.getByText('Agent:rex')).toBeInTheDocument();
+    expect(screen.getByText('ModelPicker')).toBeInTheDocument();
+    expect(capturedSessionChatProps[0].agentName).toBe('rex');
+    expect(capturedSessionChatProps[0].mentionAgents.map((agent: any) => agent.name)).toEqual(['rex']);
+    expect(capturedSessionChatProps[0].model).toEqual(selectedPromptModel);
+    expect(capturedSessionChatProps[0].modelAuto).toBe(false);
+    expect(capturedSessionChatProps[0].supportsVision).toBe(true);
+    expect(capturedSessionChatProps[0].contextWindowTokens).toBe(128000);
+    expect(capturedSessionChatProps[0].display).toEqual({
+      collapseIntermediateSteps: true,
+      processGroupsDefaultOpen: false,
+    });
+    expect(capturedSessionChatProps[0].composerTextareaMinHeight).toBe(48);
+    expect(capturedSessionChatProps[0].composerTextareaMaxHeight).toBe(120);
+
+    await capturedSessionChatProps[0].onCreateAndSend(
+      '创建一个工作流',
+      [],
+      undefined,
+      undefined,
+      { displayText: '@@aegisops-instruction:IP 情报' },
+    );
+
+    await waitFor(() => {
+      expect(mockCreateAndSend).toHaveBeenCalledWith({
+        text: '创建一个工作流',
+        imageParts: [],
+        agent: 'rex',
+        model: selectedPromptModel,
+        modelAuto: false,
+        displayText: '@@aegisops-instruction:IP 情报',
+      });
+    });
+    expect(capturedSessionOptions[0]).toEqual(expect.objectContaining({
+      category: 'workflow',
+      modelAuto: false,
+    }));
+    expect(capturedModelPickerProps[0].autoOption).toBeDefined();
+  });
+
+  it('uses Auto only after manual selection and sends no concrete model', async () => {
+    const view = renderCreateChatTab();
+
+    act(() => {
+      capturedModelPickerProps[capturedModelPickerProps.length - 1].autoOption.onSelect();
+    });
+    view.rerender(
+      <MemoryRouter>
+        <CreateChatTab onWorkflowCreated={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+    expect(latestProps.model).toBeNull();
+    expect(latestProps.modelAuto).toBe(true);
+    expect(latestProps.supportsVision).toBe(true);
+    expect(capturedSessionOptions[capturedSessionOptions.length - 1].modelAuto).toBe(true);
+
+    await latestProps.onCreateAndSend('创建一个工作流', []);
+
+    expect(mockCreateAndSend).toHaveBeenLastCalledWith({
+      text: '创建一个工作流',
+      imageParts: [],
+      agent: 'rex',
+      model: null,
+      modelAuto: true,
+      displayText: undefined,
+    });
+  });
+
+  it('resumes a persisted create session', () => {
+    const onSessionChange = vi.fn();
+    renderCreateChatTab({
+      initialSessionId: 'session-restored',
+      onSessionChange,
+    });
+
+    expect(capturedSessionChatProps[0].sessionId).toBe('session-restored');
+    expect(capturedSessionChatProps[0].welcomeContent).toBeUndefined();
+    expect(onSessionChange).toHaveBeenCalledWith('session-restored');
+  });
+
+  it('restores Auto from a persisted create session', async () => {
+    mockClientGet.mockResolvedValueOnce({ data: { model_auto: true } });
+
+    renderCreateChatTab({ initialSessionId: 'session-auto' });
+
+    await waitFor(() => {
+      expect(mockSetSelectedModelAuto).toHaveBeenCalledWith(true);
+      const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+      expect(latestProps.model).toBeNull();
+      expect(latestProps.modelAuto).toBe(true);
+    });
+  });
+
+  it('persists picker changes for a resumed create session', async () => {
+    renderCreateChatTab({ initialSessionId: 'session-picker' });
+
+    await waitFor(() => {
+      expect(mockClientGet).toHaveBeenCalledWith('/api/session/session-picker');
+    });
+    act(() => {
+      capturedModelPickerProps[capturedModelPickerProps.length - 1].autoOption.onSelect();
+    });
+    expect(mockClientPatch).toHaveBeenCalledWith('/api/session/session-picker', {
+      model_auto: true,
+      model_pinned: false,
+    });
+
+    act(() => {
+      capturedModelPickerProps[capturedModelPickerProps.length - 1]
+        .onSelectModel(selectedModelOption);
+    });
+    expect(mockClientPatch).toHaveBeenCalledWith('/api/session/session-picker', {
+      provider: 'provider-1',
+      model: 'model-1',
+      model_pinned: true,
+      model_auto: false,
+    });
+  });
+
+  it('does not attach an already-known workflow just because it was created recently', async () => {
+    const creationStartedAt = Date.now();
+    const recentKnownWorkflow = {
+      id: 'previous-workflow',
+      name: 'Previous Workflow',
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt - 1000,
+      updatedAt: creationStartedAt - 1000,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    };
+    vi.mocked(workflowAPI.listSummaries).mockResolvedValue({ data: [recentKnownWorkflow] });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(2);
+    });
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('attaches a workflow.created workflow that this chat wrote', async () => {
+    const creationStartedAt = Date.now();
+    const createdWorkflow = {
+      id: 'created-by-this-event',
+      name: 'Created By This Event',
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt + 100,
+      updatedAt: creationStartedAt + 100,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    };
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: createdWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    latestSessionChatProps()?.onSSEEvent?.({
+      type: 'message.part.updated',
+      properties: { part: workflowWritePart('created-by-this-event') },
+    });
+    latestSessionChatProps()?.onSSEEvent?.({
+      type: 'workflow.created',
+      properties: { id: 'created-by-this-event' },
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.get).toHaveBeenCalledWith('created-by-this-event');
+    });
+    expect(onWorkflowCreated).toHaveBeenCalledWith(createdWorkflow);
+    expect(storedConversationFetches('session-active')).toBe(0);
+  });
+
+  it('ignores workflow.created for a workflow this chat never touched', async () => {
+    const creationStartedAt = Date.now();
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: makeWorkflow('someone-elses', creationStartedAt + 100) });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    // A tool call from another session must not count for this chat.
+    latestSessionChatProps()?.onSSEEvent?.({
+      type: 'message.part.updated',
+      properties: { part: workflowWritePart('someone-elses', 'session-other') },
+    });
+    latestSessionChatProps()?.onSSEEvent?.({
+      type: 'workflow.created',
+      properties: { id: 'someone-elses' },
+    });
+
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('replays workflow.created events that arrive before the initial snapshot is ready', async () => {
+    const creationStartedAt = Date.now();
+    const createdWorkflow = {
+      id: 'created-before-snapshot-ready',
+      name: 'Created Before Snapshot Ready',
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt + 100,
+      updatedAt: creationStartedAt + 100,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    };
+    let resolveSnapshot: ((value: { data: typeof createdWorkflow[] }) => void) | undefined;
+    vi.mocked(workflowAPI.listSummaries).mockReturnValueOnce(new Promise((resolve) => {
+      resolveSnapshot = resolve;
+    }) as any);
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: createdWorkflow });
+    // The page was reloaded after the chat wrote the workflow: the link comes
+    // from the stored conversation, not from a live tool event.
+    mockStoredConversation('session-active', [workflowWritePart('created-before-snapshot-ready')]);
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onSSEEvent?.({
+      type: 'workflow.created',
+      properties: { id: 'created-before-snapshot-ready' },
+    });
+
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveSnapshot?.({ data: [createdWorkflow] });
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.get).toHaveBeenCalledWith('created-before-snapshot-ready');
+    });
+    expect(onWorkflowCreated).toHaveBeenCalledWith(createdWorkflow);
+  });
+
+  it('does not guess when fallback polling sees multiple fresh workflows', async () => {
+    const creationStartedAt = Date.now();
+    const makeWorkflow = (id: string) => ({
+      id,
+      name: id,
+      workflowJson: { start: 'n1', nodes: [], edges: [] },
+      status: 'active',
+      source: 'global',
+      createdAt: creationStartedAt + 100,
+      updatedAt: creationStartedAt + 100,
+      stats: {
+        callCount: 0,
+        successCount: 0,
+        errorCount: 0,
+        totalRuntime: 0,
+        avgRuntime: 0,
+        thumbsUp: 0,
+        thumbsDown: 0,
+      },
+    });
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: [makeWorkflow('first'), makeWorkflow('second')] });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(2);
+    });
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('does not attach another user\'s workflow even when it is the only fresh one', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: othersWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    latestSessionChatProps()?.onStreamingDone?.();
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+
+    // Once checked, the same candidate never triggers another read, even
+    // while the chat keeps working.
+    emitToolPart(toolPart('bash', { command: 'ls' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(3);
+    });
+    expect(storedConversationFetches('session-active')).toBe(1);
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('does not attach another user\'s workflow that this chat only read', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: othersWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    emitToolPart(toolPart('read', { filePath: '/home/bob/.aegisops/plugins/workflows/bob-workflow/workflow.json' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('prefers the workflow this chat wrote over one it only touched from the shell', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 300);
+    const ownWorkflow = makeWorkflow('alice-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow, ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockImplementation(async (id: string) => ({
+      data: id === ownWorkflow.id ? ownWorkflow : othersWorkflow,
+    }) as any);
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    // Copying out of bob's directory is a shell write that names bob's id.
+    emitToolPart(toolPart('bash', { command: 'cp ~/.aegisops/plugins/workflows/bob-workflow/workflow.json /tmp/ref.json' }));
+    emitToolPart(workflowWritePart('alice-workflow'));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalledWith('bob-workflow');
+  });
+
+  it('does not attach another user\'s workflow that this chat only inspected from the shell', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: othersWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    emitToolPart(toolPart('bash', { command: 'cat ~/.aegisops/plugins/workflows/bob-workflow/workflow.json' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(storedConversationFetches('session-active')).toBe(1);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalled();
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('attaches a workflow written with a guessed argument name', async () => {
+    const creationStartedAt = Date.now();
+    const ownWorkflow = makeWorkflow('alice-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: ownWorkflow });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    // The registry runs `file_path` as filePath; the stored part keeps the guess.
+    emitToolPart(toolPart('write', { file_path: '/home/alice/.aegisops/plugins/workflows/alice-workflow/workflow.md' }));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(storedConversationFetches('session-active')).toBe(0);
+  });
+
+  it('reads the stored conversation once per new candidate and retries a failed read', async () => {
+    const creationStartedAt = Date.now();
+    const firstOthers = makeWorkflow('bob-workflow', creationStartedAt + 100);
+    const secondOthers = makeWorkflow('carol-workflow', creationStartedAt + 200);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: [firstOthers] })
+      .mockResolvedValueOnce({ data: [firstOthers] })
+      .mockResolvedValueOnce({ data: [firstOthers] })
+      .mockResolvedValue({ data: [secondOthers, firstOthers] });
+    let failNextRead = true;
+    mockClientGet.mockImplementation((url: string) => {
+      if (url !== '/api/session/session-active/message') return Promise.resolve({ data: {} });
+      if (failNextRead) {
+        failNextRead = false;
+        return Promise.reject(new Error('network down'));
+      }
+      return Promise.resolve({ data: [] });
+    });
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    const detectAndCountReads = async (expectedPolls: number) => {
+      latestSessionChatProps()?.onStreamingDone?.();
+      await waitFor(() => {
+        expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(expectedPolls);
+      });
+      await act(async () => {});
+      return storedConversationFetches('session-active');
+    };
+
+    expect(await detectAndCountReads(2)).toBe(1); // read fails, candidate stays unchecked
+    expect(await detectAndCountReads(3)).toBe(2); // retried and settled
+    expect(await detectAndCountReads(4)).toBe(2); // settled candidate: no read
+    expect(await detectAndCountReads(5)).toBe(3); // a new candidate gets its own read
+    expect(onWorkflowCreated).not.toHaveBeenCalled();
+  });
+
+  it('picks the workflow this chat wrote when another user creates one at the same time', async () => {
+    const creationStartedAt = Date.now();
+    const othersWorkflow = makeWorkflow('bob-workflow', creationStartedAt + 300);
+    const ownWorkflow = makeWorkflow('alice-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [othersWorkflow, ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockImplementation(async (id: string) => ({
+      data: id === ownWorkflow.id ? ownWorkflow : othersWorkflow,
+    }) as any);
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    emitToolPart(workflowWritePart('alice-workflow'));
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(workflowAPI.get).not.toHaveBeenCalledWith('bob-workflow');
+  });
+
+  it('recovers the link from the stored conversation after a reload', async () => {
+    const creationStartedAt = Date.now();
+    const ownWorkflow = makeWorkflow('reloaded-workflow', creationStartedAt + 100);
+    vi.mocked(workflowAPI.listSummaries)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValue({ data: [ownWorkflow] });
+    vi.mocked(workflowAPI.get).mockResolvedValue({ data: ownWorkflow });
+    mockStoredConversation('session-active', [{
+      id: 'part-bash',
+      messageID: 'message-1',
+      sessionID: 'session-active',
+      type: 'tool',
+      tool: 'bash',
+      state: {
+        status: 'completed',
+        input: { command: 'mkdir -p ~/.aegisops/plugins/workflows/reloaded-workflow' },
+      },
+    }]);
+    const onWorkflowCreated = vi.fn();
+
+    renderCreateChatTab({
+      initialSessionId: 'session-active',
+      creationStartedAt,
+      onWorkflowCreated,
+    });
+
+    await waitFor(() => {
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
+    });
+
+    latestSessionChatProps()?.onStreamingDone?.();
+
+    await waitFor(() => {
+      expect(onWorkflowCreated).toHaveBeenCalledWith(ownWorkflow);
+    });
+    expect(storedConversationFetches('session-active')).toBe(1);
+  });
+});

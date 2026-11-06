@@ -1,0 +1,8262 @@
+import React from 'react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+import type { ContextUsageSnapshot } from '@/api/session';
+import type { Message } from '@/types';
+import type { SendWelcomePrompt } from './SessionChat';
+
+import {
+  areChatTimelineItemsRenderEqual,
+  buildInstructionDisplayText,
+  buildChatTimelineItems,
+  buildContextUsageBreakdown,
+  buildTodoSummary,
+  ChatMessageBubble,
+  ChatToolPart,
+  default as SessionChat,
+  getCompactionDividerClassName,
+  getEditingActionBarClassName,
+  getMessageBubbleClassName,
+  getMessageErrorNoteKey,
+  getMessageErrorText,
+  getMessageGroupClassName,
+  getProcessGroupDurationMs,
+  mergeConsecutiveAssistantMessages,
+  getRenderableThinkingText,
+  getThinkingFirstSentence,
+  getRenderableFileUrl,
+  getRegenerateTruncateTarget,
+  getStandaloneThinkingBubbleClassName,
+  getUserAvatarContainerClassName,
+  getUserAvatarSpacerClassName,
+  hasActiveToolPart,
+  isActiveSessionStatus,
+  isPermissionRequestForSession,
+  shouldRenderMessage,
+  shouldForwardSSEEventToParent,
+  shouldRefetchFinishedMessage,
+  truncateToolDisplayText,
+  formatProcessDuration,
+} from './SessionChat';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
+import { useDialogFocus } from '@/hooks/useDialogFocus';
+
+const clientGetMock = vi.fn();
+const clientPostMock = vi.fn();
+const clientDeleteMock = vi.fn();
+const sessionApiListPromptQueueMock = vi.fn();
+const sessionApiEnqueuePromptMock = vi.fn();
+const sessionApiUpdateQueuedPromptMock = vi.fn();
+const sessionApiRemoveQueuedPromptMock = vi.fn();
+const sessionApiRunQueuedPromptNowMock = vi.fn();
+const sessionApiUpdateMessagePartMock = vi.fn();
+const sessionApiResendMessageMock = vi.fn();
+const sessionApiRegenerateMessageMock = vi.fn();
+const sessionApiGetContextUsageMock = vi.fn();
+const sessionApiGetMock = vi.fn();
+const sessionApiUpdateMock = vi.fn();
+const useSessionMessagesMock = vi.fn();
+const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
+const tMock = (key: string, options?: Record<string, unknown>) => {
+  const value = ({
+  'chat.placeholder': '请输入消息',
+  'chat.emptyText': '暂无消息',
+  'chat.loadFailed': '消息加载失败',
+  'chat.retry': '重试',
+  'chat.sending': '发送中...',
+  'chat.thinking': '思考中...',
+  'chat.streaming': '继续输出中...',
+  'chat.dreaming': 'Dream 正在整理长期记忆与 Skill…',
+  'chat.process.title': '查看 {{count}} 个步骤',
+  'chat.process.duration': '已处理 {{duration}}',
+  'chat.process.deepThinking': '深度思考',
+  'chat.process.reasoningCount': '{{count}} 段思考',
+  'chat.process.toolCount': '{{count}} 次工具调用',
+  'chat.process.textCount': '{{count}} 段中间回复',
+  'chat.compacting': '压缩中...',
+  'chat.retryNotice.rateLimited': '模型请求被限流（429），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.transient': '模型请求失败（{{reason}}），正在第 {{attempt}} 次重试',
+  'chat.retryNotice.countdown': '，约 {{seconds}} 秒后',
+  'chat.retryNotice.unknownReason': '临时错误',
+  'chat.stopReason.title': '任务已停止',
+  'chat.stopReason.toolExecuted': '这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。',
+  'chat.contextCompressed': '上下文已压缩',
+  'chat.contextUsage.title': 'Context Usage',
+  'chat.contextUsage.close': 'Close',
+  'chat.contextUsage.full': '13% Full',
+  'chat.contextUsage.tokens': '~13 / 100 Tokens',
+  'chat.contextUsage.noAttributedSegments': 'No attributed breakdown',
+  'chat.contextUsage.breakdown.systemPrompt': 'System prompt',
+  'chat.contextUsage.breakdown.toolDefinitions': 'Tool definitions',
+  'chat.contextUsage.breakdown.tools': 'Tool calls',
+  'chat.contextUsage.breakdown.skillLoad': 'Skill loads',
+  'chat.contextUsage.breakdown.agentDelegation': 'Agent delegation',
+  'chat.contextUsage.breakdown.conversation': 'Conversation',
+  'chat.contextUsage.breakdown.reasoning': 'Reasoning',
+  'chat.contextUsage.breakdown.draft': 'Current draft',
+  'chat.contextUsage.breakdown.compactedHistory': 'Compacted history',
+  'chat.goal.dismiss': 'Dismiss goal notice',
+  'chat.goal.status.active': 'Goal',
+  'chat.goal.status.completed': 'Completed',
+  'chat.goal.status.blocked': 'Blocked',
+  'chat.goal.status.paused': 'Paused',
+  'chat.addMenu.title': '添加',
+  'chat.addMenu.files': '文件和图片',
+  'chat.references.selected': '已选择的资源',
+  'chat.references.subagent': '子智能体',
+  'chat.references.skill': '技能',
+  'chat.references.workflow': '工作流',
+  'chat.references.remove': '移除 {{type}} {{name}}',
+  'chat.mention.title': '选择 Agent',
+  'chat.mention.navigate': '导航',
+  'chat.mention.select': '选择',
+  'chat.tool.pending': '等待中',
+  'chat.tool.running': '执行中',
+  'chat.tool.completed': '已完成',
+  'chat.tool.error': '失败',
+  'chat.tool.loadSkill': '加载技能',
+  'chat.tool.actions.readFile': '读取文件',
+  'chat.tool.actions.writeFile': '写入文件',
+  'chat.tool.actions.editFile': '编辑文件',
+  'chat.tool.actions.executeCommand': '执行命令',
+  'chat.tool.actions.askQuestion': '向用户提问',
+  'chat.tool.actions.installSkill': '安装技能',
+  'chat.tool.actions.addProvider': '添加模型服务',
+  'chat.tool.todoUpdated': '已更新待办',
+  'chat.tool.inputParams': '输入参数',
+  'chat.tool.progress.writingFile': '正在写入文件…',
+  'chat.tool.progress.editingFile': '正在编辑文件…',
+  'chat.tool.progress.working': '正在执行此操作…',
+  'chat.tool.outputResult': '输出结果',
+  'chat.tool.todoStages': 'Todo 阶段',
+  'chat.tool.todoStatus.pending': '待办',
+  'chat.tool.todoStatus.inProgress': '进行中',
+  'chat.tool.todoStatus.completed': '完成',
+  'chat.tool.todoStatus.cancelled': '已取消',
+  'chat.tool.todoSummary.progress': '进度',
+  'chat.tool.todoSummary.inProgress': '进行中',
+  'chat.tool.todoSummary.completed': '完成',
+  'chat.tool.todoSummary.done': '完成',
+  'chat.bash.command': '命令',
+  'chat.bash.workdir': '工作目录',
+  'chat.bash.duration': '耗时',
+  'chat.bash.timeout': '超时',
+  'chat.bash.timedOut': '已超时',
+  'chat.bash.aborted': '已中止',
+  'chat.bash.stdout': '标准输出',
+  'chat.bash.stderr': '标准错误',
+  'chat.bash.output': '输出',
+  'chat.bash.noOutput': '无输出',
+  'chat.questionResult.answered': '已回答',
+  'chat.questionResult.unanswered': '未回答',
+  'chat.questionResult.questionLabel': '问题',
+  'chat.questionResult.answerLabel': '回答',
+  'chat.questionResult.yes': '是',
+  'chat.questionResult.no': '否',
+  'question.needsAnswer': '需要你的回答',
+  'question.singleSelect': '单选',
+  'question.confirm': '确认',
+  'question.skip': '跳过',
+  'smartAssistant': '智能助手',
+  }[key] ?? key);
+  return value.replace(/\{\{(\w+)\}\}/g, (_, name) => String(options?.[name] ?? ''));
+};
+const pendingQuestionsHookMock = {
+  pendingQuestions: {},
+  handleQuestionAsked: vi.fn(),
+  submitAnswer: vi.fn(),
+  submitReject: vi.fn(),
+  removeByRequestId: vi.fn(),
+  fetchPendingQuestions: vi.fn().mockResolvedValue(undefined),
+  clearAll: vi.fn(),
+};
+const toastMock = {
+  success: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+};
+
+vi.mock('react-i18next', () => ({
+  useTranslation: () => ({
+    t: tMock,
+    i18n: { language: 'zh-CN' },
+  }),
+}));
+
+vi.mock('@/hooks/useSessions', () => ({
+  useSessionMessages: (...args: unknown[]) => useSessionMessagesMock(...args),
+}));
+
+vi.mock('@/hooks/useSSE', () => ({
+  useSSE: (options: any) => {
+    useSSEOptionsRef.current = options;
+    return { status: 'connected' };
+  },
+}));
+
+vi.mock('@/hooks/useReasoningToggle', () => ({
+  useReasoningToggle: () => ({
+    getPartExpanded: () => false,
+    togglePart: vi.fn(),
+    isReasoningDone: true,
+  }),
+}));
+
+vi.mock('@/features/session-chat', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/session-chat')>();
+  return {
+    ...actual,
+    usePendingQuestions: () => pendingQuestionsHookMock,
+  };
+});
+
+vi.mock('./Toast', () => ({
+  useToast: () => toastMock,
+}));
+
+vi.mock('@/api/client', () => ({
+  __esModule: true,
+  default: {
+    get: (...args: unknown[]) => clientGetMock(...args),
+    post: (...args: unknown[]) => clientPostMock(...args),
+    delete: (...args: unknown[]) => clientDeleteMock(...args),
+  },
+  getApiBase: () => '',
+}));
+
+vi.mock('@/api/session', () => ({
+  sessionApi: {
+    get: (...args: unknown[]) => sessionApiGetMock(...args),
+    update: (...args: unknown[]) => sessionApiUpdateMock(...args),
+    listPromptQueue: (...args: unknown[]) => sessionApiListPromptQueueMock(...args),
+    enqueuePrompt: (...args: unknown[]) => sessionApiEnqueuePromptMock(...args),
+    updateQueuedPrompt: (...args: unknown[]) => sessionApiUpdateQueuedPromptMock(...args),
+    removeQueuedPrompt: (...args: unknown[]) => sessionApiRemoveQueuedPromptMock(...args),
+    runQueuedPromptNow: (...args: unknown[]) => sessionApiRunQueuedPromptNowMock(...args),
+    updateMessagePart: (...args: unknown[]) => sessionApiUpdateMessagePartMock(...args),
+    resendMessage: (...args: unknown[]) => sessionApiResendMessageMock(...args),
+    regenerateMessage: (...args: unknown[]) => sessionApiRegenerateMessageMock(...args),
+    getContextUsage: (...args: unknown[]) => sessionApiGetContextUsageMock(...args),
+    contextFilePreviewUrl: (sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/preview`,
+    contextFileDownloadUrl: (sessionId: string, resourceId: string) => `/api/session/${sessionId}/context/files/${resourceId}/download`,
+  },
+}));
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  window.sessionStorage.clear();
+  const localStorageData = new Map<string, string>();
+  Object.defineProperty(window, 'localStorage', {
+    configurable: true,
+    value: {
+      clear: vi.fn(() => localStorageData.clear()),
+      getItem: vi.fn((key: string) => localStorageData.get(key) ?? null),
+      setItem: vi.fn((key: string, value: string) => {
+        localStorageData.set(key, String(value));
+      }),
+      removeItem: vi.fn((key: string) => {
+        localStorageData.delete(key);
+      }),
+    },
+  });
+  window.localStorage.clear();
+  Object.defineProperty(window.HTMLElement.prototype, 'scrollIntoView', {
+    configurable: true,
+    value: vi.fn(),
+  });
+  clientGetMock.mockResolvedValue({ data: {} });
+  clientPostMock.mockResolvedValue({ data: {} });
+  clientDeleteMock.mockResolvedValue({ data: { removed: true } });
+  sessionApiListPromptQueueMock.mockResolvedValue({ items: [] });
+  sessionApiEnqueuePromptMock.mockResolvedValue({});
+  sessionApiUpdateQueuedPromptMock.mockResolvedValue({});
+  sessionApiRemoveQueuedPromptMock.mockResolvedValue({});
+  sessionApiRunQueuedPromptNowMock.mockResolvedValue({});
+  sessionApiUpdateMessagePartMock.mockResolvedValue({});
+  sessionApiResendMessageMock.mockResolvedValue({});
+  sessionApiRegenerateMessageMock.mockResolvedValue({});
+  sessionApiGetMock.mockResolvedValue({});
+  sessionApiUpdateMock.mockResolvedValue({});
+  sessionApiGetContextUsageMock.mockResolvedValue({
+    sessionID: 'sess-1',
+    usedTokens: 0,
+    contextWindow: 0,
+    percent: 0,
+    source: 'estimated',
+    estimatedTokens: 0,
+    compactedTokens: 0,
+    segments: [],
+    excludedSegments: [],
+  });
+  pendingQuestionsHookMock.fetchPendingQuestions.mockResolvedValue(undefined);
+  pendingQuestionsHookMock.pendingQuestions = {};
+  useSSEOptionsRef.current = null;
+  useSessionMessagesMock.mockReturnValue({
+    messages: [],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    removeMessage: vi.fn(),
+    clearMessages: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+});
+
+function makeMessage(overrides: Partial<Message> & { id: string }): Message {
+  return {
+    id: overrides.id,
+    sessionID: 'sess-1',
+    role: 'assistant',
+    parts: [],
+    timestamp: 0,
+    ...overrides,
+  } as Message;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+type FetchedMessageFixture = {
+  info: {
+    id: string;
+    sessionID: string;
+    role: 'user' | 'assistant';
+    parentID?: string;
+    finish?: string | null;
+  };
+  parts: Message['parts'];
+};
+
+function makeFetchedMessage(
+  info: Omit<FetchedMessageFixture['info'], 'sessionID'>,
+  parts: Message['parts'] = [],
+): FetchedMessageFixture {
+  return {
+    info: { sessionID: 'sess-1', ...info },
+    parts,
+  };
+}
+
+function mockFallbackPolling({
+  localMessages,
+  fetchedMessages,
+  refetch,
+  status = { 'sess-1': { type: 'busy' } },
+}: {
+  localMessages: Message[];
+  fetchedMessages: FetchedMessageFixture[];
+  refetch: () => unknown;
+  status?: Record<string, { type: string }>;
+}) {
+  useSessionMessagesMock.mockReturnValue({
+    messages: localMessages,
+    loading: false,
+    refetch,
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+  clientGetMock.mockImplementation((url: string) => {
+    if (url === '/api/session/sess-1/message') {
+      return Promise.resolve({
+        data: {
+          items: fetchedMessages,
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+    }
+    if (url === '/api/session/status') {
+      return Promise.resolve({ data: status });
+    }
+    return Promise.resolve({ data: {} });
+  });
+}
+
+async function startFallbackPolling(onStreamingDone: () => void) {
+  render(React.createElement(SessionChat, {
+    sessionId: 'sess-1',
+    live: true,
+    onStreamingDone,
+  }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  clientGetMock.mockClear();
+  act(() => {
+    useSSEOptionsRef.current.onEvent({
+      type: 'session.status',
+      properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+    });
+  });
+}
+
+function mockStatefulSessionMessages(initialMessages: Message[] = []) {
+  useSessionMessagesMock.mockImplementation(() => {
+    const [messages, setMessages] = React.useState<Message[]>(initialMessages);
+    const upsertMessage = (messageInfo: Partial<Message> & { id: string }) => setMessages((prev) => {
+      const existingIndex = prev.findIndex((message) => message.id === messageInfo.id);
+      if (existingIndex >= 0) {
+        const updated = [...prev];
+        updated[existingIndex] = {
+          ...updated[existingIndex],
+          ...messageInfo,
+          parts: messageInfo.parts ?? updated[existingIndex].parts,
+          finish: messageInfo.finish ?? updated[existingIndex].finish,
+        } as Message;
+        return updated;
+      }
+      return [
+        ...prev,
+        makeMessage({
+          id: messageInfo.id,
+          sessionID: messageInfo.sessionID,
+          role: messageInfo.role ?? 'assistant',
+          parts: messageInfo.parts ?? [],
+          parentID: messageInfo.parentID,
+          finish: messageInfo.finish,
+        } as Partial<Message> & { id: string }),
+      ];
+    });
+
+    return {
+      messages,
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: (message: Message) => setMessages((prev) => [...prev, message]),
+      updateMessage: upsertMessage,
+      updateMessagePart: vi.fn(),
+      removeMessage: (messageId: string) => setMessages((prev) => prev.filter(
+        (message) => message.id !== messageId,
+      )),
+      clearMessages: () => setMessages([]),
+      replaceMessageText: (messageId: string, partId: string, text: string) => setMessages((prev) => (
+        prev.map((message) => (
+          message.id === messageId
+            ? {
+                ...message,
+                parts: message.parts.map((part) => (
+                  part.id === partId ? { ...part, text } : part
+                )),
+              }
+            : message
+        ))
+      )),
+      markMessageStopped: (messageId: string) => setMessages((prev) => prev.map(
+        (message) => (message.id === messageId ? { ...message, finish: 'stop' } : message),
+      )),
+      truncateAfterMessage: vi.fn(),
+    };
+  });
+}
+
+describe('SessionChat message loading state', () => {
+  it('renders a retry action instead of an empty conversation after loading fails', async () => {
+    const user = userEvent.setup();
+    const refetch = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      error: 'server unavailable',
+      refetch,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('消息加载失败');
+    expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat provider retry notice', () => {
+  const userMessage = makeMessage({
+    id: 'msg-user',
+    role: 'user',
+    parts: [{ id: 'part-user', type: 'text', text: '分析这批 CVE' } as Message['parts'][number]],
+  });
+
+  it('shows the backoff state pushed by the backend and clears it when streaming resumes', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'Date'] });
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: {
+              type: 'retry',
+              attempt: 2,
+              maxAttempts: 5,
+              message: 'Rate Limited',
+              next: Date.now() + 8000,
+              rateLimited: true,
+              providerID: 'prov',
+              modelID: 'm',
+            },
+          },
+        });
+      });
+      const notice = screen.getByTestId('session-retry-notice');
+      expect(notice.textContent).toContain('模型请求被限流（429），正在第 2/5 次重试');
+      expect(notice.textContent).toContain('约 8 秒后');
+
+      act(() => {
+        vi.advanceTimersByTime(3000);
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent).toContain('约 5 秒后');
+
+      // Non-429 failures show the backend's reason instead.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 1, message: 'Provider Server Error', rateLimited: false },
+          },
+        });
+      });
+      expect(screen.getByTestId('session-retry-notice').textContent)
+        .toContain('模型请求失败（Provider Server Error），正在第 1 次重试');
+
+      // Long SDK error bodies are cut to one line.
+      const longReason = `Error code: 500 - ${'x'.repeat(200)}`;
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: {
+            sessionID: 'sess-1',
+            status: { type: 'retry', attempt: 2, maxAttempts: 5, message: longReason, rateLimited: false },
+          },
+        });
+      });
+      const truncated = screen.getByTestId('session-retry-notice').textContent || '';
+      expect(truncated).toContain(`${longReason.slice(0, 117)}…`);
+      expect(truncated).not.toContain(longReason);
+
+      // The backend reports the next attempt as in flight: the notice goes away.
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('drops the notice when the consumer swaps to another session without remounting', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'retry', attempt: 2, maxAttempts: 5, message: 'Rate Limited', rateLimited: true },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // sess-2 is busy running a tool: its status poll turns streaming back on,
+    // so a stale notice from sess-1 would render inside sess-2's conversation.
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return Promise.resolve({ data: { 'sess-2': { type: 'busy' } } });
+      }
+      if (url === '/api/session/sess-2/message') {
+        return Promise.resolve({ data: { items: [], hasMore: false, nextBefore: null } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    view.rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-2',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+
+  it('keeps the notice when a sub-agent receipt lands during the backoff', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'retry', attempt: 1, maxAttempts: 5, message: 'Rate Limited', rateLimited: true },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // An earlier delegate_task's child finishes while the parent sleeps
+    // between retries; its receipt rewrites that old tool part.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: {
+            id: 'part-delegate', messageID: 'msg-earlier', sessionID: 'sess-1', type: 'tool',
+            callID: 'call-delegate', tool: 'delegate_task',
+            state: {
+              status: 'completed', input: {}, output: 'submitted',
+              metadata: { submitted: true, status: 'completed' }, time: { start: 1, end: 2 },
+            },
+          },
+        },
+      });
+    });
+    expect(screen.getByTestId('session-retry-notice')).toBeTruthy();
+
+    // Output from the retried request does end the notice.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.part.updated',
+        properties: {
+          part: { id: 'part-text', messageID: 'msg-new', sessionID: 'sess-1', type: 'text', text: '继续' },
+        },
+      });
+    });
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+
+  it('recovers the retry state from the status poll after a reload', async () => {
+    // Shape comes from the backend's SessionStatusRetry model dump, which is
+    // what /api/session/status actually returns — the SSE event serializes
+    // the very same object.
+    mockFallbackPolling({
+      localMessages: [userMessage],
+      fetchedMessages: [],
+      refetch: vi.fn(),
+      status: {
+        'sess-1': {
+          type: 'retry',
+          attempt: 3,
+          message: 'Rate Limited',
+          next: Date.now() + 4000,
+          maxAttempts: 5,
+          rateLimited: true,
+          providerID: 'prov',
+          modelID: 'm',
+        } as never,
+      },
+    });
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(screen.getByTestId('session-retry-notice').textContent)
+      .toContain('模型请求被限流（429），正在第 3/5 次重试');
+  });
+
+  it('recovers the retry state when the message load toggles loading mid-poll', async () => {
+    // The real useSessionMessages starts with loading=false and flips to true
+    // once its fetch starts, which re-runs the recovery effect while the first
+    // status poll is still in flight (FL-BUG-002).
+    let setLoading: (value: boolean) => void = () => {};
+    useSessionMessagesMock.mockImplementation(() => {
+      const [loading, setLoadingState] = React.useState(false);
+      setLoading = setLoadingState;
+      return {
+        messages: [userMessage],
+        loading,
+        error: null,
+        refetch: vi.fn(),
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        removeMessage: vi.fn(),
+        clearMessages: vi.fn(),
+        replaceMessageText: vi.fn(),
+        markMessageStopped: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      };
+    });
+    const statusPolls: Array<(value: unknown) => void> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => { statusPolls.push(resolve); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    expect(statusPolls.length).toBeGreaterThan(0);
+
+    act(() => { setLoading(true); });
+    act(() => { setLoading(false); });
+    await act(async () => { await Promise.resolve(); });
+
+    await act(async () => {
+      statusPolls.splice(0).forEach((resolve) => resolve({
+        data: {
+          'sess-1': {
+            type: 'retry',
+            attempt: 1,
+            maxAttempts: 5,
+            message: 'Rate Limited',
+            next: Date.now() + 15000,
+            rateLimited: true,
+          },
+        },
+      }));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(screen.getByTestId('session-retry-notice').textContent)
+      .toContain('模型请求被限流（429），正在第 1/5 次重试');
+  });
+
+  it('ignores a status poll that lands after the consumer switched sessions', async () => {
+    // WorkflowDetail/ChatTab swaps sessionId without remounting; a slow poll
+    // for the old session must not paint its retry notice onto the new one.
+    mockStatefulSessionMessages([userMessage]);
+    // One resolver per poll: the sess-1 poll must be the one we answer late,
+    // not whichever call happened to be last.
+    const statusResolvers: Array<(value: unknown) => void> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => { statusResolvers.push(resolve); });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    expect(statusResolvers.length).toBeGreaterThan(0);
+    // sess-1's polls finally answer "retrying" — too late to matter. Answer
+    // every pending poll: the child-status refresh polls the same URL first.
+    await act(async () => {
+      statusResolvers.splice(0).forEach((resolve) => resolve({
+        data: {
+          'sess-1': {
+            type: 'retry',
+            attempt: 2,
+            message: 'Rate Limited',
+            next: Date.now() + 3000,
+            maxAttempts: 5,
+            rateLimited: true,
+          },
+        },
+      }));
+      await Promise.resolve();
+    });
+
+    expect(screen.queryByTestId('session-retry-notice')).toBeNull();
+  });
+});
+
+describe('SessionChat subagent permission requests', () => {
+  const userMessage = makeMessage({
+    id: 'msg-user',
+    role: 'user',
+    parts: [{ id: 'part-user', type: 'text', text: '让子 Agent 写文件' } as Message['parts'][number]],
+  });
+
+  // A grandchild two delegations down; the backend lists the sessions that
+  // delegated to it, nearest first.
+  const subagentWriteRequest = {
+    requestID: 'perm-grandchild',
+    sessionID: 'grandchild-1',
+    permission: 'edit',
+    patterns: ['markers/ask.marker'],
+    metadata: {
+      tool: 'write',
+      filepath: '/work/markers/ask.marker',
+      delegationChain: ['child-1', 'sess-1'],
+    },
+    tool: { name: 'write' },
+  };
+  const asPending = (request: typeof subagentWriteRequest, id: string) => ({
+    ...request, id, messageID: '', toolID: 'write', always: [], time: { created: 1 },
+  });
+
+  it('asks in the parent chat for a write a delegated subagent is waiting on', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      // A session the user started from this one is its own conversation.
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.request',
+        properties: {
+          ...subagentWriteRequest,
+          requestID: 'perm-branch',
+          sessionID: 'user-branch',
+          metadata: { tool: 'write' },
+        },
+      });
+    });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+    });
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'chat.permission.allowOnce' }));
+    expect(clientPostMock).toHaveBeenCalledWith(
+      '/api/permission/perm-grandchild/reply',
+      { allow: true, always: false },
+    );
+  });
+
+  it('recovers a subagent request that was already pending when the chat opened', async () => {
+    clientGetMock.mockImplementation(async (url: string) => (
+      url === '/api/permission'
+        ? {
+          data: [
+            asPending(subagentWriteRequest, 'perm-grandchild'),
+            asPending({ ...subagentWriteRequest, sessionID: 'other-1', metadata: { ...subagentWriteRequest.metadata, delegationChain: ['other-parent'] } }, 'perm-other'),
+          ],
+        }
+        : { data: {} }
+    ));
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+    });
+  });
+
+  it('drops a request answered in another chat', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+    });
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.replied',
+        properties: { requestID: 'perm-grandchild', sessionID: 'grandchild-1', reply: 'allow' },
+      });
+    });
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('moves on when the request it shows is no longer awaited', async () => {
+    mockStatefulSessionMessages([userMessage]);
+    const nextRequest = { ...subagentWriteRequest, requestID: 'perm-next', patterns: ['markers/next.marker'] };
+    let answeredElsewhere = false;
+    clientGetMock.mockImplementation(async (url: string) => (
+      url === '/api/permission'
+        ? { data: answeredElsewhere ? [asPending(nextRequest, 'perm-next')] : [] }
+        : { data: {} }
+    ));
+    clientPostMock.mockImplementation(async (url: string) => {
+      if (url === '/api/permission/perm-grandchild/reply') {
+        answeredElsewhere = true;
+        throw Object.assign(new Error('Request failed with status code 404'), { response: { status: 404 } });
+      }
+      return { data: {} };
+    });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: nextRequest });
+    });
+
+    await userEvent.setup().click(screen.getByRole('button', { name: 'chat.permission.allowOnce' }));
+
+    await waitFor(() => {
+      expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/next.marker');
+    });
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('does not bring back a request settled while the list was loading', async () => {
+    const list = deferred<{ data: unknown }>();
+    clientGetMock.mockImplementation((url: string) => (
+      url === '/api/permission' ? list.promise : Promise.resolve({ data: {} })
+    ));
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.replied',
+        properties: { requestID: 'perm-grandchild', sessionID: 'grandchild-1', reply: 'allow' },
+      });
+    });
+    await act(async () => {
+      list.resolve({ data: [asPending(subagentWriteRequest, 'perm-grandchild')] });
+      await list.promise;
+    });
+
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  function queuePermissionLists() {
+    const lists: Array<ReturnType<typeof deferred<{ data: unknown }>>> = [];
+    clientGetMock.mockImplementation((url: string) => {
+      if (url !== '/api/permission') return Promise.resolve({ data: {} });
+      const next = deferred<{ data: unknown }>();
+      lists.push(next);
+      return next.promise;
+    });
+    return lists;
+  }
+
+  async function answer(list: ReturnType<typeof deferred<{ data: unknown }>>, data: unknown[]) {
+    await act(async () => {
+      list.resolve({ data });
+      await list.promise;
+    });
+  }
+
+  it('drops on reconnect a request that ended while the stream was down', async () => {
+    const lists = queuePermissionLists();
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    await answer(lists[0], [asPending(subagentWriteRequest, 'perm-grandchild')]);
+    expect(screen.getByRole('alertdialog')).toBeTruthy();
+
+    // perm-grandchild ended while the stream was down (its event was missed);
+    // another request settles while the reconnect list is loading.
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'permission.replied',
+        properties: { requestID: 'perm-unrelated', sessionID: 'child-9', reply: 'allow' },
+      });
+    });
+    await answer(lists[1], []);
+
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('lets a newer list answer win over an older one that arrives later', async () => {
+    const lists = queuePermissionLists();
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+
+    await answer(lists[1], [asPending(subagentWriteRequest, 'perm-grandchild')]);
+    await answer(lists[0], []);
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+  });
+
+  it('still uses an older list answer when the newer request fails', async () => {
+    const lists = queuePermissionLists();
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+
+    await act(async () => {
+      lists[1].reject(new Error('Request failed with status code 503'));
+      await lists[1].promise.catch(() => {});
+    });
+    await answer(lists[0], [asPending(subagentWriteRequest, 'perm-grandchild')]);
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+  });
+
+  it('ignores a list answer from before the chat left the session and came back', async () => {
+    const lists = queuePermissionLists();
+    const ownRequest = {
+      ...subagentWriteRequest, requestID: 'perm-own', sessionID: 'sess-1', metadata: { tool: 'write' },
+    };
+    mockStatefulSessionMessages([userMessage]);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-2', live: true }));
+    await act(async () => { await Promise.resolve(); });
+    view.rerender(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    // The first answer for sess-1 predates both switches; the request in it
+    // has been answered since.
+    await answer(lists[0], [asPending(ownRequest, 'perm-own')]);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+    await answer(lists[lists.length - 1], []);
+    expect(screen.queryByRole('alertdialog')).toBeNull();
+  });
+
+  it('keeps a request announced while an older empty list was loading', async () => {
+    const list = deferred<{ data: unknown }>();
+    clientGetMock.mockImplementation((url: string) => (
+      url === '/api/permission' ? list.promise : Promise.resolve({ data: {} })
+    ));
+    mockStatefulSessionMessages([userMessage]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+    await act(async () => { await Promise.resolve(); });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'permission.request', properties: subagentWriteRequest });
+    });
+    await act(async () => {
+      list.resolve({ data: [] });
+      await list.promise;
+    });
+
+    expect(screen.getByRole('alertdialog')).toHaveTextContent('$ write markers/ask.marker');
+  });
+});
+
+describe('isPermissionRequestForSession', () => {
+  it('matches the session itself and the sessions that delegated to the requester', () => {
+    expect(isPermissionRequestForSession('sess-1', {}, 'sess-1')).toBe(true);
+    expect(isPermissionRequestForSession('grandchild-1', { delegationChain: ['child-1', 'sess-1'] }, 'sess-1')).toBe(true);
+    expect(isPermissionRequestForSession('grandchild-1', { delegationChain: ['child-1', 'sess-1'] }, 'child-1')).toBe(true);
+    expect(isPermissionRequestForSession('user-branch', {}, 'sess-1')).toBe(false);
+    expect(isPermissionRequestForSession('grandchild-1', { delegationChain: 'sess-1' }, 'sess-1')).toBe(false);
+    expect(isPermissionRequestForSession('sess-1', {}, undefined)).toBe(false);
+  });
+});
+
+describe('SessionChat focused message deep links', () => {
+  it('scrolls to and consumes a rendered focus target', async () => {
+    const onFocusMessageConsumed = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'target-message',
+          parts: [{ id: 'part-1', type: 'text', text: 'target' }],
+        }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { rerender } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      focusMessageId: 'target-message',
+      onFocusMessageConsumed,
+    }));
+
+    await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-1', onFocusMessageConsumed }));
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1', focusMessageId: 'target-message', onFocusMessageConsumed,
+    }));
+    await waitFor(() => expect(onFocusMessageConsumed).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe('SessionChat auto-scroll', () => {
+  const messagesState = (messages: Message[]) => ({
+    messages,
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    removeMessage: vi.fn(),
+    clearMessages: vi.fn(),
+    replaceMessageText: vi.fn(),
+    markMessageStopped: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+
+  it('follows new messages inside its own list without scrolling the page that embeds it', async () => {
+    const first = makeMessage({
+      id: 'auto-scroll-1',
+      parts: [{ id: 'auto-scroll-part-1', type: 'text', text: 'first answer' } as any],
+    });
+    useSessionMessagesMock.mockReturnValue(messagesState([first]));
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    // jsdom has no layout: give the message list something to scroll to.
+    const list = screen.getByText('first answer').closest('.overflow-y-auto') as HTMLElement;
+    let scrollTop = 0;
+    Object.defineProperty(list, 'scrollHeight', { configurable: true, value: 640 });
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+
+    useSessionMessagesMock.mockReturnValue(messagesState([
+      first,
+      makeMessage({
+        id: 'auto-scroll-2',
+        parts: [{ id: 'auto-scroll-part-2', type: 'text', text: 'second answer' } as any],
+      }),
+    ]));
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await waitFor(() => expect(scrollTop).toBe(640));
+    // scrollIntoView also scrolls every scrollable ancestor (the code audit page around the chat).
+    expect(window.HTMLElement.prototype.scrollIntoView).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatToolPart file operation titles', () => {
+  it('shows only the filename in the header while preserving the full path in details', () => {
+    const fullPath = '/Users/example/.aegisops/workspace/outputs/2026-07-24/gold_price_retrieval_plan.md';
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-write-file',
+        type: 'tool',
+        tool: 'write',
+        state: {
+          status: 'completed',
+          input: { filePath: fullPath, content: '# Plan' },
+          output: 'Wrote file successfully.',
+          title: fullPath,
+        },
+      } as Message['parts'][number],
+    }));
+
+    const header = container.querySelector('summary');
+    expect(header).toHaveTextContent('gold_price_retrieval_plan.md');
+    expect(header).not.toHaveTextContent(fullPath);
+    expect(container).toHaveTextContent(fullPath);
+  });
+
+  it('handles Windows-style file paths in file tool headers', () => {
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-read-file',
+        type: 'tool',
+        tool: 'read_file',
+        state: {
+          status: 'completed',
+          input: { path: 'C:\\workspace\\reports\\summary.txt' },
+          output: 'summary',
+        },
+      } as Message['parts'][number],
+    }));
+
+    expect(container.querySelector('summary')).toHaveTextContent('summary.txt');
+  });
+
+  it('shows only the first filename and file count for multi-file patches', () => {
+    const firstPath = '/repo/src/a.ts';
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-apply-patch',
+        type: 'tool',
+        tool: 'apply_patch',
+        state: {
+          status: 'completed',
+          input: {
+            patchText: [
+              '*** Begin Patch',
+              `*** Update File: ${firstPath}`,
+              '*** Add File: /repo/src/b.ts',
+              '*** End Patch',
+            ].join('\n'),
+          },
+          output: 'Done!',
+        },
+      } as Message['parts'][number],
+    }));
+
+    const header = container.querySelector('summary');
+    expect(header).toHaveTextContent('a.ts +1');
+    expect(header).not.toHaveTextContent(firstPath);
+    expect(container).toHaveTextContent(firstPath);
+  });
+
+  it('renders output attachments with separate preview and download actions', () => {
+    const onOpenContextFile = vi.fn();
+    render(React.createElement(ChatMessageBubble, {
+      message: {
+        id: 'msg-output',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        timestamp: Date.now(),
+        parts: [{
+          id: 'tool-write-output',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'write',
+          state: {
+            status: 'completed',
+            input: { filePath: 'report.md' },
+            output: 'Wrote file successfully.',
+            attachments: [{
+              id: 'prt-output',
+              resourceID: 'res-output',
+              filename: 'report.md',
+              mime: 'text/markdown',
+              origin: 'agent_output',
+            }],
+          },
+        }],
+      } as any,
+      onOpenContextFile,
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: /report\.md/i }));
+    expect(onOpenContextFile).toHaveBeenCalledWith('res-output');
+    const download = screen.getByTitle('context.download');
+    expect(download).toHaveAttribute('href', '/api/session/sess-1/context/files/res-output/download');
+  });
+
+  it('renders channel attachments without a context resource through the file route', () => {
+    // Channel inbound media (WeCom / Feishu ...) keeps its file:// URL and has
+    // no resourceID: the image must still render and a non-image file must
+    // still show a chip, both served by /api/file/download.
+    const imageUrl = 'file:///data/channel_media/wecom/acct/2026-09-21/msg_1_shot.png';
+    const fileUrl = 'file:///data/channel_media/wecom/acct/2026-09-21/msg_2_report.pdf';
+    const { container } = render(React.createElement(ChatMessageBubble, {
+      message: {
+        id: 'msg-channel',
+        sessionID: 'sess-1',
+        role: 'user',
+        timestamp: Date.now(),
+        parts: [
+          { id: 'text-1', sessionID: 'sess-1', type: 'text', text: '[图片] 分析图片内容' },
+          { id: 'file-img', sessionID: 'sess-1', type: 'file', mime: 'image/png', filename: '企业微信截图.png', url: imageUrl },
+          { id: 'file-doc', sessionID: 'sess-1', type: 'file', mime: 'application/pdf', filename: 'report.pdf', url: fileUrl },
+        ],
+      } as any,
+    }));
+
+    const image = container.querySelector('img[alt="企业微信截图.png"]');
+    expect(image).toHaveAttribute('src', expect.stringContaining('/api/file/download?path='));
+    expect(image?.getAttribute('src')).toContain(encodeURIComponent('/data/channel_media/wecom/acct/2026-09-21/msg_1_shot.png'));
+    expect(screen.queryByTitle('context.download')).toBeNull();
+
+    const chip = screen.getByText('report.pdf').closest('a');
+    expect(chip).toHaveAttribute('href', expect.stringContaining('/api/file/download?path='));
+    expect(chip).toHaveAttribute('download', 'report.pdf');
+  });
+
+  it('does not change summaries for non-file tools', () => {
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-custom',
+        type: 'tool',
+        tool: 'custom_tool',
+        state: {
+          status: 'completed',
+          input: { path: '/api/v1/incidents' },
+          output: 'ok',
+        },
+      } as Message['parts'][number],
+    }));
+
+    expect(container.querySelector('summary')).toHaveTextContent('path=/api/v1/incidents');
+  });
+});
+
+describe('buildContextUsageBreakdown', () => {
+  it('excludes compacted history from the current used-token total', () => {
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'active',
+        role: 'user',
+        parts: [{ id: 'active-text', type: 'text', text: 'a'.repeat(400) }],
+      }),
+      makeMessage({
+        id: 'archived',
+        compacted: true,
+        parts: [{ id: 'archived-text', type: 'text', text: 'b'.repeat(800) }],
+      }),
+    ], 'c'.repeat(40));
+
+    expect(breakdown.usedTokens).toBe(110);
+    expect(breakdown.compactedTokens).toBe(200);
+    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
+      ['systemPrompt', 0],
+      ['toolDefinitions', 0],
+      ['conversation', 110],
+      ['reasoning', 0],
+      ['tools', 0],
+      ['skillLoad', 0],
+      ['agentDelegation', 0],
+    ]);
+    expect(breakdown.segments.find((segment) => segment.key === 'systemPrompt')?.included).toBe(false);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(false);
+    expect(breakdown.excludedSegments).toEqual([]);
+  });
+
+  it('counts compacted tool outputs as a small placeholder', () => {
+    const compactedTime = { start: 1, compacted: 2 };
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'tool-msg',
+        parts: [{
+          id: 'tool-part',
+          type: 'tool',
+          tool: 'bash',
+          state: {
+            status: 'completed',
+            input: { command: 'x'.repeat(40) },
+            output: 'y'.repeat(800),
+            time: compactedTime,
+          },
+        }],
+      }),
+    ], '');
+
+    expect(breakdown.usedTokens).toBe(23);
+  });
+
+  it('uses the backend compaction-basis total and adds the local draft on top', () => {
+    const breakdown = buildContextUsageBreakdown([], 'd'.repeat(40), {
+      sessionID: 'sess-1',
+      usedTokens: 130,
+      contextWindow: 1000,
+      percent: 13,
+      source: 'observed',
+      lastMessageID: 'assistant-1',
+      observedTokens: 130,
+      estimatedTokens: 100,
+      compactedTokens: 50,
+      segments: [
+        { key: 'systemPrompt', tokens: 15, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 10, included: true, source: 'estimated' },
+        { key: 'tools', tokens: 40, included: true, source: 'estimated' },
+        { key: 'skillLoad', tokens: 20, included: true, source: 'estimated' },
+        { key: 'agentDelegation', tokens: 10, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 30, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 5, included: true, source: 'observed' },
+      ],
+      excludedSegments: [
+        { key: 'compactedHistory', tokens: 50, included: false, source: 'estimated' },
+      ],
+    });
+
+    // 130 observed + 10 draft. The 30-token observed drift is spread over
+    // the estimated rows (x1.3) instead of landing on "conversation".
+    expect(breakdown.usedTokens).toBe(140);
+    expect(breakdown.compactedTokens).toBe(50);
+    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
+      ['systemPrompt', 19, true],
+      ['toolDefinitions', 13, true],
+      ['conversation', 10, true],
+      ['reasoning', 6, true],
+      ['tools', 53, true],
+      ['skillLoad', 26, true],
+      ['agentDelegation', 13, true],
+    ]);
+    expect(breakdown.segments.reduce((total, segment) => total + segment.tokens, 0))
+      .toBe(breakdown.usedTokens);
+    expect(breakdown.excludedSegments).toEqual([]);
+  });
+
+  it('scales rows down when the estimate exceeds the observed total', () => {
+    const breakdown = buildContextUsageBreakdown([], '', {
+      sessionID: 'sess-1',
+      usedTokens: 100,
+      contextWindow: 1000,
+      percent: 10,
+      source: 'observed',
+      estimatedTokens: 200,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 120, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    expect(breakdown.usedTokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'systemPrompt')?.tokens).toBe(40);
+    expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(60);
+    expect(breakdown.segments.reduce((total, segment) => total + segment.tokens, 0)).toBe(100);
+  });
+
+  it('applies and clamps pending removals by attributed segment', () => {
+    const breakdown = buildContextUsageBreakdown([], '', {
+      sessionID: 'sess-1',
+      usedTokens: 260,
+      contextWindow: 1000,
+      percent: 26,
+      source: 'estimated',
+      estimatedTokens: 260,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 100, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 50, included: true, source: 'estimated' },
+        { key: 'tools', tokens: 30, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    }, {
+      pendingTokenDeltas: { reasoning: -50, tools: -300 },
+    });
+
+    // 260 minus the 80 tokens actually removable (reasoning 50, tools 30).
+    expect(breakdown.usedTokens).toBe(180);
+    expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
+    expect(breakdown.segments.find((segment) => segment.key === 'tools')?.tokens).toBe(0);
+  });
+
+  it('uses snapshot fixed costs with local messages and explicit pending removals', () => {
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'edited-user',
+        role: 'user',
+        parts: [{ id: 'edited-user-text', type: 'text', text: 'x'.repeat(400) }],
+      }),
+      makeMessage({
+        id: 'discarded-assistant',
+        parts: [
+          { id: 'discarded-text', type: 'text', text: 'y'.repeat(400) },
+          { id: 'discarded-reasoning', type: 'reasoning', text: 'z'.repeat(400) },
+        ],
+      }),
+    ], '', {
+      sessionID: 'sess-1',
+      usedTokens: 330,
+      contextWindow: 1000,
+      percent: 33,
+      source: 'observed',
+      estimatedTokens: 320,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 110, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 100, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    }, {
+      pendingTokenDeltas: { conversation: -100, reasoning: -100 },
+      useLocalMessageUsage: true,
+    });
+
+    // Fixed 120 (80 + 40) + local 300 - pending removals 200.
+    expect(breakdown.usedTokens).toBe(220);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.tokens).toBe(40);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(true);
+    expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
+  });
+});
+
+describe('getMessageBubbleClassName', () => {
+  // The message column owns the available width, so the inner bubble only
+  // controls intrinsic sizing (`w-auto` vs `w-full`). Tests here therefore
+  // assert width semantics, not legacy max-width literals.
+  it('allows every bubble variant to shrink within the message column', () => {
+    for (const compact of [false, true]) {
+      for (const isUser of [false, true]) {
+        const className = getMessageBubbleClassName({ compact, isUser, isEditing: false });
+        expect(className).toContain('min-w-0');
+        expect(className).toContain('max-w-full');
+      }
+    }
+  });
+
+  it('keeps non-editing user bubbles auto-sized in full layout', () => {
+    const className = getMessageBubbleClassName({
+      compact: false,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('w-auto');
+    expect(className.split(' ')).not.toContain('w-full');
+    expect(className).toContain('rounded-[18px]');
+    expect(className).toContain('py-3');
+    expect(className).not.toContain('rounded-[24px]');
+    expect(className).not.toContain('py-4');
+  });
+
+  it('expands editing user bubbles to full width in full layout', () => {
+    const className = getMessageBubbleClassName({
+      compact: false,
+      isUser: true,
+      isEditing: true,
+    });
+
+    expect(className).toContain('w-full');
+    expect(className).not.toContain('w-auto');
+  });
+
+  it('keeps assistant bubbles full width regardless of editing state', () => {
+    const className = getMessageBubbleClassName({
+      compact: false,
+      isUser: false,
+      isEditing: true,
+    });
+
+    expect(className).toContain('w-full');
+    expect(className).toContain('text-base');
+  });
+
+  it('fills the fixed compact assistant message column', () => {
+    const className = getMessageBubbleClassName({
+      compact: true,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toContain('w-full');
+    expect(className).toContain('max-w-full');
+  });
+
+  it.each([false, true])('keeps assistant replies in the transparent content flow when compact=%s', (compact) => {
+    const className = getMessageBubbleClassName({
+      compact,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toContain('bg-transparent');
+    expect(className).not.toContain('bg-white');
+    expect(className).not.toContain('border-zinc-200/90');
+    expect(className).not.toContain('shadow-sm');
+    expect(className).not.toContain('rounded-[20px]');
+    expect(className).not.toContain('rounded-[24px]');
+  });
+
+  it('keeps compact user bubbles content-sized when not editing', () => {
+    const className = getMessageBubbleClassName({
+      compact: true,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('max-w-full');
+    expect(className.split(/\s+/)).not.toContain('w-full');
+  });
+
+  it.each([false, true])('uses a neutral user bubble background when compact=%s', (compact) => {
+    const className = getMessageBubbleClassName({
+      compact,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('bg-ui-subtle');
+    expect(className).toContain('border-ui-border/60');
+    expect(className).not.toContain('bg-sky-50');
+    expect(className).not.toContain('border-sky-100');
+  });
+});
+
+describe('getMessageGroupClassName', () => {
+  it('caps full-layout user messages at 88% width', () => {
+    const className = getMessageGroupClassName({
+      compact: false,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('max-w-[88%]');
+    expect(className).toContain('w-fit');
+  });
+
+  it('expands editing user messages to the full content width', () => {
+    const className = getMessageGroupClassName({
+      compact: false,
+      isUser: true,
+      isEditing: true,
+    });
+
+    expect(className).toContain('w-full');
+    expect(className).toContain('max-w-full');
+  });
+
+  it('keeps assistant messages full width in full layout', () => {
+    const className = getMessageGroupClassName({
+      compact: false,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toBe('w-full');
+  });
+
+  it('uses the full compact message-list width for assistant messages', () => {
+    const className = getMessageGroupClassName({
+      compact: true,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toBe('w-full max-w-full');
+  });
+});
+
+describe('SessionChat embedded full layout', () => {
+  it('reserves horizontal space for avatars in full-width panels', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-contained-avatar',
+          role: 'assistant',
+          parts: [{ id: 'text-1', type: 'text', text: 'Task complete.' } as any],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      hideInput: true,
+      display: {
+        compact: false,
+        fullWidth: true,
+        pageCanvas: true,
+      },
+    }));
+
+    expect(container.querySelector('.space-y-5.px-12')).toBeInTheDocument();
+  });
+
+});
+
+describe('SessionChat copy action', () => {
+  it('excludes hidden task metadata from copied text', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-copy-filtered',
+          role: 'assistant',
+          parts: [{
+            id: 'text-1',
+            type: 'text',
+            text: 'copy this result\n\n<task_metadata>\nsession_id: ses-child\n</task_metadata>',
+          }],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    await user.click(screen.getByRole('button', { name: 'chat.copy' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+
+    const copiedText = writeText.mock.calls[0][0];
+    expect(copiedText).toContain('copy this result');
+    expect(copiedText).not.toContain('task_metadata');
+    expect(copiedText).not.toContain('ses-child');
+  });
+
+  it('preserves user-authored task metadata in the bubble and copied text', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const text = [
+      'Please explain this payload:',
+      '',
+      '```xml',
+      '<task_metadata>',
+      'session_id: ses-user-example',
+      '</task_metadata>',
+      '```',
+    ].join('\n');
+
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-task-metadata-example',
+          role: 'user',
+          parts: [{ id: 'text-1', type: 'text', text }],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    expect(screen.getByText(/session_id: ses-user-example/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'chat.copy' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(text));
+  });
+
+  it('falls back when async clipboard is unavailable', async () => {
+    const user = userEvent.setup();
+    const execCommand = vi.fn().mockReturnValue(true);
+
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: false,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: undefined,
+    });
+    Object.defineProperty(document, 'execCommand', {
+      configurable: true,
+      value: execCommand,
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-copy',
+          role: 'assistant',
+          parts: [{ id: 'text-1', type: 'text', text: 'copy this result' }],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    await user.click(screen.getByRole('button', { name: 'chat.copy' }));
+
+    expect(execCommand).toHaveBeenCalledWith('copy');
+  });
+});
+
+describe('getCompactionDividerClassName', () => {
+  it('insets the divider into the assistant content column in full layout', () => {
+    const className = getCompactionDividerClassName(false);
+
+    expect(className).toContain('pl-[42px]');
+    expect(className).toContain('w-full');
+    expect(className).toContain('min-w-0');
+  });
+
+  it('uses the compact assistant inset in compact layout', () => {
+    expect(getCompactionDividerClassName(true)).toContain('pl-[38px]');
+  });
+
+  it('is not inset for message bodies drawn without an avatar column', () => {
+    expect(getCompactionDividerClassName(true, false)).not.toContain('pl-[38px]');
+    expect(getCompactionDividerClassName(false, false)).not.toContain('pl-[42px]');
+  });
+});
+
+describe('getEditingActionBarClassName', () => {
+  it('keeps editing actions right-aligned inside the bubble', () => {
+    const className = getEditingActionBarClassName();
+
+    expect(className).toContain('justify-end');
+    expect(className).toContain('w-full');
+    expect(className).toContain('mt-3');
+  });
+});
+
+describe('getStandaloneThinkingBubbleClassName', () => {
+  it('matches the standard assistant bubble sizing in full layout', () => {
+    expect(getStandaloneThinkingBubbleClassName(false)).toBe(
+      getMessageBubbleClassName({ compact: false, isUser: false, isEditing: false }),
+    );
+  });
+
+  it('matches the standard assistant bubble sizing in compact layout', () => {
+    expect(getStandaloneThinkingBubbleClassName(true)).toBe(
+      getMessageBubbleClassName({ compact: true, isUser: false, isEditing: false }),
+    );
+  });
+});
+
+describe('getRenderableFileUrl', () => {
+  it('converts local file URLs to the guarded file download endpoint', () => {
+    expect(getRenderableFileUrl('file:///tmp/channel%20image.png')).toBe(
+      '/api/file/download?path=%2Ftmp%2Fchannel%20image.png',
+    );
+  });
+
+  it('converts Windows file URLs without adding a POSIX root prefix', () => {
+    expect(getRenderableFileUrl('file:///C:/Users/demo/Pictures/channel%20image.png')).toBe(
+      '/api/file/download?path=C%3A%2FUsers%2Fdemo%2FPictures%2Fchannel%20image.png',
+    );
+  });
+
+  it('preserves UNC file URL hosts for Windows network paths', () => {
+    expect(getRenderableFileUrl('file://server/share/channel%20image.png')).toBe(
+      '/api/file/download?path=%2F%2Fserver%2Fshare%2Fchannel%20image.png',
+    );
+  });
+
+  it('leaves browser-readable URLs unchanged', () => {
+    expect(getRenderableFileUrl('https://example.com/image.png')).toBe('https://example.com/image.png');
+    expect(getRenderableFileUrl('data:image/png;base64,abc')).toBe('data:image/png;base64,abc');
+  });
+});
+
+describe('getUserAvatarContainerClassName', () => {
+  it('keeps the user avatar inside the message row', () => {
+    const className = getUserAvatarContainerClassName(false);
+
+    expect(className).toContain('flex-shrink-0');
+    expect(className).not.toContain('absolute');
+    expect(className).not.toContain('left-full');
+    expect(className).toContain('h-8');
+  });
+
+  it('keeps the compact avatar aligned to the compact header height', () => {
+    expect(getUserAvatarContainerClassName(true)).toContain('h-7');
+  });
+});
+
+describe('getUserAvatarSpacerClassName', () => {
+  it('does not reserve out-of-flow space in full layout', () => {
+    expect(getUserAvatarSpacerClassName(false)).toBe('h-0');
+  });
+
+  it('does not reserve out-of-flow space in compact layout', () => {
+    expect(getUserAvatarSpacerClassName(true)).toBe('h-0');
+  });
+});
+
+describe('SessionChat standalone thinking indicator', () => {
+  it('keeps only the bouncing dots during the initial assistant loading state', async () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          parts: [{ id: 'user-1-part', type: 'text', text: 'hello' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'hello',
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ parts: expect.any(Array) }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
+      expect(container.textContent).not.toContain('思考中...');
+    });
+  });
+
+  it('clears the standalone thinking indicator when stopping before Rex creates an assistant message', async () => {
+    const user = userEvent.setup();
+    mockStatefulSessionMessages();
+    clientPostMock.mockImplementation((url: string) => {
+      if (url.endsWith('/prompt_async')) {
+        return new Promise(() => {});
+      }
+      if (url.endsWith('/abort')) {
+        return new Promise(() => {});
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '接入设备');
+    await user.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
+    });
+
+    await user.click(screen.getByTitle('chat.stopTitle'));
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'assistant-late',
+            sessionID: 'sess-1',
+            role: 'assistant',
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    });
+  });
+
+  it('does not show dots again when busy status arrives after abort settles', async () => {
+    const user = userEvent.setup();
+    mockStatefulSessionMessages();
+    clientPostMock.mockImplementation((url: string) => {
+      if (url.endsWith('/prompt_async')) {
+        return new Promise(() => {});
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '已连接涉笔');
+    await user.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
+
+    await waitFor(() => {
+      expect(container.querySelectorAll('.animate-bounce').length).toBeGreaterThanOrEqual(3);
+    });
+
+    vi.useFakeTimers();
+    try {
+      act(() => {
+        screen.getByTitle('chat.stopTitle').click();
+      });
+      await act(async () => {});
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'assistant-late',
+              sessionID: 'sess-1',
+              role: 'assistant',
+            },
+          },
+        });
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_100);
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not mark the active assistant stopped when abort request fails', async () => {
+    const user = userEvent.setup();
+    const markMessageStopped = vi.fn();
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          parts: [{ id: 'user-1-part', type: 'text', text: 'hello' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'partial response' }] as Message['parts'],
+          finish: null,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped,
+      truncateAfterMessage: vi.fn(),
+    });
+    clientPostMock.mockImplementation((url: string) => {
+      if (url.endsWith('/abort')) {
+        return Promise.reject(new Error('abort failed'));
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+      }));
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+
+      await waitFor(() => {
+        expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+      });
+
+      await user.click(screen.getByTitle('chat.stopTitle'));
+
+      await waitFor(() => {
+        expect(consoleError).toHaveBeenCalled();
+      });
+      expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort');
+      expect(markMessageStopped).not.toHaveBeenCalled();
+      expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('clears local messages without refetching after session.cleared', () => {
+    const clearMessages = vi.fn();
+    const refetch = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({ id: 'message-before-clear', role: 'assistant', parts: [] })],
+      loading: false,
+      refetch,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages,
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.cleared',
+        properties: { sessionID: 'sess-1' },
+      });
+    });
+
+    expect(clearMessages).toHaveBeenCalledOnce();
+    expect(refetch).not.toHaveBeenCalled();
+  });
+
+  it('removes an intermediate assistant when message.removed arrives', () => {
+    const removeMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({ id: 'assistant-failed', role: 'assistant', parts: [] })],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage,
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.removed',
+        properties: {
+          sessionID: 'sess-1',
+          messageID: 'assistant-failed',
+        },
+      });
+    });
+
+    expect(removeMessage).toHaveBeenCalledWith('assistant-failed');
+  });
+});
+
+describe('SessionChat delegated work stop controls', () => {
+  beforeEach(() => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+  });
+
+  function submittedReceipt(status = 'running', nestedMetadata = false, childId = 'child-1'): Message {
+    const metadata = { submitted: true, status, sessionId: childId };
+    return makeMessage({
+      id: 'delegate-receipt',
+      finish: 'stop',
+      parts: [{
+        id: 'delegate-part',
+        type: 'tool',
+        tool: 'delegate_task',
+        state: {
+          status: 'completed',
+          input: { subagent_type: 'explore', description: 'Inspect the task' },
+          metadata: nestedMetadata ? { metadata } : metadata,
+        },
+      }],
+    });
+  }
+
+  it('keeps Stop for a busy grandchild even when the parent and child are idle', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? {
+        'grandchild-1': { type: 'busy', ancestorSessionIDs: ['child-1', 'sess-1'] },
+        unrelated: { type: 'busy', ancestorSessionIDs: ['another-root'] },
+      } : [],
+    }));
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+    }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort'));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: { sessionID: 'grandchild-1', status: { type: 'idle' } },
+    }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('discovers a new grandchild from SSE without a loaded delegation receipt', async () => {
+    clientGetMock.mockResolvedValue({ data: [] });
+    mockStatefulSessionMessages([]);
+    const onStreamingDone = vi.fn();
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1', onStreamingDone }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: {
+        sessionID: 'grandchild-1', status: { type: 'busy' }, ancestorSessionIDs: ['child-1', 'sess-1'],
+      },
+    }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-2', onStreamingDone }));
+    act(() => { useSSEOptionsRef.current.onEvent({
+      type: 'session.status', properties: {
+        sessionID: 'grandchild-1', status: { type: 'busy' }, ancestorSessionIDs: ['child-1', 'sess-1'],
+      },
+    }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it.each([false, true])('shows Stop for an idle parent with a running submitted child (nested metadata: %s)', async (nestedMetadata) => {
+    mockStatefulSessionMessages([submittedReceipt('running', nestedMetadata)]);
+    const conversationBottomSlot = vi.fn(() => null);
+    const onStreamingDone = vi.fn();
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      conversationBottomSlot,
+      onStreamingDone,
+    }));
+
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    expect(screen.getByPlaceholderText('请输入消息')).not.toBeDisabled();
+    expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({
+      streaming: false,
+      sending: false,
+    }));
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+    expect(onStreamingDone).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Follow up' } });
+    expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
+    fireEvent.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+      '/api/session/sess-1/prompt_async', expect.any(Object),
+    ));
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+  });
+
+  it('aborts the idle parent without changing its receipt and hides Stop when the child becomes idle', async () => {
+    const receipt = submittedReceipt('completed');
+    const markMessageStopped = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      ...useSessionMessagesMock(), messages: [receipt], markMessageStopped,
+    });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/abort'));
+    expect(markMessageStopped).not.toHaveBeenCalled();
+    expect(receipt.parts[0].state?.metadata).toEqual({ submitted: true, status: 'completed', sessionId: 'child-1' });
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it.each(['completed', 'error', 'aborted', 'cancelled'])('uses live child status, not the %s receipt status', async (status) => {
+    mockStatefulSessionMessages([submittedReceipt(status)]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('does not treat unrelated tool metadata as a running delegate', async () => {
+    const receipt = submittedReceipt();
+    receipt.parts[0].tool = 'bash';
+    mockStatefulSessionMessages([receipt]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('keeps an idle parent idle after abort fails, even with unfinished assistant history', async () => {
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'old-unfinished-assistant',
+        finish: null,
+        parts: [{ id: 'old-text', type: 'text', text: 'Old partial response' }],
+      }),
+      submittedReceipt(),
+    ]);
+    const conversationBottomSlot = vi.fn(() => null);
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    clientPostMock.mockImplementation((url: string) => url.endsWith('/abort')
+      ? Promise.reject(new Error('abort failed'))
+      : Promise.resolve({ data: {} }));
+    try {
+      const { container } = render(React.createElement(SessionChat, {
+        sessionId: 'sess-1', conversationBottomSlot,
+      }));
+      await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+      fireEvent.click(screen.getByTitle('chat.stopTitle'));
+      await waitFor(() => expect(consoleError).toHaveBeenCalled());
+
+      expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({
+        streaming: false,
+        sending: false,
+      }));
+      expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+      expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+      fireEvent.change(screen.getByPlaceholderText('请输入消息'), { target: { value: 'Try again' } });
+      expect(screen.queryByTitle('chat.queue.enqueue')).not.toBeInTheDocument();
+      fireEvent.click(container.querySelector('svg.lucide-arrow-up')!.closest('button')!);
+      await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async', expect.any(Object),
+      ));
+      expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
+  it('allows a live child detail to stop without exposing input', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+    render(React.createElement(SessionChat, {
+      sessionId: 'child-1', live: true, hideInput: true,
+    }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByTitle('chat.stopTitle'));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/child-1/abort'));
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('does not add Stop to a non-live read-only detail', async () => {
+    mockStatefulSessionMessages([submittedReceipt()]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+  });
+
+  it('shows Stop when a completed historical receipt has a busy child follow-up from SSE', async () => {
+    clientGetMock.mockResolvedValue({ data: {} });
+    const receipt = submittedReceipt('completed');
+    useSessionMessagesMock.mockReturnValue({ ...useSessionMessagesMock(), messages: [receipt] });
+    const conversationBottomSlot = vi.fn(() => null);
+    const onStreamingDone = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', conversationBottomSlot, onStreamingDone,
+    }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(conversationBottomSlot).toHaveBeenLastCalledWith(expect.objectContaining({ streaming: false }));
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    expect(receipt.parts[0].state?.metadata).toEqual({ submitted: true, status: 'completed', sessionId: 'child-1' });
+  });
+
+  it('uses the server snapshot rather than a stale running receipt', async () => {
+    clientGetMock.mockResolvedValue({ data: {} });
+    mockStatefulSessionMessages([submittedReceipt('running')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(clientGetMock).toHaveBeenCalledWith('/api/session/status'));
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('ignores unrelated status events without stopping the parent or changing child activity', async () => {
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    const onStreamingDone = vi.fn();
+    const onSSEEvent = vi.fn();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', onStreamingDone, onSSEEvent }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'unrelated', status: { type: 'idle' } },
+      });
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'compacting' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+    expect(onSSEEvent).not.toHaveBeenCalled();
+  });
+
+  it('keeps Stop visible until all tracked children are idle', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status'
+        ? { 'child-1': { type: 'busy' }, 'child-2': { type: 'busy' } }
+        : {},
+    }));
+    mockStatefulSessionMessages([
+      submittedReceipt('completed'),
+      { ...submittedReceipt('completed', false, 'child-2'), id: 'delegate-receipt-2' },
+    ]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'idle' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+
+  it('reconciles child activity after SSE reconnect', async () => {
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    let childStatus = 'busy';
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: childStatus } } : {},
+    }));
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+    childStatus = 'idle';
+    act(() => { useSSEOptionsRef.current.onReconnect(); });
+    await waitFor(() => expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument());
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status').length).toBeGreaterThanOrEqual(3);
+  });
+
+  it('ignores an old status response after a newer child SSE event', async () => {
+    const status = deferred<{ data: Record<string, { type: string }> }>();
+    let requests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status' && ++requests === 1) return status.promise;
+      return Promise.resolve({ data: {} });
+    });
+    mockStatefulSessionMessages([submittedReceipt('completed')]);
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(requests).toBeGreaterThan(0));
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    await act(async () => { status.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('replaces tracked child IDs without reusing old status or accepting old child events', async () => {
+    clientGetMock.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status' ? { 'child-1': { type: 'busy' } } : {},
+    }));
+    const initial = { ...useSessionMessagesMock(), messages: [submittedReceipt('completed')] };
+    useSessionMessagesMock.mockReturnValue(initial);
+    const props = { sessionId: 'sess-1' };
+    const { rerender } = render(React.createElement(SessionChat, props));
+    await waitFor(() => expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument());
+
+    useSessionMessagesMock.mockReturnValue({ ...initial, messages: [submittedReceipt('completed', false, 'child-2')] });
+    rerender(React.createElement(SessionChat, props));
+    await waitFor(() => expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument());
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'retry' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('discards the previous session child status request after a session switch', async () => {
+    const oldStatus = deferred<{ data: Record<string, { type: string }> }>();
+    let requests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status' && ++requests === 1) return oldStatus.promise;
+      return Promise.resolve({ data: {} });
+    });
+    const initial = { ...useSessionMessagesMock(), messages: [submittedReceipt('completed')] };
+    useSessionMessagesMock.mockReturnValue(initial);
+    const { rerender } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await waitFor(() => expect(requests).toBeGreaterThan(0));
+    useSessionMessagesMock.mockReturnValue({
+      ...initial,
+      messages: [{ ...submittedReceipt('completed', false, 'child-2'), sessionID: 'sess-2' }],
+    });
+    rerender(React.createElement(SessionChat, { sessionId: 'sess-2' }));
+    await act(async () => { oldStatus.resolve({ data: { 'child-1': { type: 'busy' } } }); });
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'child-2', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+});
+
+describe('SessionChat instruction display text', () => {
+  it('filters internal task metadata from visible message text', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-with-task-metadata',
+          role: 'assistant',
+          parts: [{
+            id: 'assistant-with-task-metadata-part',
+            type: 'text',
+            text: [
+              '查询完成。',
+              '<task_metadata>',
+              'session_id: ses-child',
+              '</task_metadata>',
+              '消息发送失败。',
+            ].join('\n'),
+          }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('查询完成。')).toBeInTheDocument();
+    expect(screen.getByText('消息发送失败。')).toBeInTheDocument();
+    expect(screen.queryByText(/task_metadata/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ses-child/)).not.toBeInTheDocument();
+  });
+
+  it('renders metadata displayText while keeping the raw prompt out of the bubble', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-instruction',
+          role: 'user',
+          parts: [{
+            id: 'user-instruction-part',
+            type: 'text',
+            text: 'Please read guide.md and generate the full workflow configuration.',
+            metadata: { displayText: '@@aegisops-instruction:智能配置' },
+          }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('智能配置')).toBeInTheDocument();
+    expect(screen.queryByText(/Please read guide\.md/)).not.toBeInTheDocument();
+  });
+
+  it('does not duplicate an initial message during StrictMode effects', async () => {
+    const consumed = vi.fn();
+    render(React.createElement(React.StrictMode, null, React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'one initial message',
+      onInitialMessageConsumed: consumed,
+    })));
+    await waitFor(() => expect(clientPostMock.mock.calls.filter(([url]) => url === '/api/session/sess-1/prompt_async')).toHaveLength(1));
+    expect(consumed).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends initialMessage with an instruction display label', async () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: 'Please create a SOC workspace custom page.',
+      initialDisplayText: buildInstructionDisplayText('创建 SOC 自定义页面'),
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          displayText: '@@aegisops-instruction:创建 SOC 自定义页面',
+          parts: expect.any(Array),
+        }),
+      );
+    });
+  });
+});
+
+describe('SessionChat welcome prompt sending', () => {
+  it('sends to the current session with optimistic history, the chosen model and the shortcut execution mode', async () => {
+    mockStatefulSessionMessages();
+    const accepted = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'explore',
+      model: { providerID: 'provider-1', modelID: 'model-1' },
+      executionMode: 'goal',
+      onExecutionModeAccepted: accepted,
+      welcomeContent: (_setInput, sendPrompt) => React.createElement('button', {
+        onClick: () => void sendPrompt('REA install guide', { agent: 'rex', executionMode: 'build' }),
+      }, 'Start REA'),
+    }));
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Start REA' }));
+    await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/prompt_async', {
+      parts: [{ type: 'text', text: 'REA install guide' }],
+      messageID: expect.any(String),
+      agent: 'rex',
+      model: { providerID: 'provider-1', modelID: 'model-1' },
+      executionMode: 'build',
+    }));
+    expect(screen.getByText('REA install guide')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start REA' })).not.toBeInTheDocument();
+    expect(accepted).toHaveBeenCalledWith('build');
+    expect(screen.queryByText('Goal')).not.toBeInTheDocument();
+    expect(clientPostMock).not.toHaveBeenCalledWith('/api/session', expect.anything());
+  });
+
+  it('queues a delayed shortcut when the current session has started streaming meanwhile', async () => {
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', executionMode: 'plan',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    const delayedSend = sendPrompt;
+    await act(async () => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+    });
+    await act(async () => {
+      expect(await delayedSend('REA use', { agent: 'rex', executionMode: 'build' })).toBe(true);
+    });
+    expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith('sess-1', {
+      parts: [{ type: 'text', text: 'REA use' }], agent: 'rex', executionMode: 'build',
+    });
+    expect(clientPostMock).not.toHaveBeenCalled();
+  });
+
+  it('prevents duplicate shortcut sends while acceptance is pending', async () => {
+    const request = deferred<{ data: object }>();
+    clientPostMock.mockReturnValue(request.promise);
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    let first!: Promise<boolean>;
+    await act(async () => {
+      first = sendPrompt('REA install');
+      expect(await sendPrompt('REA install')).toBe(false);
+    });
+    await act(async () => {
+      request.resolve({ data: {} });
+      expect(await first).toBe(true);
+    });
+    expect(clientPostMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('removes a failed optimistic message and permits retry in the same session', async () => {
+    const alert = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    clientPostMock.mockRejectedValueOnce(new Error('offline'));
+    const messages = useSessionMessagesMock();
+    let sendPrompt!: SendWelcomePrompt;
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    await act(async () => { await expect(sendPrompt('REA install')).rejects.toThrow('offline'); });
+    expect(messages.removeMessage).toHaveBeenCalledWith(messages.addMessage.mock.calls[0][0].id);
+    await act(async () => { expect(await sendPrompt('REA install')).toBe(true); });
+    expect(clientPostMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/session/sess-1/prompt_async', '/api/session/sess-1/prompt_async',
+    ]);
+    alert.mockRestore();
+  });
+
+  it.each([true, false])('does not send from a read-only or unmounted chat (read-only: %s)', async (readOnly) => {
+    let sendPrompt!: SendWelcomePrompt;
+    const view = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1', hideInput: readOnly,
+      welcomeContent: (_setInput, send) => { sendPrompt = send; return null; },
+    }));
+    if (!readOnly) view.unmount();
+    expect(await sendPrompt('REA install')).toBe(false);
+    expect(clientPostMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('SessionChat composer controls', () => {
+  function ModalChat({ onClose }: { onClose: () => void }) {
+    const dialogRef = React.useRef<HTMLDivElement>(null);
+    useDialogFocus(dialogRef, true, onClose);
+    return React.createElement('div', { ref: dialogRef, role: 'dialog', tabIndex: -1 },
+      React.createElement(SessionChat, { sessionId: 'sess-1', contextWindowTokens: 1000 }));
+  }
+
+  it.each([
+    ['添加', '添加'],
+    ['chat.contextUsageTitle', 'Context Usage'],
+  ])('Escape closes the %s menu before its enclosing modal', async (triggerLabel, menuLabel) => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    clientGetMock.mockImplementation(async (url: string) => ({ data: url === '/api/permission' ? [] : {} }));
+    render(React.createElement(ModalChat, { onClose }));
+    const trigger = screen.getByRole('button', { name: triggerLabel });
+    await user.click(trigger);
+    expect(screen.getByRole('menu', { name: menuLabel })).toBeInTheDocument();
+    if (triggerLabel === '添加') {
+      await user.tab();
+      expect(screen.getByRole('menuitem', { name: '文件和图片' })).toHaveFocus();
+    }
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: menuLabel })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(trigger).toHaveFocus();
+    await user.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('Escape dismisses the Add menu opened from @ without losing the draft or its focus', async () => {
+    const user = userEvent.setup();
+    const onClose = vi.fn();
+    clientGetMock.mockImplementation(async (url: string) => ({ data: url === '/api/permission' ? [] : {} }));
+    render(React.createElement(ModalChat, { onClose }));
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    await user.type(textarea, 'keep this @');
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('menu', { name: '添加' })).not.toBeInTheDocument();
+    expect(textarea).toHaveFocus();
+    expect(textarea).toHaveValue('keep this ');
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('returns from paged history using the shared primary action', async () => {
+    const user = userEvent.setup();
+    const loadLatest = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      ...useSessionMessagesMock(),
+      messages: [makeMessage({ id: 'older-message', role: 'user', parts: [{ type: 'text', text: 'Earlier question' }] })],
+      hasNewer: true,
+      loadLatest,
+    });
+    clientGetMock.mockImplementation(async (url: string) => ({ data: url === '/api/permission' ? [] : {} }));
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const latest = screen.getByRole('button', { name: 'chat.history.latest' });
+    // Drawn in dev's palette (the dark primary button), not the v2 token classes.
+    expect(latest).toHaveClass('bg-slate-800', 'text-white');
+    await user.click(latest);
+    expect(loadLatest).toHaveBeenCalledTimes(1);
+  });
+
+  it('enables Auto on an existing session before sending without a model override', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      modelAuto: true,
+      model: null,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'continue{enter}');
+
+    await waitFor(() => {
+      expect(sessionApiUpdateMock).toHaveBeenCalledWith('sess-1', {
+        model_auto: true,
+        model_pinned: false,
+      });
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          executionMode: 'build',
+          messageID: expect.any(String),
+          parts: [{ type: 'text', text: 'continue' }],
+        }),
+      );
+    });
+    expect(sessionApiUpdateMock.mock.invocationCallOrder[0]).toBeLessThan(
+      clientPostMock.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('keeps the disabled send button visible in dark mode', () => {
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const sendButton = screen.getByRole('button', { name: 'chat.sendTitle' });
+    expect(sendButton).toBeDisabled();
+
+    expect(sendButton?.className).toContain('bg-ui-subtle');
+    expect(sendButton?.className).toContain('text-ui-muted');
+    expect(sendButton?.className).toContain('border-ui-border');
+  });
+
+  it('groups attachment and injected actions in the Add menu', async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      onComposerAddMenuOpenChange: onOpenChange,
+      composerAddMenuSlot: ({ insertMention, insertReference }) => React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertMention('explore') },
+          '智能体',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('diagnose', 'skill') },
+          '技能',
+        ),
+      ),
+    }));
+
+    const addButton = screen.getByRole('button', { name: '添加' });
+    await user.click(addButton);
+
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(addButton).not.toHaveClass('border');
+    expect(addButton.className).not.toContain('shadow-');
+    const filesMenuItem = screen.getByRole('menuitem', { name: '文件和图片' });
+    const filesIconContainer = filesMenuItem.querySelector('svg')?.parentElement;
+    expect(filesIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+    expect(filesIconContainer?.className).not.toContain('shadow-');
+    await user.click(screen.getByRole('button', { name: '智能体' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '技能' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('diagnose')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('');
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('menu', { name: '添加' })).not.toBeInTheDocument();
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('sends uploaded documents as file parts without embedding a host path', async () => {
+    clientPostMock.mockImplementation((url: string) => {
+      if (url === '/api/workspace/upload') {
+        return Promise.resolve({
+          data: {
+            uploaded: [{
+              uploadID: 'prt-upload-1',
+              name: 'paper.md',
+              mime: 'text/markdown',
+              size: 7,
+              is_text_file: true,
+            }],
+          },
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File(['# Paper'], 'paper.md', { type: 'text/markdown' });
+
+    fireEvent.change(input, { target: { files: [file] } });
+    await screen.findByText('paper.md');
+    await userEvent.type(screen.getByPlaceholderText('请输入消息'), 'review{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: expect.arrayContaining([
+            { type: 'text', text: 'review' },
+            expect.objectContaining({
+              type: 'file',
+              uploadID: 'prt-upload-1',
+              mime: 'text/markdown',
+              filename: 'paper.md',
+            }),
+          ]),
+        }),
+      );
+    });
+    const promptCall = clientPostMock.mock.calls.find(([url]) => url === '/api/session/sess-1/prompt_async');
+    expect(JSON.stringify(promptCall?.[1])).not.toContain('Attached files:');
+    expect(JSON.stringify(promptCall?.[1])).not.toContain('/Users/');
+  });
+
+  it('attaches a reverse-engineering sample only when any file type is allowed', async () => {
+    clientPostMock.mockImplementation((url: string) => (url === '/api/workspace/upload'
+      ? Promise.resolve({
+        data: { uploaded: [{ uploadID: 'prt-sample', name: 'rea_demo', mime: 'application/octet-stream', size: 4, is_text_file: false }] },
+      })
+      : Promise.resolve({ data: {} })));
+    const sample = () => new File([new Uint8Array([0xcf, 0xfa, 0xed, 0xfe])], 'rea_demo', { type: 'application/octet-stream' });
+
+    const first = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const docsOnly = first.container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(docsOnly.getAttribute('accept')).toContain('.pdf');
+    fireEvent.change(docsOnly, { target: { files: [sample()] } });
+    await screen.findByText('chat.upload.invalidType');
+    expect(clientPostMock).not.toHaveBeenCalledWith('/api/workspace/upload', expect.anything(), expect.anything());
+    first.unmount();
+
+    const second = render(React.createElement(SessionChat, { sessionId: 'sess-1', allowAnyUpload: true }));
+    const anyFile = second.container.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(anyFile.hasAttribute('accept')).toBe(false);
+    fireEvent.change(anyFile, { target: { files: [sample()] } });
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith('/api/workspace/upload', expect.anything(), expect.anything());
+    });
+    expect(await screen.findByText('rea_demo')).toBeInTheDocument();
+    expect(screen.queryByText('chat.upload.invalidType')).not.toBeInTheDocument();
+  });
+
+  it('deletes an abandoned staged document when the user removes it', async () => {
+    clientPostMock.mockResolvedValue({
+      data: {
+        uploaded: [{
+          uploadID: 'prt-upload-remove',
+          name: 'draft.md',
+          mime: 'text/markdown',
+          size: 5,
+          is_text_file: true,
+        }],
+      },
+    });
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    const input = container.querySelector('input[type="file"]') as HTMLInputElement;
+
+    fireEvent.change(input, {
+      target: { files: [new File(['draft'], 'draft.md', { type: 'text/markdown' })] },
+    });
+    await screen.findByText('draft.md');
+    fireEvent.click(screen.getByTitle('chat.upload.remove'));
+
+    await waitFor(() => {
+      expect(clientDeleteMock).toHaveBeenCalledWith('/api/workspace/upload/chat/prt-upload-remove');
+    });
+  });
+
+  it('keeps a selected subagent reference when the default agent changes', async () => {
+    const user = userEvent.setup();
+    const mentionAgents = [
+      {
+        name: 'rex',
+        description: 'Main orchestrator',
+        mode: 'primary',
+        permission: [],
+        options: {},
+        skills: [],
+        tools: [],
+      },
+      {
+        name: 'explore',
+        description: 'Explore the codebase',
+        mode: 'subagent',
+        native: true,
+        permission: [],
+        options: {},
+        skills: [],
+        tools: [],
+      },
+    ];
+    function AgentMenuHarness() {
+      const [agentName, setAgentName] = React.useState('rex');
+      return React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        agentName,
+        mentionAgents,
+        composerAddMenuSlot: ({ insertMention }) => React.createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: () => {
+              setAgentName('explore');
+              insertMention('explore');
+            },
+          },
+          '选择 Explore',
+        ),
+      });
+    }
+    render(React.createElement(AgentMenuHarness));
+
+    await user.click(screen.getByRole('button', { name: '添加' }));
+    await user.click(screen.getByRole('button', { name: '选择 Explore' }));
+
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+  });
+});
+
+describe('SessionChat staged upload lifecycle', () => {
+  const modes = ['create', 'send', 'queue'] as const;
+  type Mode = typeof modes[number];
+  const uploadUrl = (name = 'draft.md') => `/api/workspace/upload/chat/prt-${name}`;
+  const uploadResponse = (...names: string[]) => ({
+    data: { uploaded: names.map((name) => ({ name, uploadID: `prt-${name}`, mime: 'text/markdown' })) },
+  });
+  const selectDocuments = (container: HTMLElement, ...names: string[]) => {
+    fireEvent.change(container.querySelector('input[type="file"]')!, {
+      target: { files: names.map((name) => new File(['draft'], name, { type: 'text/markdown' })) },
+    });
+  };
+  const removeDocument = (name = 'draft.md') => {
+    const chip = screen.getByText(name).parentElement!.parentElement!;
+    fireEvent.click(within(chip).getByTitle('chat.upload.remove'));
+  };
+  const submit = () => {
+    const textarea = screen.getByRole('textbox');
+    fireEvent.change(textarea, { target: { value: 'review' } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+  };
+
+  beforeEach(() => {
+    vi.spyOn(window, 'alert').mockImplementation(() => undefined);
+  });
+  afterEach(() => {
+    vi.mocked(window.alert).mockRestore();
+  });
+
+  async function setupSubmission(mode: Mode, overrides: Partial<React.ComponentProps<typeof SessionChat>> = {}) {
+    const request = deferred<unknown>();
+    const createAndSend = vi.fn(() => request.promise);
+    clientPostMock.mockImplementation((url: string, body: FormData) => url === '/api/workspace/upload'
+      ? Promise.resolve(uploadResponse(...body.getAll('files').map((file) => (file as File).name)))
+      : request.promise);
+    sessionApiEnqueuePromptMock.mockReturnValue(request.promise);
+    const props = {
+      sessionId: mode === 'create' ? null : 'sess-1',
+      onCreateAndSend: createAndSend,
+      live: true,
+      ...overrides,
+    };
+    const view = render(React.createElement(SessionChat, props));
+    await act(async () => {
+      selectDocuments(view.container, 'draft.md');
+    });
+    if (mode === 'queue') {
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+    }
+    const expectRequested = () => {
+      const parts = expect.arrayContaining([expect.objectContaining({ uploadID: 'prt-draft.md' })]);
+      if (mode === 'create') {
+        expect(createAndSend).toHaveBeenCalledWith('review', parts, undefined, undefined, undefined, 'build');
+      } else if (mode === 'queue') {
+        expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith('sess-1', expect.objectContaining({ parts }));
+      } else {
+        expect(clientPostMock).toHaveBeenCalledWith('/api/session/sess-1/prompt_async', expect.objectContaining({ parts }));
+      }
+    };
+    return { ...view, props, request, createAndSend, expectRequested };
+  }
+
+  it.each(modes)('protects IDs before the first %s await and after an unmounted acceptance', async (mode) => {
+    const view = await setupSubmission(mode);
+    act(() => {
+      submit();
+      view.unmount();
+    });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await waitFor(view.expectRequested);
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it('reserves uploads before the create callback synchronously switches away', async () => {
+    const view = await setupSubmission('create');
+    view.createAndSend.mockImplementation(() => {
+      view.unmount();
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+      return view.request.promise;
+    });
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve('sess-created'); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('transfers accepted %s uploads before a parent callback unmounts the tray', async (mode) => {
+    const onAccepted = vi.fn(() => view.unmount());
+    const view = await setupSubmission(mode, { onExecutionModeAccepted: onAccepted });
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(onAccepted).toHaveBeenCalledOnce();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'queue'] as const)('reserves %s uploads throughout deferred model selection', async (mode) => {
+    const modelUpdate = deferred<unknown>();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    const view = await setupSubmission(mode, { modelAuto: true });
+    act(() => { submit(); });
+    expect(sessionApiUpdateMock).toHaveBeenCalledOnce();
+    expect(clientPostMock.mock.calls.filter(([url]) => url.endsWith('/prompt_async'))).toHaveLength(0);
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    removeDocument();
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { modelUpdate.resolve({}); });
+    view.expectRequested();
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(['send', 'queue'] as const)('cleans unmounted %s drafts when model selection fails before any prompt request', async (mode) => {
+    const modelUpdate = deferred<unknown>();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    const view = await setupSubmission(mode, { modelAuto: true });
+    act(() => { submit(); });
+    view.unmount();
+    await act(async () => { modelUpdate.reject({ response: { status: 503 } }); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    expect(sessionApiEnqueuePromptMock).not.toHaveBeenCalled();
+    expect(clientPostMock.mock.calls.filter(([url]) => url.endsWith('/prompt_async'))).toHaveLength(0);
+  });
+
+  it('keeps accepted queue uploads while queue refresh is pending and the session switches', async () => {
+    const view = await setupSubmission('queue');
+    const refresh = deferred<unknown>();
+    sessionApiListPromptQueueMock.mockReturnValueOnce(refresh.promise);
+    await act(async () => { submit(); });
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(sessionApiListPromptQueueMock).toHaveBeenCalledTimes(2);
+    removeDocument();
+    view.rerender(React.createElement(SessionChat, { ...view.props, sessionId: 'sess-2' }));
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { refresh.resolve({ items: [] }); });
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('restores a rejected %s draft, retries the same IDs and transfers accepted ownership', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { view.request.reject({ response: { status: 409 } }); });
+    expect(screen.getByRole('textbox')).toHaveValue('review');
+    expect(screen.getByText('draft.md')).toBeInTheDocument();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    const retry = deferred<unknown>();
+    view.createAndSend.mockReturnValue(retry.promise);
+    sessionApiEnqueuePromptMock.mockReturnValue(retry.promise);
+    clientPostMock.mockReturnValue(retry.promise);
+    await act(async () => { submit(); });
+    view.expectRequested();
+    await act(async () => { retry.resolve({ status: 202, data: {} }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+  });
+
+  it.each(modes)('cleans a recovered %s draft on unmount without waiting for another render', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    await act(async () => {
+      view.request.reject({ response: { status: 422 } });
+      await view.request.promise.catch(() => undefined);
+      view.unmount();
+    });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(modes)('cleans an unmounted %s upload only after an explicit non-acceptance', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    view.unmount();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { view.request.reject({ response: { status: 400 } }); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(modes)('does not resurrect a %s chip cancelled while submitting if the request is rejected', async (mode) => {
+    const view = await setupSubmission(mode);
+    await act(async () => { submit(); });
+    removeDocument();
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { view.request.reject({ response: { status: 403 } }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox')).toHaveValue('review');
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(1);
+  });
+
+  describe.each(modes)('%s acceptance uncertainty', (mode) => {
+    it.each([
+      ['network timeout', { code: 'ECONNABORTED', message: 'timeout' }],
+      ['server error', { response: { status: 503 } }],
+      ['HTTP timeout', { response: { status: 408 } }],
+    ])('retains IDs after %s, even on removal and unmount', async (_label, error) => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      await act(async () => { view.request.reject(error); });
+      expect(screen.getByRole('textbox')).toHaveValue('review');
+      removeDocument();
+      view.unmount();
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+
+    it('retains IDs when a server error arrives after unmount', async () => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      view.unmount();
+      await act(async () => { view.request.reject({ response: { status: 500 } }); });
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+
+    it('does not downgrade an earlier unknown acceptance when a retry gets a 4xx', async () => {
+      const view = await setupSubmission(mode);
+      await act(async () => { submit(); });
+      await act(async () => { view.request.reject(new Error('network disconnected')); });
+      const retry = deferred<unknown>();
+      view.createAndSend.mockReturnValue(retry.promise);
+      sessionApiEnqueuePromptMock.mockReturnValue(retry.promise);
+      clientPostMock.mockReturnValue(retry.promise);
+      await act(async () => { submit(); });
+      view.unmount();
+      await act(async () => { retry.reject({ response: { status: 422 } }); });
+      expect(clientDeleteMock).not.toHaveBeenCalled();
+    });
+  });
+
+  it('does not restore an old rejected draft into a different session', async () => {
+    const view = await setupSubmission('send');
+    await act(async () => { submit(); });
+    view.rerender(React.createElement(SessionChat, { ...view.props, sessionId: 'sess-2' }));
+    fireEvent.change(screen.getByRole('textbox'), { target: { value: 'new draft' } });
+    await act(async () => { view.request.reject({ response: { status: 422 } }); });
+    expect(screen.getByRole('textbox')).toHaveValue('new draft');
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it('cleans a draft whose upload resolves before its next render on unmount', async () => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockReturnValue(upload.promise);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'draft.md');
+    await act(async () => {
+      upload.resolve(uploadResponse('draft.md'));
+      await upload.promise;
+      view.unmount();
+    });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+  });
+
+  it.each(['cancel', 'unmount'] as const)('disposes every late batch ID after %s, once under StrictMode', async (action) => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockReturnValue(upload.promise);
+    const view = render(React.createElement(React.StrictMode, null,
+      React.createElement(SessionChat, { sessionId: 'sess-1' })));
+    selectDocuments(view.container, 'a.md', 'b.md');
+    if (action === 'cancel') {
+      removeDocument('a.md');
+      removeDocument('b.md');
+    } else {
+      view.unmount();
+    }
+    expect(clientDeleteMock).not.toHaveBeenCalled();
+    await act(async () => { upload.resolve(uploadResponse('a.md', 'b.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+    expect(clientDeleteMock).toHaveBeenCalledWith(uploadUrl('a.md'));
+    expect(clientDeleteMock).toHaveBeenCalledWith(uploadUrl('b.md'));
+    if (action === 'cancel') {
+      expect(screen.queryByText('a.md')).not.toBeInTheDocument();
+      expect(screen.queryByText('b.md')).not.toBeInTheDocument();
+      view.unmount();
+    }
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('disposes only the cancelled item from a late batch and sends the remaining document', async () => {
+    const upload = deferred<ReturnType<typeof uploadResponse>>();
+    clientPostMock.mockImplementation((url: string) => url === '/api/workspace/upload'
+      ? upload.promise : Promise.resolve({ status: 202, data: {} }));
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'a.md', 'b.md');
+    removeDocument('a.md');
+    await act(async () => { upload.resolve(uploadResponse('a.md', 'b.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl('a.md'));
+    expect(screen.queryByText('a.md')).not.toBeInTheDocument();
+    expect(screen.getByText('b.md')).toBeInTheDocument();
+    await act(async () => { submit(); });
+    const payload = clientPostMock.mock.calls.find(([url]) => url.endsWith('/prompt_async'))?.[1];
+    expect(payload.parts.filter((part: { type: string }) => part.type === 'file')).toEqual([
+      expect.objectContaining({ uploadID: 'prt-b.md' }),
+    ]);
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('tracks late IDs after repeated failed upload retries without reviving a cancelled chip', async () => {
+    const first = deferred<unknown>();
+    const second = deferred<unknown>();
+    const third = deferred<unknown>();
+    clientPostMock.mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise).mockReturnValueOnce(third.promise);
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    selectDocuments(view.container, 'draft.md');
+    await act(async () => { first.reject(new Error('upload failed')); });
+    fireEvent.click(screen.getByTitle('chat.upload.retry'));
+    await act(async () => { second.reject(new Error('upload failed again')); });
+    fireEvent.click(screen.getByTitle('chat.upload.retry'));
+    removeDocument();
+    view.unmount();
+    await act(async () => { third.resolve(uploadResponse('draft.md')); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl());
+    expect(clientPostMock).toHaveBeenCalledTimes(3);
+  });
+
+  it('disposes IDs included in failed upload results and tracks the retry ID separately', async () => {
+    clientPostMock.mockResolvedValueOnce({ data: { uploaded: [{
+      name: 'draft.md', uploadID: 'prt-failed', error: 'processing failed',
+    }] } });
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+    await act(async () => { selectDocuments(view.container, 'draft.md'); });
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith('/api/workspace/upload/chat/prt-failed');
+    clientPostMock.mockResolvedValueOnce(uploadResponse('draft.md'));
+    await act(async () => { fireEvent.click(screen.getByTitle('chat.upload.retry')); });
+    expect(screen.queryByTitle('chat.upload.retry')).not.toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledTimes(2);
+    expect(clientDeleteMock).toHaveBeenLastCalledWith(uploadUrl());
+  });
+
+  it('keeps ownership of newly added drafts when an earlier queue submission completes', async () => {
+    const view = await setupSubmission('queue');
+    await act(async () => { submit(); });
+    await act(async () => { selectDocuments(view.container, 'next.md'); });
+    await act(async () => { view.request.resolve({ status: 202, data: {} }); });
+    expect(screen.queryByText('draft.md')).not.toBeInTheDocument();
+    expect(screen.getByText('next.md')).toBeInTheDocument();
+    view.unmount();
+    expect(clientDeleteMock).toHaveBeenCalledExactlyOnceWith(uploadUrl('next.md'));
+  });
+});
+
+describe('shouldRenderMessage', () => {
+  it('keeps active empty assistant messages eligible for the thinking indicator', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-active',
+      role: 'assistant',
+      parts: [],
+      finish: null,
+    }), { isActive: true })).toBe(true);
+  });
+
+  it('hides inactive empty assistant messages', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-inactive',
+      role: 'assistant',
+      parts: [],
+      finish: null,
+    }))).toBe(false);
+  });
+
+  it('hides stopped empty assistant messages after abort before first content', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-stopped',
+      role: 'assistant',
+      parts: [],
+      finish: 'stop',
+    }))).toBe(false);
+  });
+
+  it('keeps empty assistant error messages visible', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-error',
+      role: 'assistant',
+      parts: [],
+      finish: 'error',
+      error: { code: 'SessionError', message: 'Provider failed' },
+    }))).toBe(true);
+  });
+
+  it('hides stopped assistant messages that only contain punctuation reasoning', () => {
+    expect(shouldRenderMessage(makeMessage({
+      id: 'assistant-dot',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'part-dot',
+          messageID: 'assistant-dot',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '.',
+        } as any,
+      ],
+    }))).toBe(false);
+  });
+});
+
+describe('getRenderableThinkingText', () => {
+  it('filters punctuation-only reasoning previews', () => {
+    expect(getRenderableThinkingText({ type: 'reasoning', text: '.' } as any)).toBe('');
+    expect(getRenderableThinkingText({ type: 'reasoning', text: '。' } as any)).toBe('');
+  });
+
+  it('keeps meaningful reasoning text', () => {
+    expect(getRenderableThinkingText({ type: 'reasoning', text: '需要更新 todo 状态' } as any)).toBe('需要更新 todo 状态');
+  });
+});
+
+describe('getThinkingFirstSentence', () => {
+  it('extracts the first sentence from the first non-empty line', () => {
+    expect(getThinkingFirstSentence('先检查上下文。再读取文件。')).toBe('先检查上下文。');
+    expect(getThinkingFirstSentence('Inspect the context.\nThen read the file.')).toBe('Inspect the context.');
+    expect(getThinkingFirstSentence('\n用户问了两个问题：\n1. 第一个问题')).toBe('用户问了两个问题：');
+    expect(getThinkingFirstSentence('1. Inspect the context before changing code.')).toBe(
+      '1. Inspect the context before changing code.',
+    );
+    expect(getThinkingFirstSentence('用户问了两个问题： 1. 查询 IP 情报。 2. 查询金价。')).toBe(
+      '用户问了两个问题： 1. 查询 IP 情报。',
+    );
+    expect(getThinkingFirstSentence('Dr. Smith checks the context. Then edits.')).toBe(
+      'Dr. Smith checks the context.',
+    );
+    expect(getThinkingFirstSentence('Check inputs, etc. Then continue.')).toBe(
+      'Check inputs, etc.',
+    );
+  });
+});
+
+describe('process group duration', () => {
+  it.each([0, undefined, NaN])('uses recorded step timing when message creation time is %s', (timestamp) => {
+    const start = new Date(2026, 9, 19, 19, 1).getTime();
+    const parts: Message['parts'] = [
+      { id: 'reason', type: 'reasoning', text: '检查', time: { start, end: start + 5_000 } },
+    ];
+    expect(getProcessGroupDurationMs(parts, undefined, timestamp)).toBe(5_000);
+    expect(getProcessGroupDurationMs(parts, start + 20_000, timestamp)).toBe(20_000);
+    expect(getProcessGroupDurationMs([], undefined, timestamp)).toBeNull();
+  });
+
+  it('includes waiting gaps between process intervals', () => {
+    const parts = [
+      { id: 'reason', type: 'reasoning', time: { start: 0, end: 5_000 } },
+      { id: 'summary', type: 'text', text: '继续检查', time: { start: 8_000, end: 9_000 } },
+      { id: 'tool', type: 'tool', state: { status: 'completed', time: { start: 20_000, end: 28_000 } } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(28_000);
+    expect(formatProcessDuration(500)).toBe('1s');
+    expect(formatProcessDuration(7_600)).toBe('7s');
+    expect(formatProcessDuration(260_900)).toBe('4m20s');
+    expect(getProcessGroupDurationMs([{ id: 'legacy', type: 'reasoning' }] as Message['parts']))
+      .toBeNull();
+  });
+
+  it('uses current time for the active response and ignores future intervals', () => {
+    const parts = [
+      { id: 'done', type: 'tool', state: { status: 'completed', time: { start: 0, end: 5_000 } } },
+      { id: 'stale-text', type: 'text', text: 'missed final update', time: { start: 8_000 } },
+      { id: 'running', type: 'tool', state: { status: 'running', time: { start: 20_000 } } },
+      { id: 'future-text', type: 'text', text: '等待下一步', time: { start: 40_000 } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts, 22_000)).toBe(22_000);
+    expect(getProcessGroupDurationMs(parts, 23_000)).toBe(23_000);
+  });
+
+  it('counts parallel steps once while including the gap before the next step', () => {
+    const parts = [
+      { id: 'tool-a', type: 'tool', state: { status: 'completed', time: { start: 0, end: 10_000 } } },
+      { id: 'tool-b', type: 'tool', state: { status: 'completed', time: { start: 5_000, end: 15_000 } } },
+      { id: 'reason', type: 'reasoning', time: { start: 20_000, end: 22_000 } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(22_000);
+  });
+
+  it('ignores invalid or incomplete historical intervals', () => {
+    const parts = [
+      { id: 'missing-start', type: 'reasoning', time: { end: 5_000 } },
+      { id: 'missing-end', type: 'tool', state: { status: 'completed', time: { start: 10_000 } } },
+      { id: 'negative', type: 'text', text: 'bad clock', time: { start: 20_000, end: 19_000 } },
+      { id: 'zero', type: 'tool', state: { status: 'completed', time: { start: 25_000, end: 25_000 } } },
+      { id: 'valid', type: 'reasoning', time: { start: 30_000, end: 32_000 } },
+    ] as unknown as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(7_000);
+  });
+
+  it('keeps zero-duration completed intervals displayable', () => {
+    const parts = [
+      { id: 'instant', type: 'tool', state: { status: 'completed', time: { start: 1_000, end: 1_000 } } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts)).toBe(0);
+  });
+
+  it('updates the displayed duration while the last process step is active', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+    try {
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({
+          id: 'assistant-active-duration',
+          role: 'assistant',
+          timestamp: 1_000,
+          parts: [{
+            id: 'tool-active-duration',
+            type: 'tool',
+            tool: 'read',
+            state: {
+              status: 'running',
+              input: { filePath: 'workflow.md' },
+              time: { start: 1_000 },
+            },
+          }] as Message['parts'],
+        }),
+        isActive: true,
+        collapseIntermediateSteps: true,
+      }));
+
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4s');
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('continues timing while the active assistant output streams after a process group', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+    try {
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({
+          id: 'assistant-active-output-duration',
+          role: 'assistant',
+          parts: [
+            {
+              id: 'reason-active-output',
+              type: 'reasoning',
+              text: '先读取上下文',
+              time: { start: 0, end: 1_000 },
+            },
+            {
+              id: 'tool-active-output',
+              type: 'tool',
+              tool: 'todo',
+              state: {
+                status: 'completed',
+                input: { todos: ['检查'] },
+                output: { ok: true },
+                time: { start: 1_000, end: 1_000 },
+              },
+            },
+            {
+              id: 'text-active-output',
+              type: 'text',
+              text: '继续输出中...',
+              time: { start: 1_000 },
+            },
+          ] as Message['parts'],
+        }),
+        isActive: true,
+        collapseIntermediateSteps: true,
+      }));
+
+      expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+      expect(screen.getAllByText('继续输出中...').length).toBeGreaterThan(0);
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 6s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('ChatMessageBubble reasoning streaming', () => {
+  it.each(['reasoning', 'thinking'] as const)(
+    'paces an active %s part after a tool and flushes the completed text',
+    (partType) => {
+      type RafCallback = (time: number) => void;
+      const callbacks = new Map<number, RafCallback>();
+      let nextRafId = 0;
+      vi.stubGlobal('requestAnimationFrame', (callback: RafCallback) => {
+        const id = ++nextRafId;
+        callbacks.set(id, callback);
+        return id;
+      });
+      vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+        callbacks.delete(id);
+      });
+
+      const makeReasoningMessage = (text: string, finish?: Message['finish']) => makeMessage({
+        id: 'assistant-reasoning-stream',
+        role: 'assistant',
+        finish,
+        parts: [
+          {
+            id: 'tool-before-reasoning',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: 'tool',
+            tool: 'read',
+            state: { status: 'completed', output: 'done' },
+          } as any,
+          {
+            id: 'reasoning-stream',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: partType,
+            text,
+          } as any,
+        ],
+      });
+
+      let unmount = () => {};
+      try {
+        const rendered = render(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思'),
+          isActive: true,
+        }));
+        unmount = rendered.unmount;
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程'),
+          isActive: true,
+        }));
+
+        expect(screen.getByText('思考中...')).toBeInTheDocument();
+        expect(screen.getByText('思')).toBeInTheDocument();
+        expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
+
+        act(() => {
+          const pending = [...callbacks.values()];
+          callbacks.clear();
+          pending.forEach(callback => callback(1000 / 60));
+        });
+        expect(screen.getByText('思考')).toBeInTheDocument();
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程', 'stop'),
+          isActive: false,
+        }));
+        expect(screen.getByText('思考过程')).toBeInTheDocument();
+      } finally {
+        unmount();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it('does not animate reasoning while its process group is closed', () => {
+    let nextRafId = 0;
+    const requestAnimationFrameSpy = vi.fn(() => ++nextRafId);
+    vi.stubGlobal('requestAnimationFrame', requestAnimationFrameSpy);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    const messageId = 'assistant-hidden-reasoning';
+    const processGroupKey = `${messageId}:process:0`;
+    const makeHiddenReasoningMessage = (text: string) => makeMessage({
+      id: messageId,
+      role: 'assistant',
+      parts: [
+        {
+          id: 'tool-before-hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          state: { status: 'completed', output: 'done' },
+        } as any,
+        {
+          id: 'hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text,
+        } as any,
+      ],
+    });
+
+    let unmount = () => {};
+    try {
+      const rendered = render(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      unmount = rendered.unmount;
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新继续'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe('getMessageErrorText', () => {
+  it('prefers user-facing display messages over raw provider errors', () => {
+    expect(getMessageErrorText(makeMessage({
+      id: 'assistant-error',
+      error: {
+        message: 'Connection error.',
+        data: {
+          displayMessage: 'Model is unavailable. Please check the provider connection and model configuration.',
+          message: 'Connection error.',
+        },
+      } as any,
+    }))).toBe('Model is unavailable. Please check the provider connection and model configuration.');
+  });
+
+  it('extracts nested provider error messages', () => {
+    expect(getMessageErrorText(makeMessage({
+      id: 'assistant-error',
+      error: {
+        name: 'APIConnectionError',
+        data: { message: 'Connection error.' },
+      } as any,
+    }))).toBe('Connection error.');
+  });
+
+  it('falls back to the error code', () => {
+    expect(getMessageErrorText(makeMessage({
+      id: 'assistant-error',
+      error: { code: 'SessionError' } as any,
+    }))).toBe('SessionError');
+  });
+
+  it('explains a retry the backend held back because a tool had already run', () => {
+    expect(getMessageErrorNoteKey(makeMessage({
+      id: 'assistant-error',
+      error: { name: 'APIError', data: { message: 'timed out', retrySuppressed: 'tool_execution_started' } } as any,
+    }))).toBe('chat.stopReason.toolExecuted');
+    expect(getMessageErrorNoteKey(makeMessage({
+      id: 'assistant-error',
+      error: { name: 'APIError', data: { message: 'timed out' } } as any,
+    }))).toBeNull();
+    expect(getMessageErrorNoteKey(makeMessage({ id: 'assistant-ok' }))).toBeNull();
+  });
+});
+
+describe('mergeConsecutiveAssistantMessages error ownership', () => {
+  const step = (id: string, overrides: Partial<Message> = {}) => makeMessage({
+    id, role: 'assistant', finish: 'tool-calls',
+    parts: [{ id: `${id}-text`, type: 'text', text: id }] as Message['parts'],
+    ...overrides,
+  });
+  const timeout = { name: 'APIError', message: 'LLM stream timed out', data: { message: 'LLM stream timed out' } } as any;
+
+  it('keeps the error of the step that stopped the turn', () => {
+    const [merged] = mergeConsecutiveAssistantMessages([
+      step('first'),
+      step('last', { finish: 'error', error: timeout }),
+    ]);
+    expect(merged.id).toBe('first');
+    expect(merged.finish).toBe('error');
+    expect(merged.error).toBe(timeout);
+  });
+
+  it('drops an earlier error once a later step carried on', () => {
+    const [merged] = mergeConsecutiveAssistantMessages([
+      step('first', { finish: 'error', error: timeout }),
+      step('last', { finish: 'stop' }),
+    ]);
+    expect(merged.finish).toBe('stop');
+    expect(merged.error).toBeUndefined();
+  });
+});
+
+describe('shouldForwardSSEEventToParent', () => {
+  it('forwards global workflow, task, and session update events', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'workflow.updated',
+      properties: { id: 'workflow-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'task.updated',
+      properties: { executionID: 'task-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'session.updated',
+      properties: { id: 'other-session' },
+    }, 'sess-1')).toBe(true);
+  });
+
+  it('forwards chat events only for the current session', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'sess-1' } },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'other-session' } },
+    }, 'sess-1')).toBe(false);
+    expect(shouldForwardSSEEventToParent({
+      type: 'context.usage.updated',
+      properties: { sessionID: 'other-session' },
+    }, 'sess-1')).toBe(false);
+  });
+
+  it('skips heartbeat-style events without payloads', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'server.heartbeat',
+    }, 'sess-1')).toBe(false);
+  });
+});
+
+describe('buildChatTimelineItems', () => {
+  it('filters skipped and non-renderable messages while marking the active assistant', () => {
+    const messages = [
+      makeMessage({
+        id: 'user-1',
+        role: 'user',
+        parts: [{ id: 'user-part', type: 'text', text: 'hello' }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'synthetic-1',
+        role: 'assistant',
+        parts: [{ id: 'synthetic-part', type: 'text', text: '', synthetic: true }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-active',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set([1]),
+      isStreaming: true,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['user-1', 'assistant-active']);
+    expect(items.map((item) => item.isActive)).toEqual([false, true]);
+  });
+
+  it('keeps the same visible set when not streaming', () => {
+    const messages = [
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-text',
+        role: 'assistant',
+        parts: [{ id: 'text-part', type: 'text', text: 'done' }] as Message['parts'],
+        finish: 'stop',
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set(),
+      isStreaming: false,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['assistant-text']);
+    expect(items[0].isActive).toBe(false);
+  });
+});
+
+describe('areChatTimelineItemsRenderEqual', () => {
+  it('treats cloned assistant messages with identical visible parts as equal', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      agent: 'rex',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+      finish: 'stop',
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(true);
+  });
+
+  it('detects visible text changes in otherwise stable timeline items', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello world' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(false);
+  });
+});
+
+describe('SessionChat error rendering', () => {
+  it('renders empty assistant error messages instead of the thinking indicator', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-error',
+          role: 'assistant',
+          parts: [],
+          finish: 'error',
+          error: {
+            name: 'APIConnectionError',
+            data: { message: 'Connection error.' },
+          } as any,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('Connection error.')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
+
+  it('renders assistant error messages when the only part is blank text', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-error-with-blank-text',
+          role: 'assistant',
+          parts: [{ id: 'blank-text', type: 'text', text: '' }] as Message['parts'],
+          finish: 'error',
+          error: {
+            name: 'EmptyResponseError',
+            data: { message: 'Model returned an empty response.' },
+          } as any,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('Model returned an empty response.')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
+
+  const toolStep = (id: string, text: string) => [
+    { id: `${id}-text`, type: 'text', text },
+    { id: `${id}-tool`, type: 'tool', tool: 'bash', callID: `${id}-call`, state: {
+      status: 'completed', input: { command: `echo ${id}` }, output: id, time: { start: 0, end: 10 },
+    } },
+  ] as Message['parts'];
+  const mockMessages = (messages: Message[]) => useSessionMessagesMock.mockReturnValue({
+    messages,
+    loading: false,
+    refetch: vi.fn(),
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+
+  it('keeps why a multi-step turn stopped after a tool already ran', () => {
+    // Regression (INC-BCFF390A): the last step's error was dropped when the
+    // steps were merged, and a reply with text or tools never showed it.
+    const timeout = 'LLM stream timed out after 300s (mid-stream). The model may be overloaded or incompatible. Please try again or switch models.';
+    mockMessages([
+      makeMessage({ id: 'user-1', role: 'user', parts: [{ id: 'ask', type: 'text', text: '检查样式结构' }] as Message['parts'] }),
+      makeMessage({ id: 'step-1', role: 'assistant', finish: 'tool-calls', parts: toolStep('step-1', '我先看一下样式结构。') }),
+      makeMessage({
+        id: 'step-2', role: 'assistant', finish: 'error', parts: toolStep('step-2', '再检查一下视图文件。'),
+        error: { name: 'APIError', message: timeout, data: { message: timeout, retrySuppressed: 'tool_execution_started' } } as any,
+      }),
+    ]);
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('任务已停止');
+    expect(alert).toHaveTextContent(timeout);
+    expect(alert).toHaveTextContent('这一步已经执行过工具，为避免重复执行，没有自动重试这次请求。');
+    expect(screen.getByText('再检查一下视图文件。')).toBeInTheDocument();
+  });
+
+  it('shows an error the backend also stored as reply text only once', () => {
+    const unavailable = 'Model is unavailable. Please check the provider connection and model configuration.';
+    mockMessages([
+      makeMessage({ id: 'user-1', role: 'user', parts: [{ id: 'ask', type: 'text', text: '继续' }] as Message['parts'] }),
+      makeMessage({
+        id: 'step-1', role: 'assistant', finish: 'error',
+        parts: [...toolStep('step-1', '').slice(1), { id: 'echo', type: 'text', text: unavailable }] as Message['parts'],
+        error: { name: 'APIError', message: 'Connection error.', data: { message: 'Connection error.', displayMessage: unavailable } } as any,
+      }),
+    ]);
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getAllByText(unavailable)).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(unavailable);
+    expect(screen.getByRole('alert')).not.toHaveTextContent('没有自动重试');
+  });
+});
+
+describe('SessionChat intermediate process collapse', () => {
+  it('collapses reasoning and tool steps by default in embedded workflow panels', async () => {
+    const user = userEvent.setup();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process',
+          role: 'assistant',
+          finish: 'stop',
+          timestamp: 1_000,
+          parts: [
+            {
+              id: 'reason-1',
+              messageID: 'assistant-process',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '需要先读取工作流文件。然后检查配置。',
+              time: { start: 1_000, end: 2_000 },
+            } as any,
+            {
+              id: 'tool-1',
+              messageID: 'assistant-process',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-1',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.md' },
+                output: 'workflow content',
+                time: { start: 2_000, end: 4_500 },
+              },
+            } as any,
+            {
+              id: 'text-1',
+              messageID: 'assistant-process',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '已读取当前 workflow.md。',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(processGroup.open).toBe(false);
+    expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('· 已处理 3s');
+    expect(processGroup.querySelector('summary')).toHaveClass('text-sm', 'font-medium');
+    expect(processGroup.querySelector('summary')).not.toHaveClass('font-semibold');
+    expect(processGroup.className).not.toContain('rounded-lg');
+    expect(processGroup.closest('[data-process-output="true"]')?.className).not.toContain('bg-white');
+    expect(screen.getByText('已读取当前 workflow.md。')).toBeInTheDocument();
+
+    await user.click(screen.getByText('查看 2 个步骤'));
+
+    expect(processGroup.open).toBe(true);
+    expect(screen.getByTestId('chat-process-timeline')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('深度思考');
+    expect(screen.getByTestId('chat-process-reasoning-step').querySelector('button')).toHaveClass('text-sm');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).toHaveTextContent('需要先读取工作流文件。');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveTextContent('然后检查配置');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveClass('flex-1');
+    expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('lucide-chevron-down');
+    expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
+    // the timeline shows the tool status as an icon; its label must still be exposed
+    const toolStep = screen.getByTestId('chat-process-tool-step');
+    expect(toolStep).toHaveAttribute('data-tool-status', 'completed');
+    expect(toolStep.querySelector('summary [role="img"]')).toHaveAttribute('aria-label', '已完成');
+  });
+
+  it('hides the reasoning preview while the reasoning body is expanded', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-expanded-reasoning',
+        role: 'assistant',
+        parts: [{
+          id: 'reason-expanded',
+          messageID: 'assistant-expanded-reasoning',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '用户问了两个问题：\n1. 第一个问题',
+        } as any],
+      }),
+      isActive: true,
+      collapseIntermediateSteps: true,
+      processGroupsDefaultOpen: true,
+    }));
+
+    expect(screen.queryByTestId('chat-process-reasoning-preview')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('1. 第一个问题');
+  });
+
+  it('opens process groups while an assistant message is active and collapses after completion', () => {
+    const activeMessage = makeMessage({
+      id: 'assistant-active-process',
+      role: 'assistant',
+      parts: [
+        {
+          id: 'reason-active',
+          messageID: 'assistant-active-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '先检查当前配置',
+        } as any,
+        {
+          id: 'tool-active',
+          messageID: 'assistant-active-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-active',
+          state: {
+            status: 'running',
+            input: { filePath: 'workflow.md' },
+          },
+        } as any,
+      ],
+    });
+
+    const { rerender } = render(React.createElement(ChatMessageBubble, {
+      message: activeMessage,
+      isActive: true,
+      collapseIntermediateSteps: true,
+      processGroupsOpenWhileActive: true,
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(processGroup.open).toBe(true);
+
+    rerender(React.createElement(ChatMessageBubble, {
+      message: { ...activeMessage, finish: 'stop' } as Message,
+      isActive: false,
+      collapseIntermediateSteps: true,
+      processGroupsOpenWhileActive: true,
+    }));
+
+    expect(processGroup.open).toBe(false);
+  });
+
+  it('uses one global process group and renders intermediate summaries as peer steps', async () => {
+    const user = userEvent.setup();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-global-process',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-global-1',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '先分析需求',
+            } as any,
+            {
+              id: 'tool-global-1',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-global-1',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.md' },
+                output: 'workflow content',
+              },
+            } as any,
+            {
+              id: 'text-global-middle',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '已经读取文件，继续检查相关配置。',
+            } as any,
+            {
+              id: 'reason-global-2',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'thinking',
+              text: '再整理最终结论',
+            } as any,
+            {
+              id: 'tool-global-2',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'write',
+              callID: 'call-global-2',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.json' },
+                output: 'ok',
+              },
+            } as any,
+            {
+              id: 'text-global-final',
+              messageID: 'assistant-global-process',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '最终结果已生成。',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(screen.getAllByTestId('chat-process-group')).toHaveLength(1);
+    expect(processGroup.open).toBe(false);
+    expect(screen.getByText('查看 5 个步骤')).toBeInTheDocument();
+    expect(screen.getByText('最终结果已生成。')).toBeVisible();
+
+    await user.click(screen.getByText('查看 5 个步骤'));
+
+    const summaryStep = screen.getByTestId('chat-process-text-step');
+    const reasoningStep = screen.getAllByTestId('chat-process-reasoning-step')[0];
+    expect(summaryStep).toHaveTextContent('已经读取文件，继续检查相关配置。');
+    expect(summaryStep.querySelector('svg')).not.toBeInTheDocument();
+    expect(summaryStep.className).not.toContain('pl-');
+    expect(summaryStep.querySelector('.border-l')).not.toBeInTheDocument();
+    expect(summaryStep.parentElement?.parentElement).toBe(reasoningStep.parentElement?.parentElement);
+  });
+
+  it('keeps a user-opened process group open when new tool parts arrive', async () => {
+    const user = userEvent.setup();
+    const makeProcessMessage = (includeNewTool = false) => makeMessage({
+      id: 'assistant-live-process',
+      role: 'assistant',
+      parts: [
+        {
+          id: 'reason-live',
+          messageID: 'assistant-live-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '先检查上下文',
+        } as any,
+        {
+          id: 'tool-live-1',
+          messageID: 'assistant-live-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-live-1',
+          state: {
+            status: 'completed',
+            input: { filePath: 'workflow.md' },
+            output: 'workflow content',
+          },
+        } as any,
+        ...(
+          includeNewTool
+            ? [{
+                id: 'tool-live-2',
+                messageID: 'assistant-live-process',
+                sessionID: 'sess-1',
+                type: 'tool',
+                tool: 'write',
+                callID: 'call-live-2',
+                state: {
+                  status: 'running',
+                  input: { filePath: 'workflow.json' },
+                },
+              } as any]
+            : []
+        ),
+      ],
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeProcessMessage()],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { rerender } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    await user.click(screen.getByText('查看 2 个步骤'));
+    expect(processGroup.open).toBe(true);
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeProcessMessage(true)],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getByText('查看 3 个步骤')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-group')).toBe(processGroup);
+    expect(processGroup.open).toBe(true);
+    expect(screen.getAllByTestId('chat-process-tool-step')).toHaveLength(2);
+  });
+
+  it('restores a user-opened process group after switching away from a keyed session chat', async () => {
+    const user = userEvent.setup();
+    const processMessage = makeMessage({
+      id: 'assistant-switch-process',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'reason-switch',
+          messageID: 'assistant-switch-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '先检查上下文',
+        } as any,
+        {
+          id: 'tool-switch',
+          messageID: 'assistant-switch-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          callID: 'call-switch',
+          state: {
+            status: 'completed',
+            input: { filePath: 'workflow.md' },
+            output: 'workflow content',
+          },
+        } as any,
+      ],
+    });
+    const otherSessionMessage = makeMessage({
+      id: 'assistant-other-session',
+      sessionID: 'sess-2',
+      role: 'assistant',
+      finish: 'stop',
+      parts: [
+        {
+          id: 'text-other-session',
+          messageID: 'assistant-other-session',
+          sessionID: 'sess-2',
+          type: 'text',
+          text: '另一个 session。',
+        } as any,
+      ],
+    });
+    useSessionMessagesMock.mockImplementation((currentSessionId: string | null) => ({
+      messages: currentSessionId === 'sess-1' ? [processMessage] : [otherSessionMessage],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    }));
+
+    const renderKeyedChat = (currentSessionId: string) => React.createElement(SessionChat, {
+      key: currentSessionId,
+      sessionId: currentSessionId,
+      display: { collapseIntermediateSteps: true },
+    });
+    const { rerender } = render(renderKeyedChat('sess-1'));
+
+    await user.click(screen.getByText('查看 2 个步骤'));
+    expect(screen.getByTestId('chat-process-group')).toHaveProperty('open', true);
+
+    rerender(renderKeyedChat('sess-2'));
+    expect(screen.getByText('另一个 session。')).toBeVisible();
+
+    rerender(renderKeyedChat('sess-1'));
+
+    const restoredProcessGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(restoredProcessGroup.open).toBe(true);
+    expect(screen.getByTestId('chat-process-tool-step').querySelector('summary')).toBeVisible();
+  });
+
+  it('keeps pending questions visible and folds answered questions into the process group', async () => {
+    const user = userEvent.setup();
+    const makeQuestionMessage = (status: 'running' | 'completed', includeFinalText = false) => makeMessage({
+      id: 'assistant-question-process',
+      role: 'assistant',
+      finish: status === 'completed' ? 'stop' : undefined,
+      parts: [
+        {
+          id: 'reason-before-question',
+          messageID: 'assistant-question-process',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '需要先询问用户范围',
+        } as any,
+        {
+          id: 'tool-question',
+          messageID: 'assistant-question-process',
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'question',
+          callID: 'call-question',
+          state: {
+            status,
+            input: {
+              questions: [
+                {
+                  question: '选择范围',
+                  header: '测试范围',
+                  type: 'confirm',
+                },
+              ],
+            },
+            output: status === 'completed'
+              ? 'User has answered your questions: "选择范围"="yes". You can now continue with the user\'s answers in mind.'
+              : undefined,
+            metadata: status === 'completed' ? { answers: [['yes']] } : {},
+          },
+        } as any,
+        ...(
+          includeFinalText
+            ? [{
+                id: 'text-after-question',
+                messageID: 'assistant-question-process',
+                sessionID: 'sess-1',
+                type: 'text',
+                text: '已按你的选择继续处理。',
+              } as any]
+            : []
+        ),
+      ],
+    });
+
+    pendingQuestionsHookMock.pendingQuestions = {
+      'call-question': {
+        requestId: 'req-question',
+        questions: [
+          {
+            id: 'scope',
+            type: 'choice',
+            question: '选择范围',
+            options: [
+              { label: '全部', description: '检查全部内容' },
+            ],
+          },
+        ],
+      },
+    };
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeQuestionMessage('running')],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { rerender } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getByText('需要你的回答')).toBeVisible();
+    expect(screen.getByText('选择范围')).toBeVisible();
+    expect(screen.getByText('查看 1 个步骤')).toBeInTheDocument();
+
+    pendingQuestionsHookMock.pendingQuestions = {};
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeQuestionMessage('completed')],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.queryByText('需要你的回答')).not.toBeInTheDocument();
+    expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByText('向用户提问')).not.toBeVisible();
+    expect(screen.queryByText('输入参数')).not.toBeInTheDocument();
+    expect(screen.queryByText('输出结果')).not.toBeInTheDocument();
+
+    await user.click(screen.getByText('查看 2 个步骤'));
+
+    expect(screen.getByText('向用户提问')).toBeVisible();
+    expect(screen.getByText('问题')).not.toBeVisible();
+
+    await user.click(screen.getByText('向用户提问'));
+
+    expect(screen.getByText('问题')).toBeVisible();
+    expect(screen.getByText('回答')).toBeVisible();
+    expect(screen.getAllByText('测试范围').length).toBeGreaterThan(0);
+    expect(screen.getByText('是')).toBeVisible();
+
+    await user.click(screen.getByText('查看 2 个步骤'));
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeQuestionMessage('completed', true)],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    rerender(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getByText('已按你的选择继续处理。')).toBeVisible();
+    expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByText('向用户提问')).not.toBeVisible();
+  });
+
+  it('renders collapsed process groups inside the full compact assistant column', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process-width',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-width',
+              messageID: 'assistant-process-width',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '需要先读取当前工作流',
+            } as any,
+            {
+              id: 'tool-width',
+              messageID: 'assistant-process-width',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-width',
+              state: {
+                status: 'running',
+                input: { filePath: 'workflow.md' },
+              },
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group');
+    expect(processGroup.closest('.w-full.max-w-full')).not.toBeNull();
+  });
+
+  it('can default grouped process details open without locking user toggles', async () => {
+    const user = userEvent.setup();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process-open',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-open',
+              messageID: 'assistant-process-open',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '先分析当前会话',
+            } as any,
+            {
+              id: 'tool-open',
+              messageID: 'assistant-process-open',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-open',
+              state: {
+                status: 'completed',
+                input: { filePath: 'session.json' },
+                output: 'ok',
+              },
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true, processGroupsDefaultOpen: true },
+    }));
+
+    const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
+    expect(processGroup.open).toBe(true);
+
+    await user.click(screen.getByText('查看 2 个步骤'));
+
+    expect(processGroup.open).toBe(false);
+  });
+
+  it('does not split collapsed process groups on invisible step markers', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-process-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'reason-1',
+              messageID: 'assistant-process-1',
+              sessionID: 'sess-1',
+              type: 'reasoning',
+              text: '先读取 workflow.md',
+            } as any,
+            {
+              id: 'tool-1',
+              messageID: 'assistant-process-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'read',
+              callID: 'call-1',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.md' },
+                output: 'workflow content',
+              },
+            } as any,
+            {
+              id: 'empty-text-1',
+              messageID: 'assistant-process-1',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '',
+            } as any,
+          ],
+        }),
+        makeMessage({
+          id: 'assistant-process-2',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'step-start-1',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'step-start',
+            } as any,
+            {
+              id: 'reason-2',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'thinking',
+              text: '再生成 workflow.json',
+            } as any,
+            {
+              id: 'tool-2',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'write',
+              callID: 'call-2',
+              state: {
+                status: 'completed',
+                input: { filePath: 'workflow.json' },
+                output: 'ok',
+              },
+            } as any,
+            {
+              id: 'step-finish-1',
+              messageID: 'assistant-process-2',
+              sessionID: 'sess-1',
+              type: 'step-finish',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    expect(screen.getAllByTestId('chat-process-group')).toHaveLength(1);
+    expect(screen.getByText('查看 4 个步骤')).toBeInTheDocument();
+  });
+
+  it('keeps the compact compaction bubble at the full assistant column width', async () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-before-compaction',
+          role: 'user',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'user-text',
+              messageID: 'user-before-compaction',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '继续优化工作流',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+      display: { collapseIntermediateSteps: true },
+    }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'compacting', message: '正在压缩上下文...' },
+        },
+      });
+    });
+
+    const compactionText = await screen.findByText('正在压缩上下文...');
+    expect(compactionText.closest('.w-full.max-w-full')).not.toBeNull();
+  });
+
+  it('shows the manual Dream status message while the hidden agent runs', async () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-dream',
+          role: 'user',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'user-dream-text',
+              messageID: 'user-dream',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '/dream',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: {
+            type: 'dreaming',
+            message: 'Dream is reviewing Project prj_test evidence…',
+          },
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText('Dream is reviewing Project prj_test evidence…'),
+    ).toBeInTheDocument();
+  });
+});
+
+describe('SessionChat optimistic message identity', () => {
+  it('seeds the optimistic first message before relying on history or SSE', async () => {
+    const addMessage = vi.fn();
+    const onConsumed = vi.fn();
+    const optimisticMessage = makeMessage({
+      id: 'msg_000000000001abcdefghijklmn',
+      sessionID: 'sess-1',
+      role: 'user',
+      parts: [{
+        id: 'temp-msg_000000000001abcdefghijklmn-text',
+        type: 'text',
+        text: 'hello',
+      } as Message['parts'][number]],
+    });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialOptimisticMessage: optimisticMessage,
+      onInitialOptimisticMessageConsumed: onConsumed,
+    }));
+
+    await waitFor(() => expect(addMessage).toHaveBeenCalledWith(optimisticMessage));
+    expect(onConsumed).toHaveBeenCalledWith(optimisticMessage.id);
+  });
+
+  it.each([
+    ['prompt', 'message that fails', '/api/session/sess-1/prompt_async'],
+    ['slash command', '/tools', '/api/session/sess-1/command'],
+  ])('removes the optimistic message when a %s request fails', async (_kind, input, endpoint) => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    const removeMessage = vi.fn();
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    clientPostMock.mockRejectedValueOnce(new Error('network down'));
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage,
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    try {
+      render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+      await user.type(screen.getByPlaceholderText('请输入消息'), `${input}{enter}`);
+
+      await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+        endpoint,
+        expect.any(Object),
+      ));
+      await waitFor(() => expect(removeMessage).toHaveBeenCalledOnce());
+
+      const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+      expect(removeMessage).toHaveBeenCalledWith(optimisticMessage.id);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('reports a rejected prompt through a toast (not a blocking alert) and keeps the draft', async () => {
+    const user = userEvent.setup();
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    const err = Object.assign(new Error('Request failed with status code 403'), { response: { status: 403, data: { message: '无权向此会话发送' } } });
+    clientPostMock.mockRejectedValueOnce(err);
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    try {
+      render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+      await user.type(screen.getByPlaceholderText('请输入消息'), '这条会被 403{enter}');
+
+      await waitFor(() => expect(toastMock.error).toHaveBeenCalledWith('chat.sendFailed', '无权向此会话发送'));
+      expect(alertSpy).not.toHaveBeenCalled();
+      expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('这条会被 403');
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
+  it('uses the optimistic user message ID for the persisted prompt', async () => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '测试 question 工具{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    expect(addMessage).toHaveBeenCalledTimes(1);
+    expect(clientPostMock.mock.calls.filter(
+      ([url]) => url === '/api/session/sess-1/prompt_async',
+    )).toHaveLength(1);
+    const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+    const promptCall = clientPostMock.mock.calls.find(
+      ([url]) => url === '/api/session/sess-1/prompt_async',
+    );
+    const payload = promptCall?.[1] as { messageID?: string } | undefined;
+    expect(payload?.messageID).toBe(optimisticMessage.id);
+  });
+
+  it('uses the optimistic user message ID for slash commands', async () => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '/tools{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/command',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    expect(addMessage).toHaveBeenCalledTimes(1);
+    expect(clientPostMock.mock.calls.filter(
+      ([url]) => url === '/api/session/sess-1/command',
+    )).toHaveLength(1);
+    const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+    const commandCall = clientPostMock.mock.calls.find(
+      ([url]) => url === '/api/session/sess-1/command',
+    );
+    const payload = commandCall?.[1] as { messageID?: string } | undefined;
+    expect(payload?.messageID).toBe(optimisticMessage.id);
+  });
+});
+
+describe('SessionChat composer references', () => {
+  const mentionAgents = [
+    {
+      name: 'rex',
+      description: 'Main orchestrator',
+      descriptionCn: '主编排 Agent',
+      mode: 'primary',
+      permission: [],
+      options: {},
+      skills: [],
+      tools: [],
+    },
+    {
+      name: 'explore',
+      description: 'Explore the codebase',
+      descriptionCn: '探索代码库',
+      mode: 'subagent',
+      native: true,
+      permission: [],
+      options: {},
+      skills: [],
+      tools: [],
+    },
+  ];
+
+  it('opens the same Add menu when typing @', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      mentionAgents,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '@');
+
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('');
+  });
+
+  it('routes one message to a structured subagent reference', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'rex',
+      mentionAgents,
+    }));
+
+    await user.type(
+      screen.getByPlaceholderText('请输入消息'),
+      'subagent:explore summarize this file{enter}',
+    );
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          agent: 'explore',
+          parts: expect.any(Array),
+        }),
+      );
+    });
+  });
+
+  it('sends selected resources using the unified structured syntax', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    render(React.createElement(SessionChat, {
+      sessionId: null,
+      agentName: 'rex',
+      mentionAgents,
+      onCreateAndSend,
+      composerAddMenuSlot: ({ insertMention, insertReference }) => React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertMention('explore') },
+          '选择子智能体',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('diagnose', 'skill') },
+          '选择技能',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('code-review', 'skill') },
+          '选择第二个技能',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('triage', 'workflow') },
+          '选择工作流',
+        ),
+      ),
+    }));
+
+    await user.click(screen.getByRole('button', { name: '添加' }));
+    await user.click(screen.getByRole('button', { name: '选择子智能体' }));
+    await user.click(screen.getByRole('button', { name: '选择技能' }));
+    await user.click(screen.getByRole('button', { name: '选择第二个技能' }));
+    await user.click(screen.getByRole('button', { name: '选择工作流' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('diagnose')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('code-review')).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'check this{enter}');
+
+    await waitFor(() => {
+      expect(onCreateAndSend).toHaveBeenCalledWith(
+        'workflow:triage skill:code-review skill:diagnose subagent:explore check this',
+        [],
+        'explore',
+        undefined,
+        undefined,
+        'build',
+      );
+    });
+  });
+
+  it('uses the selected agent when creating a session from the first message', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    render(React.createElement(SessionChat, {
+      sessionId: null,
+      agentName: 'explore',
+      mentionAgents,
+      onCreateAndSend,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'summarize this file{enter}');
+
+    await waitFor(() => {
+      expect(onCreateAndSend).toHaveBeenCalledWith(
+        'summarize this file',
+        [],
+        'explore',
+        undefined,
+        undefined,
+        'build',
+      );
+    });
+  });
+
+  it('fills a guide into the message box once and sends only what the user sends (REA entry)', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    const onComposerPrefillApplied = vi.fn();
+    const guide = 'REA 安装指引\n安装原则：仅安装缺失组件\n安装执行前请再次和我确认你计划安装哪些模块？';
+    const props = {
+      sessionId: null,
+      agentName: 'rex',
+      onCreateAndSend,
+      composerPrefill: { id: 'guide-1', text: guide },
+      onComposerPrefillApplied,
+    };
+    const view = render(React.createElement(SessionChat, props));
+    const input = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    await waitFor(() => expect(input).toHaveValue(guide));
+    expect(onComposerPrefillApplied).toHaveBeenCalledWith('guide-1');
+    // Ready to read from the top: focused, caret before the first line.
+    await waitFor(() => expect(input).toHaveFocus());
+    expect(input.selectionStart).toBe(0);
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+
+    // The same prefill on a later render does not overwrite what the user wrote.
+    await user.clear(input);
+    await user.type(input, '只装轻量档');
+    view.rerender(React.createElement(SessionChat, props));
+    expect(input).toHaveValue('只装轻量档');
+    // Shift+Enter is a new line; Enter sends.
+    await user.type(input, '{Shift>}{Enter}{/Shift}缺什么装什么');
+    expect(onCreateAndSend).not.toHaveBeenCalled();
+    await user.type(input, '{Enter}');
+    await waitFor(() => expect(onCreateAndSend).toHaveBeenCalledTimes(1));
+    expect(onCreateAndSend.mock.calls[0][0]).toBe('只装轻量档\n缺什么装什么');
+    expect(onComposerPrefillApplied).toHaveBeenCalledTimes(1);
+  });
+
+  it('queues streaming messages to the mentioned agent', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'rex',
+      mentionAgents,
+      initialMessage: 'start streaming',
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ parts: expect.any(Array) }),
+      );
+    });
+
+    sessionApiEnqueuePromptMock.mockClear();
+    await user.type(screen.getByRole('textbox'), 'subagent:explore queued message{enter}');
+
+    await waitFor(() => {
+      expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith(
+        'sess-1',
+        expect.objectContaining({
+          agent: 'explore',
+          parts: expect.any(Array),
+        }),
+      );
+    });
+  });
+
+  it('queues streaming messages to the default agent when no mention is provided', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      agentName: 'rex',
+      mentionAgents,
+      initialMessage: 'start streaming',
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ parts: expect.any(Array) }),
+      );
+    });
+
+    sessionApiEnqueuePromptMock.mockClear();
+    await user.type(screen.getByRole('textbox'), 'queued message{enter}');
+
+    await waitFor(() => {
+      expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith(
+        'sess-1',
+        expect.objectContaining({
+          agent: 'rex',
+          parts: expect.any(Array),
+        }),
+      );
+    });
+  });
+});
+
+describe('SessionChat slash command routing', () => {
+  it('sends absolute filesystem paths as normal prompts instead of slash commands', async () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    const text = '/tmp/stream_alert_denoise/rex_integration_guide.md\n\nuse this file';
+    const textarea = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: text } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: [{ type: 'text', text }],
+        }),
+      );
+    });
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/command',
+      expect.anything(),
+    );
+  });
+});
+
+describe('truncateToolDisplayText', () => {
+  it('returns short text unchanged', () => {
+    expect(truncateToolDisplayText('bash')).toBe('bash');
+  });
+
+  it('truncates long text with an ellipsis', () => {
+    const long = 'python3 -c "' + 'x'.repeat(200) + '"';
+    const result = truncateToolDisplayText(long, 120);
+    expect(result.length).toBe(121);
+    expect(result.endsWith('…')).toBe(true);
+    expect(result.startsWith('python3 -c "')).toBe(true);
+  });
+});
+
+describe('buildTodoSummary', () => {
+  it('renders progress from structured todo input', () => {
+    expect(buildTodoSummary({
+      input: {
+        action: 'write',
+        todos: [
+          { id: '1', content: '定位 todo 摘要问题', status: 'in_progress' },
+          { id: '2', content: '补充回归测试', status: 'completed' },
+          { id: '3', content: '验证 Web UI 展示', status: 'pending' },
+        ],
+      },
+    })).toBe('Progress 1/3 · In progress 1');
+  });
+
+  it('prefers current metadata todos when available', () => {
+    expect(buildTodoSummary({
+      metadata: {
+        oldTodos: [
+          { id: '1', content: '定位 todo 摘要问题', status: 'pending' },
+          { id: '2', content: '补充回归测试', status: 'pending' },
+        ],
+        newTodos: [
+          { id: '1', content: '定位 todo 摘要问题', status: 'completed' },
+          { id: '3', content: '验证 Web UI 展示', status: 'completed' },
+        ],
+      },
+    })).toBe('Completed 2/2');
+  });
+
+  it('renders a readable fallback for todo actions without structured entries', () => {
+    expect(buildTodoSummary({
+      input: {
+        action: 'write',
+        todos: [],
+      },
+    })).toBe('Update todos');
+  });
+});
+
+describe('ChatToolPart delegate rendering', () => {
+  it('keeps the streaming indicator visible while delegation is running', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-running-delegate',
+        role: 'assistant',
+        parts: [{
+          id: 'delegate-running',
+          type: 'tool',
+          tool: 'delegate_task',
+          state: {
+            status: 'running',
+            input: {
+              subagent_type: 'explore',
+              description: '排查会话页面',
+            },
+          },
+        } as any],
+      }),
+      isActive: true,
+    }));
+
+    expect(screen.getByText('继续输出中...')).toBeInTheDocument();
+  });
+
+  it('keeps the specialized delegate view inside a process timeline', () => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: 'delegate-process-step',
+          type: 'tool',
+          tool: 'delegate_task',
+          state: {
+            status: 'running',
+            input: {
+              subagent_type: 'explore',
+              description: '排查会话页面',
+            },
+          },
+        } as any,
+      }),
+    );
+
+    expect(screen.getByTestId('chat-process-delegate-step')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-process-tool-step')).not.toBeInTheDocument();
+  });
+});
+
+describe('ChatToolPart load skill rendering', () => {
+  const part = {
+    id: 'load-skill-part',
+    type: 'tool',
+    tool: 'skill_load',
+    callID: 'call-load-skill',
+    state: {
+      status: 'completed',
+      input: {
+        name: 'agent-builder',
+      },
+      title: 'Loaded skill: agent-builder',
+      output: 'Skill loaded',
+    },
+  } as any;
+
+  it('uses the localized action name in the process timeline', () => {
+    render(React.createElement(ChatToolPart, { part, processStep: true }));
+
+    const processStep = screen.getByTestId('chat-process-tool-step');
+    expect(processStep.querySelector('summary')).toHaveTextContent('加载技能');
+    expect(processStep.querySelector('summary')).toHaveTextContent('agent-builder');
+    expect(processStep.querySelector('summary')).not.toHaveTextContent('Loaded skill');
+    expect(processStep.querySelector('summary')).not.toHaveTextContent('已完成');
+  });
+
+  it('uses the localized action name in the expanded tool card', () => {
+    const { container } = render(React.createElement(ChatToolPart, { part }));
+
+    expect(container.querySelector('summary')).toHaveTextContent('加载技能');
+    expect(container.querySelector('summary')).not.toHaveTextContent('load skill');
+  });
+});
+
+describe('ChatToolPart semantic tool presentation', () => {
+  it('shows the tool immediately and fills in parameters when they arrive', () => {
+    const initialPart = {
+      id: 'streaming-write-part',
+      type: 'tool',
+      tool: 'write',
+      state: {
+        status: 'pending',
+        input: {},
+      },
+    } as any;
+    const { rerender } = render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: initialPart,
+      }),
+    );
+
+    let summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('写入文件');
+    expect(summary).not.toHaveTextContent('filePath');
+    expect(screen.queryByText('输入参数')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-tool-action-progress')).toHaveTextContent(
+      '正在写入文件…',
+    );
+
+    rerender(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          ...initialPart,
+          state: {
+            status: 'running',
+            input: {
+              filePath: '/repo/report.md',
+              content: '# Report',
+            },
+          },
+        },
+      }),
+    );
+
+    summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('写入文件');
+    expect(summary).toHaveTextContent('report.md');
+    expect(summary).not.toHaveTextContent('/repo/report.md');
+    expect(screen.getByText('输入参数')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-tool-action-progress')).not.toBeInTheDocument();
+  });
+
+  it.each(['edit', 'apply_patch'])('describes a pending %s tool as editing the file', (tool) => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: `streaming-${tool}-part`,
+          type: 'tool',
+          tool,
+          state: {
+            status: 'pending',
+            input: {},
+          },
+        } as any,
+      }),
+    );
+
+    expect(screen.getByTestId('chat-tool-action-progress')).toHaveTextContent(
+      '正在编辑文件…',
+    );
+  });
+
+  it('shows a localized action and concise target in the process timeline', () => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: 'read-file-part',
+          type: 'tool',
+          tool: 'read',
+          state: {
+            status: 'completed',
+            input: {
+              filePath: '/repo/webui/src/components/common/SessionChat.tsx',
+              offset: 5200,
+              limit: 200,
+            },
+          },
+        } as any,
+      }),
+    );
+
+    const summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('读取文件');
+    expect(summary).toHaveTextContent('SessionChat.tsx');
+    expect(summary).not.toHaveTextContent('/repo/webui/src/components/common/SessionChat.tsx');
+    expect(summary).not.toHaveTextContent('已完成');
+    expect(summary).not.toHaveTextContent('filePath=');
+  });
+
+  it('uses a subcommand-specific action for skill management', () => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: 'install-skill-part',
+          type: 'tool',
+          tool: 'aegisops_skills',
+          state: {
+            status: 'running',
+            input: {
+              subcommand: 'install',
+              args: 'agent-builder',
+            },
+          },
+        } as any,
+      }),
+    );
+
+    const summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('安装技能');
+    expect(summary).toHaveTextContent('agent-builder');
+    expect(summary).not.toHaveTextContent('执行中');
+  });
+
+  it('redacts sensitive fields in expanded input parameters', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'add-provider-part',
+          type: 'tool',
+          tool: 'add_provider',
+          state: {
+            status: 'completed',
+            input: {
+              name: 'Internal LLM',
+              api_key: 'super-secret-key',
+              config: {
+                password: 'super-secret-password',
+                base_url: 'https://models.example.com/v1',
+              },
+            },
+          },
+        } as any,
+      }),
+    );
+
+    expect(container.textContent).toContain('添加模型服务');
+    const payload = container.querySelector('pre')?.textContent || '';
+    expect(payload).toContain('••••••');
+    expect(payload).toContain('https://models.example.com/v1');
+    expect(payload).not.toContain('super-secret-key');
+    expect(payload).not.toContain('super-secret-password');
+  });
+});
+
+describe('ChatMessageBubble session typography', () => {
+  it('gives the full-layout agent label a clear heading level', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-agent-label',
+        role: 'assistant',
+        parts: [{
+          id: 'assistant-text',
+          type: 'text',
+          text: '已加载技能。',
+        } as any],
+      }),
+      compact: false,
+    }));
+
+    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-medium', 'text-ui-text');
+  });
+});
+
+describe('ChatMessageBubble footer layout', () => {
+  it.each(['stop', 'error'])('keeps the last observed wait when retry ends with %s and the timeline remounts', (finish) => {
+    const at = (minute: number, second = 0) => new Date(2026, 9, 19, 19, minute, second).getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(at(5, 14));
+    try {
+      const message = makeMessage({ id: `retry-${finish}`, timestamp: at(1), parts: [
+        { id: 'reason', type: 'reasoning', text: '检查任务', time: { start: at(1), end: at(1, 10) } },
+        { id: 'model', type: 'step-start', time: { start: at(4), end: at(4, 10) } },
+      ] });
+      const props = { compact: false, showActions: true, showTimestamp: true, collapseIntermediateSteps: true };
+      const active = render(React.createElement(ChatMessageBubble, { ...props, message, isActive: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      active.unmount(); // SessionChat moves a finished reply from the tail to history.
+
+      const stopped = { ...message, finish };
+      const history = render(React.createElement(ChatMessageBubble, { ...props, message: stopped }));
+      act(() => vi.advanceTimersByTime(120_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      expect(screen.getByText('10月19日 19:05')).toBeInTheDocument();
+      history.unmount();
+      const reopened = render(React.createElement(ChatMessageBubble, { ...props, message: stopped }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      expect(screen.getByText('10月19日 19:05')).toBeInTheDocument();
+
+      // A different reply must not inherit the stopped reply's local timing.
+      reopened.rerender(React.createElement(ChatMessageBubble, { ...props, message: { ...stopped, id: 'other-reply' } }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 3m10s');
+      expect(screen.getByText('10月19日 19:04')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps the elapsed duration and footer consistent through gaps, completion and reopening', () => {
+    const at = (minute: number, second = 0) => new Date(2026, 9, 19, 19, minute, second).getTime();
+    vi.useFakeTimers();
+    vi.setSystemTime(at(5, 14));
+    try {
+      const messages = [
+        makeMessage({ id: 'first-round', timestamp: at(1), finish: 'tool-calls', parts: [
+          { id: 'reason', type: 'reasoning', text: '检查任务', time: { start: at(1, 5), end: at(1, 10) } },
+        ] }),
+        makeMessage({ id: 'last-round', timestamp: at(4), parts: [
+          { id: 'model', type: 'step-start', time: { start: at(4), end: at(4, 10) } },
+        ] }),
+      ];
+      const props = { compact: false, showActions: true, showTimestamp: true, collapseIntermediateSteps: true };
+      const message = mergeConsecutiveAssistantMessages(messages)[0];
+      const view = render(React.createElement(ChatMessageBubble, { ...props, message, isActive: true }));
+      // The model call has ended but retry backoff is still user-visible waiting.
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4m14s');
+      expect(screen.getByText('10月19日 19:05')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(60_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5m14s');
+      expect(screen.getByText('10月19日 19:06')).toBeInTheDocument();
+
+      const completed = { ...message, finish: 'stop', parts: [...message.parts,
+        { id: 'output', type: 'text' as const, text: '完成', time: { start: at(6, 15), end: at(6, 20) } },
+      ] };
+      view.rerender(React.createElement(ChatMessageBubble, { ...props, message: completed }));
+      act(() => vi.advanceTimersByTime(120_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5m20s');
+      expect(screen.getByText('10月19日 19:06')).toBeInTheDocument();
+      view.unmount();
+      render(React.createElement(ChatMessageBubble, { ...props, message: completed }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5m20s');
+      expect(screen.getByText('10月19日 19:06')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('places assistant actions immediately before the timestamp', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-footer',
+        role: 'assistant',
+        timestamp: Date.now(),
+        parts: [{
+          id: 'assistant-text',
+          type: 'text',
+          text: '任务已完成。',
+        } as any],
+      }),
+      compact: false,
+      showActions: true,
+      showTimestamp: true,
+    }));
+
+    const regenerateButton = screen.getByRole('button', { name: 'chat.regenerate' });
+    const actionGroup = regenerateButton.parentElement;
+    const footer = actionGroup?.parentElement;
+
+    expect(footer).toHaveClass('justify-start', 'gap-1.5');
+    expect(footer?.children[0]).toBe(actionGroup);
+    expect(footer?.children[1]).toHaveClass('text-[11px]', 'text-[#8b929d]');
+    expect(regenerateButton).toHaveClass('text-[#8b929d]');
+    expect(regenerateButton).toHaveClass(
+      'border-transparent',
+      'bg-transparent',
+      'hover:bg-white',
+      'active:bg-white',
+      'focus-visible:bg-white',
+    );
+    expect(regenerateButton).not.toHaveClass('border-gray-200/80', 'bg-white/80');
+  });
+
+  it('keeps the user timestamp before the action group', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'user-footer',
+        role: 'user',
+        timestamp: Date.now(),
+        parts: [{
+          id: 'user-text',
+          type: 'text',
+          text: '继续处理。',
+        } as any],
+      }),
+      compact: false,
+      showActions: true,
+      showTimestamp: true,
+    }));
+
+    const copyButton = screen.getByRole('button', { name: 'chat.copy' });
+    const actionGroup = copyButton.parentElement;
+    const footer = actionGroup?.parentElement;
+
+    expect(footer).toHaveClass('justify-between');
+    expect(footer?.children[0]).toHaveClass('text-[11px]');
+    expect(footer?.children[1]).toBe(actionGroup);
+  });
+});
+
+describe('ChatToolPart todo rendering', () => {
+  it('renders todo progress and stages without object-object summaries', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'todo-part',
+          type: 'tool',
+          tool: 'todo',
+          callID: 'call-todo',
+          state: {
+            status: 'completed',
+            input: {
+              action: 'write',
+              todos: [
+                { id: '1', content: '定位 todo 摘要问题', activeForm: '定位 todo 摘要问题中', status: 'in_progress' },
+                { id: '2', content: '补充回归测试', status: 'completed' },
+                { id: '3', content: '验证 Web UI 展示', status: 'pending' },
+              ],
+            },
+            output: '{}',
+            title: '2 todos',
+            metadata: {
+              action: 'write',
+              newTodos: [
+                { id: '1', content: '定位 todo 摘要问题', activeForm: '定位 todo 摘要问题中', status: 'in_progress' },
+                { id: '2', content: '补充回归测试', status: 'completed' },
+                { id: '3', content: '验证 Web UI 展示', status: 'pending' },
+              ],
+            },
+          },
+        } as any,
+      }),
+    );
+
+    expect(container.textContent).toContain('进度 1/3 · 进行中 1');
+    expect(container.textContent).toContain('Todo 阶段');
+    expect(container.textContent).toContain('定位 todo 摘要问题中');
+    expect(container.textContent).toContain('完成');
+    expect(container.textContent).not.toContain('completed');
+    expect(container.textContent).not.toContain('输入参数');
+    expect(container.textContent).not.toContain('输出结果');
+    expect(container.textContent).not.toContain('[object Object]');
+  });
+});
+
+describe('ChatToolPart bash rendering', () => {
+  it('renders command metadata and streams without generic JSON sections', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'bash-part',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'call-bash',
+          state: {
+            status: 'completed',
+            input: {
+              command: 'npm run test:run -- SessionChat.test.ts',
+              description: '运行会话组件测试',
+              workdir: '/repo',
+              timeout: 120000,
+            },
+            output: {
+              stdout: 'tests passed\n',
+              stderr: 'warning: slow test\n',
+              exit_code: 0,
+            },
+            time: { start: 1000, end: 2500 },
+          },
+        } as any,
+      }),
+    );
+
+    const text = container.textContent || '';
+    expect(text).toContain('执行命令');
+    expect(text).toContain('运行会话组件测试');
+    expect(text).toContain('npm run test:run -- SessionChat.test.ts');
+    expect(text).toContain('命令');
+    expect(text).toContain('工作目录');
+    expect(text).toContain('/repo');
+    expect(text).toContain('耗时 1.50s');
+    expect(text).toContain('超时 120000ms');
+    expect(text).toContain('标准输出');
+    expect(text).toContain('tests passed');
+    expect(text).toContain('标准错误');
+    expect(text).toContain('warning: slow test');
+    expect(text).not.toContain('输入参数');
+    expect(text).not.toContain('输出结果');
+    expect(text).not.toContain('退出码');
+    expect(text).not.toContain('exit_code');
+    expect(screen.getByText('$')).toHaveClass('text-zinc-500');
+    expect(screen.getByText('$').closest('pre')).toHaveClass('bg-zinc-950');
+    expect(screen.getByText('$').closest('pre')).toHaveClass('max-h-64');
+    expect(screen.getByText('tests passed').closest('pre')).toHaveClass('max-h-64');
+  });
+
+  it.each([
+    'Tool execution was interrupted',
+    'Command failed with exit code 1',
+  ])('renders the bash error once: %s', (error) => {
+    render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'bash-error-part',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'call-bash-error',
+          state: {
+            status: 'error',
+            input: { command: 'exit 1' },
+            error,
+          },
+        } as any,
+      }),
+    );
+
+    expect(screen.getAllByText(error)).toHaveLength(1);
+  });
+});
+
+describe('ChatToolPart question result rendering', () => {
+  it('uses error styling for unanswered failed questions', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'question-error-part',
+          type: 'tool',
+          tool: 'question',
+          callID: 'call-question-error',
+          state: {
+            status: 'error',
+            input: {
+              questions: [
+                {
+                  question: '是否继续发布？',
+                  header: '发布确认',
+                  type: 'confirm',
+                },
+              ],
+            },
+            error: 'Question timed out',
+          },
+        } as any,
+      }),
+    );
+
+    const questionDetails = container.querySelector('details') as HTMLDetailsElement;
+    expect(questionDetails).not.toBeNull();
+    expect(questionDetails.open).toBe(false);
+    expect(screen.getByText('失败')).toHaveClass('text-red-500');
+    expect(screen.getByText('回答')).toHaveClass('text-red-500');
+    expect(screen.getByText('未回答')).toHaveClass('border-red-200');
+    expect(screen.getByText('未回答')).toHaveClass('bg-red-50');
+  });
+});
+
+describe('SessionChat context usage popover', () => {
+  it('counts a first prompt handed off as an optimistic new-session message', async () => {
+    const prompt = 'x'.repeat(400);
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 120,
+      contextWindow: 1000,
+      percent: 12,
+      source: 'estimated',
+      estimatedTokens: 120,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+      initialOptimisticMessage: makeMessage({
+        id: 'optimistic-user-1',
+        sessionID: 'sess-1',
+        role: 'user',
+        parts: [{
+          id: 'optimistic-part-1',
+          type: 'text',
+          text: prompt,
+          metadata: { displayText: 'Visible label' },
+        }],
+      }),
+    }));
+
+    const contextButton = screen.getByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => {
+      expect(contextButton).toHaveTextContent('10%');
+    });
+    expect(screen.getByText('Visible label')).toBeInTheDocument();
+    expect(screen.queryByText(prompt)).not.toBeInTheDocument();
+  });
+
+  it('counts only the current draft before the first user prompt', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 120,
+      contextWindow: 1000,
+      percent: 12,
+      source: 'estimated',
+      estimatedTokens: 120,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 120, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    expect(contextButton).toHaveTextContent('0%');
+
+    fireEvent.change(screen.getByPlaceholderText('请输入消息'), {
+      target: { value: 'x'.repeat(400) },
+    });
+    expect(contextButton).toHaveTextContent('10%');
+
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    expect(conversationRow).not.toBeNull();
+    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
+    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+  });
+
+  it('keeps the submitted prompt in usage while the first model call is running', async () => {
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    expect(contextButton).toHaveTextContent('10%');
+
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.any(Object),
+      );
+    });
+    // Once the prompt is sent the system prompt is part of the context too.
+    expect(contextButton).toHaveTextContent('18%');
+
+    const user = userEvent.setup();
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    const systemPromptRow = screen.getByText('System prompt').closest('[role="menuitem"]');
+    expect(within(systemPromptRow as HTMLElement).getByText('80')).toBeInTheDocument();
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+  });
+
+  it('keeps draft usage frozen during the automatic-model preflight', async () => {
+    const modelUpdate = deferred<unknown>();
+    mockStatefulSessionMessages();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+      modelAuto: true,
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    expect(contextButton).toHaveTextContent('10%');
+
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => {
+      expect(sessionApiUpdateMock).toHaveBeenCalledWith('sess-1', {
+        model_auto: true,
+        model_pinned: false,
+      });
+    });
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/prompt_async',
+      expect.any(Object),
+    );
+    expect(contextButton).toHaveTextContent('10%');
+
+    await act(async () => {
+      modelUpdate.resolve({});
+      await modelUpdate.promise;
+    });
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.any(Object),
+      );
+    });
+    expect(contextButton).toHaveTextContent('10%');
+  });
+
+  it('counts the real prompt instead of its shorter display label while submitting', async () => {
+    const prompt = 'x'.repeat(400);
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: prompt,
+      initialDisplayText: 'Visible label',
+      contextWindowTokens: 1000,
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ displayText: 'Visible label' }),
+      );
+      expect(screen.getByRole('button', { name: 'chat.contextUsageTitle' })).toHaveTextContent('10%');
+    });
+    expect(screen.getByText('Visible label')).toBeInTheDocument();
+    expect(screen.queryByText(prompt)).not.toBeInTheDocument();
+  });
+
+  it('does not double-count a prompt when the initial snapshot resolves after submission', async () => {
+    const request = deferred<ContextUsageSnapshot>();
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockReturnValue(request.promise);
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+    }));
+
+    const contextButton = screen.getByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.any(Object),
+      );
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+    });
+    expect(contextButton).toHaveTextContent('10%');
+
+    await act(async () => {
+      request.resolve({
+        sessionID: 'sess-1',
+        usedTokens: 220,
+        contextWindow: 1000,
+        percent: 22,
+        source: 'estimated',
+        estimatedTokens: 220,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+          { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+          { key: 'conversation', tokens: 100, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+      await request.promise;
+    });
+
+    // Fixed 120 + the 100-token prompt, counted once.
+    expect(contextButton).toHaveTextContent('22%');
+  });
+
+  it('keeps a newer prompt pending when the previous turn refresh resolves', async () => {
+    const previousTurnRefresh = deferred<ContextUsageSnapshot>();
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 80,
+        contextWindow: 1000,
+        percent: 8,
+        source: 'estimated',
+        estimatedTokens: 80,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockReturnValueOnce(previousTurnRefresh.promise);
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1));
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'a'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('18%'));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'assistant-turn-1',
+            sessionID: 'sess-1',
+            role: 'assistant',
+            providerID: 'openai',
+            modelID: 'gpt-test',
+            time: { completed: Date.now() },
+            finish: 'stop',
+          },
+        },
+      });
+    });
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(2));
+
+    fireEvent.change(textarea, { target: { value: 'b'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledTimes(2);
+      expect(contextButton).toHaveTextContent('28%');
+    });
+
+    await act(async () => {
+      previousTurnRefresh.resolve({
+        sessionID: 'sess-1',
+        usedTokens: 180,
+        contextWindow: 1000,
+        percent: 18,
+        source: 'estimated',
+        estimatedTokens: 180,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+          { key: 'conversation', tokens: 100, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+      await previousTurnRefresh.promise;
+    });
+
+    await waitFor(() => expect(contextButton).toHaveTextContent('28%'));
+  });
+
+  it('drops pending usage during the first render of a different session', async () => {
+    const layoutPercentages: string[] = [];
+    const firstSnapshot: ContextUsageSnapshot = {
+      sessionID: 'sess-1',
+      usedTokens: 580,
+      contextWindow: 1000,
+      percent: 58,
+      source: 'estimated',
+      estimatedTokens: 580,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 500, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    };
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'existing-user-1',
+        sessionID: 'sess-1',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'existing-user-part-1', type: 'text', text: 'x'.repeat(2000) }],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockImplementation((activeSessionId: string) => (
+      activeSessionId === 'sess-1'
+        ? Promise.resolve(firstSnapshot)
+        : new Promise(() => {})
+    ));
+
+    function SessionSwitchProbe({ activeSessionId }: { activeSessionId: string }) {
+      React.useLayoutEffect(() => {
+        const contextButton = document.querySelector<HTMLButtonElement>(
+          'button[aria-label="chat.contextUsageTitle"]',
+        );
+        layoutPercentages.push(contextButton?.textContent || '');
+      }, [activeSessionId]);
+
+      return React.createElement(SessionChat, {
+        sessionId: activeSessionId,
+        contextWindowTokens: 1000,
+      });
+    }
+
+    const rendered = render(React.createElement(SessionSwitchProbe, {
+      activeSessionId: 'sess-1',
+    }));
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('50%'));
+
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('60%'));
+
+    rendered.rerender(React.createElement(SessionSwitchProbe, {
+      activeSessionId: 'sess-2',
+    }));
+
+    expect(layoutPercentages[layoutPercentages.length - 1]).toBe('0%');
+    expect(contextButton).toHaveTextContent('0%');
+  });
+
+  it('retains pending prompt usage when the completion refresh fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failedRefresh = deferred<ContextUsageSnapshot>();
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 80,
+        contextWindow: 1000,
+        percent: 8,
+        source: 'estimated',
+        estimatedTokens: 80,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockReturnValueOnce(failedRefresh.promise);
+
+    try {
+      render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+      const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+      const textarea = screen.getByPlaceholderText('请输入消息');
+      fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+      await waitFor(() => {
+        expect(contextButton).toHaveTextContent('18%');
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'assistant-1',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              time: { completed: Date.now() },
+              finish: 'stop',
+            },
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(2);
+      });
+      await act(async () => {
+        failedRefresh.reject(new Error('context usage unavailable'));
+        await failedRefresh.promise.catch(() => undefined);
+      });
+      await waitFor(() => {
+        expect(warnSpy).toHaveBeenCalled();
+      });
+      expect(contextButton).toHaveTextContent('18%');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not activate model context for a built-in slash command', async () => {
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 100,
+      contextWindow: 100,
+      percent: 100,
+      source: 'estimated',
+      estimatedTokens: 100,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 60, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 100,
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: '/tools' } });
+    expect(contextButton).toHaveTextContent('1%');
+
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/command',
+        expect.any(Object),
+      );
+    });
+    expect(contextButton).toHaveTextContent('0%');
+  });
+
+  it('ignores command-only history before a context snapshot is available', () => {
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'command-user',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'command-part', type: 'text', text: 'x'.repeat(400), ignored: true }],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockReturnValue(new Promise(() => {}));
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+    }));
+
+    expect(screen.getByRole('button', { name: 'chat.contextUsageTitle' })).toHaveTextContent('0%');
+  });
+
+  it('counts fixed prompt costs but does not pin observed drift on a short conversation', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 23210,
+      contextWindow: 1000000,
+      percent: 2,
+      source: 'observed',
+      observedTokens: 23210,
+      estimatedTokens: 20010,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 8000, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 12000, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 3210, included: true, source: 'estimated' },
+        { key: 'agentDelegation', tokens: 0, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [
+        { key: 'compactedHistory', tokens: 12000, included: false, source: 'estimated' },
+      ],
+    });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          parts: [{ id: 'user-part-1', type: 'text', text: 'prompt' }],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-test',
+          parts: [{ id: 'assistant-part-1', type: 'text', text: 'response' }],
+        }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    expect(contextButton).toHaveClass('h-6');
+    expect(contextButton).not.toHaveClass('w-6');
+    // 23,210 observed tokens of a 1M window.
+    expect(contextButton).toHaveTextContent('2%');
+    await user.click(contextButton);
+
+    // The 3,200-token drift is spread x1.16 over the rows: 8000 -> 9279,
+    // 12000 -> 13919 (+1 rounding), conversation 10 -> 11.
+    const systemPromptRow = screen.getByText('System prompt').closest('[role="menuitem"]');
+    const toolDefinitionsRow = screen.getByText('Tool definitions').closest('[role="menuitem"]');
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    expect(within(systemPromptRow as HTMLElement).getByText('9.3K')).toBeInTheDocument();
+    expect(within(toolDefinitionsRow as HTMLElement).getByText('14K')).toBeInTheDocument();
+    expect(within(conversationRow as HTMLElement).getByText('11')).toBeInTheDocument();
+    expect(screen.getByText('Reasoning')).toBeInTheDocument();
+    expect(screen.getByText('Tool calls')).toBeInTheDocument();
+    expect(screen.getByText('Skill loads')).toBeInTheDocument();
+    expect(screen.getByText('Agent delegation')).toBeInTheDocument();
+    expect(screen.queryByText('Compacted history')).not.toBeInTheDocument();
+  });
+
+  it('tracks the token delta while an edited user message is being resent', async () => {
+    const user = userEvent.setup();
+    const originalText = 'x'.repeat(40);
+    const editedText = 'x'.repeat(400);
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'user-1',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'user-part-1', type: 'text', text: originalText }],
+      }),
+      makeMessage({
+        id: 'assistant-1',
+        role: 'assistant',
+        providerID: 'openai',
+        modelID: 'gpt-test',
+        parentID: 'user-1',
+        parts: [
+          { id: 'assistant-part-1', type: 'text', text: 'y'.repeat(400) },
+          { id: 'assistant-reasoning-1', type: 'reasoning', text: 'z'.repeat(400) },
+        ],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 290,
+      contextWindow: 1000,
+      percent: 29,
+      source: 'estimated',
+      estimatedTokens: 290,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 110, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 100, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+    sessionApiResendMessageMock.mockReturnValue(new Promise(() => {}));
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    expect(contextButton).toHaveTextContent('29%');
+
+    await user.click(screen.getByLabelText('chat.edit'));
+    // editing shows the raw-content hint above the editor
+    expect(screen.getByTestId('chat-edit-raw-hint')).toHaveTextContent('chat.editRawHint');
+    fireEvent.change(screen.getByDisplayValue(originalText), { target: { value: editedText } });
+    await user.click(screen.getByLabelText('chat.sendEdited'));
+
+    await waitFor(() => {
+      expect(sessionApiResendMessageMock).toHaveBeenCalledWith(
+        'sess-1',
+        'user-1',
+        'user-part-1',
+        editedText,
+      );
+    });
+    // 290 + 90 for the longer prompt - 200 for the discarded reply.
+    expect(contextButton).toHaveTextContent('18%');
+
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    const reasoningRow = screen.getByText('Reasoning').closest('[role="menuitem"]');
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+    expect(within(reasoningRow as HTMLElement).getByText('0')).toBeInTheDocument();
+  });
+
+  it('preserves edit removals when the initial context snapshot resolves late', async () => {
+    const request = deferred<ContextUsageSnapshot>();
+    const user = userEvent.setup();
+    const originalText = 'x'.repeat(40);
+    const editedText = 'x'.repeat(400);
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'user-late-snapshot',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'user-late-part', type: 'text', text: originalText }],
+      }),
+      makeMessage({
+        id: 'assistant-late-snapshot',
+        role: 'assistant',
+        providerID: 'openai',
+        modelID: 'gpt-test',
+        parentID: 'user-late-snapshot',
+        parts: [
+          { id: 'assistant-late-text', type: 'text', text: 'y'.repeat(400) },
+          { id: 'assistant-late-reasoning', type: 'reasoning', text: 'z'.repeat(400) },
+        ],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockReturnValue(request.promise);
+    sessionApiResendMessageMock.mockReturnValue(new Promise(() => {}));
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+      display: { compact: false, showActions: true },
+    }));
+
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1));
+    const contextButton = screen.getByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(screen.getByLabelText('chat.edit'));
+    fireEvent.change(screen.getByDisplayValue(originalText), { target: { value: editedText } });
+    await user.click(screen.getByLabelText('chat.sendEdited'));
+
+    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+
+    await act(async () => {
+      request.resolve({
+        sessionID: 'sess-1',
+        usedTokens: 330,
+        contextWindow: 1000,
+        percent: 33,
+        source: 'observed',
+        estimatedTokens: 320,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+          { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+          { key: 'conversation', tokens: 110, included: true, source: 'estimated' },
+          { key: 'reasoning', tokens: 100, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+      await request.promise;
+    });
+
+    // Fixed 120 + the 100-token edited prompt.
+    await waitFor(() => expect(contextButton).toHaveTextContent('22%'));
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    const reasoningRow = screen.getByText('Reasoning').closest('[role="menuitem"]');
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+    expect(within(reasoningRow as HTMLElement).getByText('0')).toBeInTheDocument();
+  });
+
+  it('keeps usage visible while recalculating after compaction succeeds', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 900,
+        contextWindow: 1000,
+        percent: 90,
+        source: 'estimated',
+        estimatedTokens: 900,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 420,
+        contextWindow: 1000,
+        percent: 42,
+        source: 'estimated',
+        estimatedTokens: 420,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'stale-user',
+          role: 'user',
+          model: 'openai/gpt-test',
+          parts: [{ id: 'stale-user-part', type: 'text', text: 'x'.repeat(4000) }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(contextButton);
+    expect(await screen.findByText('Conversation')).toBeInTheDocument();
+    expect(screen.getByText('900')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.compacted',
+        properties: { sessionID: 'sess-1' },
+      });
+    });
+
+    expect(screen.getByText('900')).toBeInTheDocument();
+    await waitFor(() => {
+      expect(screen.getByText('420')).toBeInTheDocument();
+    });
+    expect(screen.getByText('Conversation')).toBeInTheDocument();
+  });
+
+  it('refreshes context usage after compaction fails', async () => {
+    const user = userEvent.setup();
+    const onError = vi.fn();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 900,
+        contextWindow: 1000,
+        percent: 90,
+        source: 'estimated',
+        estimatedTokens: 900,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 420,
+        contextWindow: 1000,
+        percent: 42,
+        source: 'estimated',
+        estimatedTokens: 420,
+        compactedTokens: 0,
+        segments: [
+          { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({
+        id: 'user-1',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'user-part-1', type: 'text', text: 'prompt' }],
+      })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true, onError }));
+
+    await waitFor(() => {
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'compacting', message: 'Compacting context…' },
+        },
+      });
+    });
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(contextButton);
+    expect(screen.getByText('900')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.error',
+        properties: {
+          sessionID: 'sess-1',
+          error: { message: 'provider unavailable' },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(2);
+    });
+    expect(onError).toHaveBeenCalledWith('provider unavailable');
+
+    expect(screen.getByText('420')).toBeInTheDocument();
+  });
+
+  it('follows mid-turn usage pushes once they include the sent prompt', async () => {
+    // Regression: the meter stayed on the pre-send baseline for the whole
+    // turn (27%) and only showed the real usage (61%) after a reload.
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1));
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('18%'));
+    const sentMessageId = (clientPostMock.mock.calls[0][1] as { messageID: string }).messageID;
+
+    const pushedSnapshot = (usedTokens: number, recentUserMessageIDs: string[]) => ({
+      sessionID: 'sess-1',
+      usedTokens,
+      contextWindow: 1000,
+      percent: Math.round(usedTokens / 10),
+      source: 'observed',
+      estimatedTokens: usedTokens,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: usedTokens - 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+      recentUserMessageIDs,
+    });
+
+    // A push computed before the prompt was stored must not replace it.
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: pushedSnapshot(90, []),
+      });
+    });
+    expect(contextButton).toHaveTextContent('18%');
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: pushedSnapshot(610, [sentMessageId]),
+      });
+    });
+    await waitFor(() => expect(contextButton).toHaveTextContent('61%'));
+  });
+
+  it('does not refetch immediately after a pushed context usage snapshot', async () => {
+    sessionApiGetContextUsageMock.mockResolvedValueOnce({
+      sessionID: 'sess-1',
+      usedTokens: 900,
+      contextWindow: 1000,
+      percent: 90,
+      source: 'estimated',
+      estimatedTokens: 900,
+      compactedTokens: 0,
+      segments: [
+        { key: 'conversation', tokens: 900, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    await waitFor(() => {
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'context.usage.updated',
+        properties: {
+          sessionID: 'sess-1',
+          usedTokens: 420,
+          contextWindow: 1000,
+          percent: 42,
+          source: 'estimated',
+          estimatedTokens: 420,
+          compactedTokens: 0,
+          segments: [
+            { key: 'conversation', tokens: 420, included: true, source: 'estimated' },
+          ],
+          excludedSegments: [],
+        },
+      });
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: { type: 'idle' },
+        },
+      });
+    });
+
+    expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat goal banner', () => {
+  it('shows a Goal-mode objective as soon as the request is accepted', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      executionMode: 'goal',
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '实现解析项目下.aegisops{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          executionMode: 'goal',
+          parts: [{ type: 'text', text: '实现解析项目下.aegisops' }],
+        }),
+      );
+    });
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('实现解析项目下.aegisops')).toBeInTheDocument();
+  });
+
+  it('hydrates a persisted goal banner when the session loads', async () => {
+    sessionApiGetMock.mockResolvedValue({
+      id: 'sess-1',
+      goal: {
+        status: 'active',
+        objective: 'List built-in tools',
+      },
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+    expect(sessionApiGetMock).toHaveBeenCalledWith('sess-1');
+  });
+
+  it('shows goal status updates and lets the user dismiss the current notice', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'active',
+          objective: 'List built-in tools',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'completed',
+          objective: 'List built-in tools',
+          reason: 'Goal complete: tools listed',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Completed')).toBeInTheDocument();
+    expect(screen.getByText('List built-in tools')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Dismiss goal notice' }));
+
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+    expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
+  });
+
+  it('hides the goal notice when a replay from an earlier message clears the goal', async () => {
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'active',
+          objective: 'List built-in tools',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'cleared',
+          objective: 'List built-in tools',
+          reason: null,
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(screen.queryByText('Goal')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
+  });
+
+  it('keeps a dismissed persisted goal hidden after remount', async () => {
+    const user = userEvent.setup();
+    sessionApiGetMock.mockResolvedValue({
+      id: 'sess-1',
+      goal: {
+        status: 'completed',
+        objective: 'List built-in tools',
+        reason: 'Goal complete: tools listed',
+      },
+    });
+
+    const view = render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    expect(await screen.findByText('Completed')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dismiss goal notice' }));
+    expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+    expect(window.localStorage.getItem('aegisops:session:sess-1:dismissedGoal')).toBe(
+      'completed:List built-in tools',
+    );
+
+    view.unmount();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    await waitFor(() => {
+      expect(sessionApiGetMock).toHaveBeenCalledTimes(2);
+      expect(screen.queryByText('Completed')).not.toBeInTheDocument();
+    });
+    expect(screen.queryByText('List built-in tools')).not.toBeInTheDocument();
+  });
+
+  it('shows a new goal even when a previous goal was dismissed', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'completed',
+          objective: 'List built-in tools',
+        },
+      });
+    });
+    expect(await screen.findByText('Completed')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dismiss goal notice' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.goal.updated',
+        properties: {
+          sessionID: 'sess-1',
+          status: 'active',
+          objective: 'Calculate 4+87',
+        },
+      });
+    });
+
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('Calculate 4+87')).toBeInTheDocument();
+  });
+});
+
+describe('SessionChat compaction divider', () => {
+  it('keeps archived history visible before the compressed-context divider', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'old-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'old-user-part', type: 'text', text: 'old visible request' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-1',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'current answer' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const dividerLabel = screen.getByText('上下文已压缩');
+    expect(dividerLabel).toBeInTheDocument();
+    expect(dividerLabel).not.toHaveClass('rounded-full');
+    expect(dividerLabel).not.toHaveClass('border');
+    expect(dividerLabel).not.toHaveClass('bg-white');
+    expect(screen.getByText('old visible request')).toBeInTheDocument();
+    expect(screen.getByText('current answer')).toBeInTheDocument();
+  });
+
+  it('renders one chronological divider for each summary message', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'old-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'old-user-part', type: 'text', text: 'first archived turn' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-1',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'middle-user',
+          role: 'user',
+          compacted: true,
+          parts: [{ id: 'middle-user-part', type: 'text', text: 'second archived turn' }] as Message['parts'],
+        }),
+        makeMessage({
+          id: 'summary-2',
+          role: 'assistant',
+          finish: 'summary',
+          parts: [],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          finish: 'stop',
+          parts: [{ id: 'assistant-1-part', type: 'text', text: 'current answer' }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('first archived turn')).toBeInTheDocument();
+    expect(screen.getByText('second archived turn')).toBeInTheDocument();
+    expect(screen.getAllByText('上下文已压缩')).toHaveLength(2);
+  });
+});
+
+describe('getRegenerateTruncateTarget', () => {
+  it('truncates back to the parent user message for assistant regenerations', () => {
+    const target = getRegenerateTruncateTarget([
+      makeMessage({ id: 'user-1', role: 'user' }),
+      makeMessage({ id: 'assistant-1', role: 'assistant', parentID: 'user-1' }),
+      makeMessage({ id: 'assistant-2', role: 'assistant', parentID: 'user-1' }),
+    ], 'assistant-2');
+
+    expect(target).toEqual({ messageId: 'user-1' });
+  });
+
+  it('falls back to removing the target message when parent linkage is unavailable', () => {
+    const target = getRegenerateTruncateTarget([
+      makeMessage({ id: 'assistant-1', role: 'assistant' }),
+    ], 'assistant-1');
+
+    expect(target).toEqual({ messageId: 'assistant-1', includeTarget: true });
+  });
+});
+
+describe('shouldRefetchFinishedMessage', () => {
+  it('skips refetch for the assistant message the user just aborted', () => {
+    expect(shouldRefetchFinishedMessage({
+      finishedMessageId: 'assistant-1',
+      abortedMessageId: 'assistant-1',
+    })).toBe(false);
+  });
+
+  it('still refetches for unrelated finished messages', () => {
+    expect(shouldRefetchFinishedMessage({
+      finishedMessageId: 'assistant-2',
+      abortedMessageId: 'assistant-1',
+    })).toBe(true);
+  });
+});
+
+describe('streaming activity helpers', () => {
+  it('detects pending and running tool parts as active', () => {
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'pending' } } as Message['parts'][number],
+    ])).toBe(true);
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'running' } } as Message['parts'][number],
+    ])).toBe(true);
+  });
+
+  it('does not treat completed or error tool parts as active', () => {
+    expect(hasActiveToolPart([
+      { id: 'tool-1', type: 'tool', state: { status: 'completed' } } as Message['parts'][number],
+      { id: 'tool-2', type: 'tool', state: { status: 'error' } } as Message['parts'][number],
+    ])).toBe(false);
+  });
+
+  it('keeps busy, compacting, dreaming, and retry session statuses active', () => {
+    expect(isActiveSessionStatus({ type: 'busy' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'compacting' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'dreaming' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'retry' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'idle' })).toBe(false);
+    expect(isActiveSessionStatus(undefined)).toBe(false);
+  });
+});
+
+describe('SessionChat SSE reconnect recovery', () => {
+  async function renderStreamingSession(onStreamingDone = vi.fn()) {
+    const refetch = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-1',
+          finish: null,
+          parts: [{
+            id: 'tool-1',
+            type: 'tool',
+            tool: 'bash',
+            state: {
+              status: 'error',
+              error: 'Interrupted by server restart',
+            },
+          }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+      onStreamingDone,
+    }));
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    });
+    clientGetMock.mockClear();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+
+    return { onStreamingDone, refetch };
+  }
+
+  it('clears streaming after reconnect when the restarted server reports the session idle', async () => {
+    const { onStreamingDone, refetch } = await renderStreamingSession();
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+      expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    });
+    expect(refetch).toHaveBeenCalled();
+    expect(onStreamingDone).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps streaming after reconnect while a long-running session is still busy', async () => {
+    const { onStreamingDone } = await renderStreamingSession();
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return Promise.resolve({ data: { 'sess-1': { type: 'busy' } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale idle response after a newer busy event arrives', async () => {
+    let resolveStatus: ((value: { data: Record<string, unknown> }) => void) | undefined;
+    const { onStreamingDone } = await renderStreamingSession();
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => {
+          resolveStatus = resolve;
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+    await waitFor(() => {
+      expect(resolveStatus).toBeDefined();
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+      resolveStatus?.({ data: {} });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+  });
+});
+
+describe('SessionChat fallback polling', () => {
+  it('reconciles pending questions while the session is busy', async () => {
+    vi.useFakeTimers();
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(pendingQuestionsHookMock.fetchPendingQuestions).toHaveBeenCalledWith('sess-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refetches when polling finds a pending question missing from local messages', async () => {
+    vi.useFakeTimers();
+    let resolveRefetch: (() => void) | undefined;
+    const refetch = vi.fn(() => new Promise<void>((resolve) => {
+      resolveRefetch = resolve;
+    }));
+    const onStreamingDone = vi.fn();
+    try {
+      pendingQuestionsHookMock.pendingQuestions = {
+        'call-question-1': {
+          requestId: 'request-question-1',
+          questions: [{ question: 'Continue?' }],
+        },
+      };
+      mockFallbackPolling({
+        localMessages: [
+          makeMessage({ id: 'user-1', role: 'user' }),
+          makeMessage({ id: 'assistant-1', parentID: 'user-1' }),
+        ],
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'user-1', role: 'user' }),
+          makeFetchedMessage(
+            { id: 'assistant-1', role: 'assistant', parentID: 'user-1', finish: 'tool-calls' },
+            [{
+              id: 'question-tool-1',
+              messageID: 'assistant-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'question',
+              callID: 'call-question-1',
+              state: {
+                status: 'completed',
+                input: { questions: [{ question: 'Continue?' }] },
+              },
+            } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(clientGetMock.mock.calls.filter(
+        ([url]) => url === '/api/session/sess-1/message',
+      )).toHaveLength(1);
+
+      await act(async () => {
+        resolveRefetch?.();
+        await Promise.resolve();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a missing running question from a historical turn while the session is busy', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      const localMessages = [
+        makeMessage({ id: 'old-user', role: 'user' }),
+        makeMessage({ id: 'old-assistant', parentID: 'old-user', finish: 'tool-calls' }),
+        makeMessage({ id: 'current-user', role: 'user' }),
+        makeMessage({ id: 'current-assistant', parentID: 'current-user' }),
+      ];
+      mockFallbackPolling({
+        localMessages,
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'old-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'old-assistant',
+              role: 'assistant',
+              parentID: 'old-user',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'old-tool',
+              type: 'tool',
+              tool: 'question',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+          makeFetchedMessage({ id: 'current-user', role: 'user' }),
+          makeFetchedMessage({
+            id: 'current-assistant',
+            role: 'assistant',
+            parentID: 'current-user',
+            finish: null,
+          }),
+        ],
+        refetch,
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
+        params: { page: true, limit: 50, include_archived: true },
+        signal: expect.any(AbortSignal),
+      });
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
+      expect(refetch).not.toHaveBeenCalled();
+      expect(onStreamingDone).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes streaming when only a historical turn has a running question', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      const localMessages = [
+        makeMessage({ id: 'old-user', role: 'user' }),
+        makeMessage({ id: 'old-assistant', parentID: 'old-user', finish: 'tool-calls' }),
+        makeMessage({ id: 'current-user', role: 'user' }),
+        makeMessage({ id: 'current-assistant', parentID: 'current-user', finish: 'stop' }),
+      ];
+      mockFallbackPolling({
+        localMessages,
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'old-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'old-assistant',
+              role: 'assistant',
+              parentID: 'old-user',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'old-tool',
+              type: 'tool',
+              tool: 'question',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+          makeFetchedMessage({ id: 'current-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'current-assistant',
+              role: 'assistant',
+              parentID: 'current-user',
+              finish: 'stop',
+            },
+            [{ id: 'current-text', type: 'text', text: 'done' } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+        status: {},
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status', { signal: expect.any(AbortSignal) });
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(onStreamingDone).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(refetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not refetch a missing non-question tool while it is still running', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      mockFallbackPolling({
+        localMessages: [
+          makeMessage({ id: 'user-1', role: 'user' }),
+          makeMessage({ id: 'assistant-1', parentID: 'user-1', finish: 'tool-calls' }),
+        ],
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'user-1', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'assistant-1',
+              role: 'assistant',
+              parentID: 'user-1',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'tool-1',
+              type: 'tool',
+              tool: 'bash',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(refetch).not.toHaveBeenCalled();
+      expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
+        params: { page: true, limit: 50, include_archived: true },
+        signal: expect.any(AbortSignal),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes streaming when only the local active tool ref is stale', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      useSessionMessagesMock.mockReturnValue({
+        messages: [
+          makeMessage({
+            id: 'assistant-1',
+            finish: 'stop',
+            parts: [
+              { id: 'text-1', type: 'text', text: 'done' } as Message['parts'][number],
+            ],
+          }),
+        ],
+        loading: false,
+        refetch,
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        replaceMessageText: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      });
+      clientGetMock.mockImplementation((url: string) => {
+        if (url === '/api/session/sess-1/message') {
+          return Promise.resolve({
+            data: {
+              items: [
+                {
+                  info: {
+                    id: 'assistant-1',
+                    sessionID: 'sess-1',
+                    role: 'assistant',
+                    finish: 'stop',
+                  },
+                  parts: [
+                    { id: 'text-1', type: 'text', text: 'done' },
+                  ],
+                },
+              ],
+              hasMore: false,
+              nextBefore: null,
+            },
+          });
+        }
+        if (url === '/api/session/status') {
+          return Promise.resolve({ data: { 'sess-1': { type: 'idle' } } });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+        onStreamingDone,
+      }));
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+        useSSEOptionsRef.current.onEvent({
+          type: 'message.part.updated',
+          properties: {
+            part: {
+              id: 'tool-1',
+              messageID: 'assistant-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              state: { status: 'running' },
+            },
+          },
+        });
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(refetch).toHaveBeenCalled();
+      expect(onStreamingDone).toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('SessionChat fallback request lifecycle', () => {
+  const finishedPage = { data: { items: [makeFetchedMessage({ id: 'done', role: 'assistant', finish: 'stop' })] } };
+  const emitStatus = (sessionID: string, type: string) => {
+    act(() => useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID, status: { type } } }));
+  };
+  async function mountChat(key?: string) {
+    const view = render(React.createElement(SessionChat, { key, sessionId: 'sess-1', live: true }));
+    await act(async () => {});
+    emitStatus('sess-1', 'busy');
+    return view;
+  }
+  afterEach(() => { vi.useRealTimers(); });
+
+  it.each([false, true])('ignores an old session response after switching (keyed=%s)', async (keyed) => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    const view = await mountChat(keyed ? 'sess-1' : undefined);
+    clientGetMock.mockImplementation((url: string) => url === '/api/session/sess-1/message'
+      ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    view.rerender(React.createElement(SessionChat, { key: keyed ? 'sess-2' : undefined, sessionId: 'sess-2', live: true }));
+    await act(async () => {});
+    emitStatus('sess-2', 'busy');
+    clientGetMock.mockClear();
+    await act(async () => { pending.resolve(finishedPage); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status')).toHaveLength(0);
+  });
+
+  it('ignores the old idle response after a new turn starts in the same batched update', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message')
+      ? Promise.resolve(finishedPage) : url === '/api/session/status' ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    act(() => {
+      useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'idle' } } });
+      useSSEOptionsRef.current.onEvent({ type: 'session.status', properties: { sessionID: 'sess-1', status: { type: 'busy' } } });
+    });
+    await act(async () => { pending.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('ignores an idle response after a newer active tool event', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message')
+      ? Promise.resolve(finishedPage) : url === '/api/session/status' ? pending.promise : Promise.resolve({ data: {} }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    act(() => useSSEOptionsRef.current.onEvent({ type: 'message.part.updated', properties: {
+      part: { id: 'new-tool', messageID: 'new-assistant', sessionID: 'sess-1', type: 'tool', tool: 'bash', state: { status: 'running' } },
+    } }));
+    await act(async () => { pending.resolve({ data: {} }); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+  });
+
+  it('allows only one slow poll and aborts it when the component unmounts', async () => {
+    vi.useFakeTimers();
+    const pending = deferred<any>();
+    const view = await mountChat();
+    clientGetMock.mockImplementation((url: string) => url.endsWith('/message') ? pending.promise : Promise.resolve({ data: {} }));
+    clientGetMock.mockClear();
+    await act(async () => { await vi.advanceTimersByTimeAsync(15_000); });
+    const requests = clientGetMock.mock.calls.filter(([url]) => url.endsWith('/message'));
+    expect(requests).toHaveLength(1);
+    const signal = requests[0][1].signal as AbortSignal;
+    view.unmount();
+    expect(signal.aborted).toBe(true);
+    await act(async () => { pending.resolve(finishedPage); });
+    expect(clientGetMock.mock.calls.filter(([url]) => url === '/api/session/status')).toHaveLength(0);
+  });
+
+  it('retries after a failed poll and completes on the next idle response', async () => {
+    vi.useFakeTimers();
+    await mountChat();
+    let messageRequests = 0;
+    clientGetMock.mockImplementation((url: string) => {
+      if (!url.endsWith('/message')) return Promise.resolve({ data: {} });
+      messageRequests += 1;
+      return messageRequests === 1 ? Promise.reject(new Error('network down')) : Promise.resolve(finishedPage);
+    });
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(messageRequests).toBe(1);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5_000); });
+    expect(messageRequests).toBe(2);
+    expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+  });
+});
+
+describe('areChatMessagePartsRenderEqual', () => {
+  it('detects streamed text updates even when a later tool part exists', () => {
+    const sharedToolPart = {
+      id: 'tool-1',
+      type: 'tool',
+      tool: 'todo',
+      state: { status: 'running', metadata: { step: 1 } },
+    } as Message['parts'][number];
+
+    expect(areChatMessagePartsRenderEqual(
+      [
+        { id: 'text-1', type: 'text', text: '现在生成简化版 wor' } as Message['parts'][number],
+        sharedToolPart,
+      ],
+      [
+        { id: 'text-1', type: 'text', text: '现在生成简化版 workflow.json' } as Message['parts'][number],
+        sharedToolPart,
+      ],
+    )).toBe(false);
+  });
+
+  it('detects top-level part time updates used by reasoning and text parts', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'reason-1',
+          type: 'reasoning',
+          text: '检查上下文',
+          time: { start: 1_000 },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'reason-1',
+          type: 'reasoning',
+          text: '检查上下文',
+          time: { start: 1_000, end: 2_500 },
+        } as Message['parts'][number],
+      ],
+    )).toBe(false);
+  });
+
+  it('keeps skipping rerenders when semantically identical parts are recreated', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'question',
+          state: { status: 'completed', metadata: { label: 'done' } },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'tool-1',
+          type: 'tool',
+          tool: 'question',
+          state: { status: 'completed', metadata: { label: 'done' } },
+        } as Message['parts'][number],
+      ],
+    )).toBe(true);
+  });
+
+  it('detects legacy tool payload updates that still drive the UI', () => {
+    expect(areChatMessagePartsRenderEqual(
+      [
+        {
+          id: 'tool-call-1',
+          type: 'toolCall',
+          toolCall: {
+            id: 'call-1',
+            name: 'question',
+            params: { prompt: 'first' },
+          },
+        } as Message['parts'][number],
+      ],
+      [
+        {
+          id: 'tool-call-1',
+          type: 'toolCall',
+          toolCall: {
+            id: 'call-1',
+            name: 'question',
+            params: { prompt: 'updated' },
+          },
+        } as Message['parts'][number],
+      ],
+    )).toBe(false);
+  });
+});
+
+it('uses an authorized transport with native messages and restores failed drafts', async () => {
+  const send = vi.fn().mockRejectedValueOnce(new Error('offline')).mockResolvedValueOnce(undefined);
+  const messages: Message[] = [{ id: 'answer', sessionID: '', role: 'assistant', timestamp: 0, finish: 'stop', parts: [{ id: 'text', type: 'text', text: 'Audit result: seven findings' }] }];
+  const view = render(React.createElement(SessionChat, { transport: { messages, send, disabled: true } }));
+  expect(await screen.findByText('Audit result: seven findings')).toBeVisible();
+  view.rerender(React.createElement(SessionChat, { transport: { messages, send } }));
+  const input = screen.getByPlaceholderText('请输入消息');
+  await userEvent.type(input, 'explain{enter}');
+  await waitFor(() => expect(input).toHaveValue('explain'));
+  expect(send).toHaveBeenCalledWith('explain');
+  await userEvent.type(input, '{enter}');
+  await waitFor(() => expect(input).toHaveValue(''));
+  expect(send).toHaveBeenCalledTimes(2);
+});
+
+it('scrolls top content with the conversation and places the welcome after it', async () => {
+  const top = React.createElement('div', { 'data-testid': 'run-record' }, 'execution record');
+  const welcome = React.createElement('p', null, 'ask about the audit');
+  const view = render(React.createElement(SessionChat, {
+    transport: { messages: [], send: vi.fn() }, conversationTopSlot: top, welcomeContent: welcome,
+  }));
+  const record = screen.getByTestId('run-record');
+  const prompt = screen.getByText('ask about the audit');
+  expect(record.compareDocumentPosition(prompt) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  // Without top content the welcome fills the view; below it, it only follows the record.
+  expect(prompt.parentElement).not.toHaveStyle({ minHeight: '100%' });
+  expect(record.parentElement).toBe(prompt.parentElement?.parentElement);
+
+  view.rerender(React.createElement(SessionChat, { transport: { messages: [], send: vi.fn() }, conversationTopSlot: top }));
+  expect(screen.getByTestId('run-record')).toBeVisible();
+  expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
+
+  const answer: Message[] = [{ id: 'a', sessionID: '', role: 'assistant', timestamp: 0, finish: 'stop', parts: [{ id: 't', type: 'text', text: 'seven findings' }] }];
+  view.rerender(React.createElement(SessionChat, { transport: { messages: answer, send: vi.fn() }, conversationTopSlot: top }));
+  const reply = await screen.findByText('seven findings');
+  expect(screen.getByTestId('run-record').compareDocumentPosition(reply) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it('keeps a task draft when its native session arrives and after reopening', async () => {
+  const draftKey = 'audit:task-draft';
+  const transport = { send: vi.fn() };
+  const view = render(React.createElement(SessionChat, { draftKey, transport }));
+  await userEvent.type(screen.getByPlaceholderText('请输入消息'), 'pending question');
+  view.rerender(React.createElement(SessionChat, { draftKey, sessionId: 'native-audit', transport }));
+  expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('pending question');
+  view.unmount();
+  render(React.createElement(SessionChat, { draftKey, sessionId: 'native-audit', transport }));
+  expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('pending question');
+});
+
+describe('process duration across model/tool boundaries', () => {
+  const done = { id: 'done', type: 'tool', tool: 'read', state: {
+    status: 'completed', input: {}, output: 'ok', time: { start: 0, end: 5_000 },
+  } } as Message['parts'][number];
+  const marker = { id: 'model', type: 'step-start', time: { start: 20_000 } } as Message['parts'][number];
+
+  it.each(['pending', 'between-rounds', 'parallel', 'retry'] as const)('keeps ticking during %s', (scenario) => {
+    vi.useFakeTimers();
+    vi.setSystemTime(22_000);
+    try {
+      const extra: Message['parts'] = scenario === 'pending'
+        ? [marker, { id: 'pending', type: 'tool', tool: 'read', state: { status: 'pending', input: {} } }]
+        : scenario === 'between-rounds' ? [marker]
+          : scenario === 'retry' ? [{ ...marker, time: { start: 20_000, end: 21_000 } }]
+          : [
+            { id: 'running', type: 'tool', tool: 'read', state: { status: 'running', input: {}, time: { start: 20_000 } } },
+            { ...done, id: 'finished-first', state: { ...done.state!, time: { start: 20_000, end: 21_000 } } },
+          ];
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({ role: 'assistant', parts: [done, ...extra] }),
+        isActive: true, collapseIntermediateSteps: true,
+      }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 22s');
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 32s');
+      expect(screen.getByText(`查看 ${scenario === 'pending' ? 2 : scenario === 'parallel' ? 3 : 1} 个步骤`)).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('keeps final output timing after completion and remount', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(25_000);
+    try {
+      const output = { id: 'output', type: 'text', text: '最终回答', time: { start: 22_000 } } as Message['parts'][number];
+      const message = makeMessage({ role: 'assistant', parts: [done, marker, output] });
+      const mounted = render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 25s');
+      const completed = { ...message, finish: 'stop', parts: [done,
+        { ...marker, time: { start: 20_000, end: 25_000 } },
+        { ...output, time: { start: 22_000, end: 25_000 } },
+      ] };
+      mounted.rerender(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
+      act(() => vi.advanceTimersByTime(10_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 25s');
+      mounted.unmount();
+      render(React.createElement(ChatMessageBubble, { message: completed, isActive: false, collapseIntermediateSteps: true }));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 25s');
+      expect(screen.getByText('查看 1 个步骤')).toBeInTheDocument();
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('includes earlier rounds while active and ignores incomplete records after completion', () => {
+    const parts = [
+      { ...marker, id: 'old-model', messageID: 'old', time: { start: 0 } },
+      { ...done, id: 'old-tool', messageID: 'old', state: { status: 'running', time: { start: 0 } } },
+      { ...marker, messageID: 'new' },
+      { ...done, messageID: 'new' },
+    ] as Message['parts'];
+    expect(getProcessGroupDurationMs(parts, 22_000)).toBe(22_000);
+    expect(getProcessGroupDurationMs(parts.slice(0, 2))).toBeNull();
+  });
+
+  it('keeps a merged next round active before any visible output arrives', () => {
+    const merged = mergeConsecutiveAssistantMessages([
+      makeMessage({ id: 'old', role: 'assistant', finish: 'tool-calls', parts: [done] }),
+      makeMessage({ id: 'new', role: 'assistant', parts: [marker] }),
+    ]);
+    const items = buildChatTimelineItems({ messages: merged, skipIndices: new Set(), isStreaming: true });
+    expect(items).toHaveLength(1);
+    expect(items[0].isActive).toBe(true);
+  });
+
+  it('preserves the initial loading state and hides empty completed timing-only messages', () => {
+    const message = makeMessage({ role: 'assistant', parts: [marker] });
+    render(React.createElement(ChatMessageBubble, { message, isActive: true, collapseIntermediateSteps: true }));
+    expect(screen.getByLabelText('思考中...')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-process-group')).not.toBeInTheDocument();
+    expect(shouldRenderMessage({ ...message, finish: 'stop' }, { isActive: false })).toBe(false);
+  });
+
+  it('shows cumulative elapsed time across a visible question boundary and only ticks the last group', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(31_000);
+    try {
+      const props = {
+        message: makeMessage({ role: 'assistant', parts: [
+          { ...marker, id: 'model-before', time: { start: 1_000, end: 6_000 } },
+          { ...done, state: { ...done.state!, time: { start: 1_000, end: 6_000 } } },
+          { id: 'question', type: 'tool', tool: 'question', callID: 'question-call', state: { status: 'running', input: {} } },
+          { ...marker, time: { start: 21_000, end: 24_000 } },
+          { ...done, id: 'second-tool', state: { ...done.state!, time: { start: 23_000, end: 25_000 } } },
+        ] }),
+        pendingQuestions: { 'question-call': { requestId: 'req', questions: [{ id: 'scope', type: 'choice', question: '选择范围', options: [{ label: '全部' }] }] } },
+        isActive: false, collapseIntermediateSteps: true,
+      };
+      const view = render(React.createElement(ChatMessageBubble, props));
+      const durations = screen.getAllByTestId('chat-process-duration');
+      expect(durations).toHaveLength(2);
+      expect(durations[0]).toHaveTextContent('已处理 5s');
+      expect(durations[1]).toHaveTextContent('已处理 24s');
+      view.rerender(React.createElement(ChatMessageBubble, { ...props, isActive: true }));
+      act(() => vi.advanceTimersByTime(5_000));
+      expect(durations[0]).toHaveTextContent('已处理 5s');
+      expect(durations[1]).toHaveTextContent('已处理 35s');
+    } finally { vi.useRealTimers(); }
+  });
+
+  it('includes final output and gaps in completed legacy messages', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({ role: 'assistant', finish: 'stop', parts: [done,
+        { id: 'legacy-output', type: 'text', text: '完成', time: { start: 20_000, end: 30_000 } },
+      ] }), isActive: false, collapseIntermediateSteps: true,
+    }));
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 30s');
+  });
+
+  it('includes a real gap without double counting model/tool overlap', () => {
+    expect(getProcessGroupDurationMs([
+      { ...marker, time: { start: 0, end: 5_000 } }, done,
+      { ...marker, id: 'next', time: { start: 20_000, end: 22_000 } },
+    ])).toBe(22_000);
+  });
+});
+
+describe('agent communication', () => {
+  const incoming = {
+    id: 'agent-report', sessionID: 'sess-1', role: 'user', agent: 'rex', timestamp: 1,
+    parts: [{ id: 'report-text', type: 'text', synthetic: true,
+      text: 'internal source and guidance',
+      metadata: { displayText: 'Halfway through the investigation', communication: {
+        source_type: 'agent', source_agent: 'explore', source_session_id: 'child-1',
+      } },
+    }],
+  } as Message;
+
+  it.each([
+    ['rex-junior', 'rex', 'Rex-junior'],
+    ['rex', 'rex-junior', 'Rex'],
+    ['explore', 'librarian', 'Explore'],
+  ])('keeps %s → %s separate when the message part arrives before its role', (source, target, label) => {
+    const report = {
+      ...incoming, role: 'assistant', agent: target,
+      parts: incoming.parts.map(part => ({ ...part, metadata: {
+        ...part.metadata, communication: { ...part.metadata?.communication, source_agent: source },
+      } })),
+    } as Message;
+    const ordinary = { ...incoming, id: 'before', role: 'assistant', agent: target,
+      parts: [{ id: 'ordinary', type: 'text', text: 'Working on the task' }],
+    } as Message;
+    const merged = mergeConsecutiveAssistantMessages([ordinary, report, { ...ordinary, id: 'after' }]);
+    expect(merged).toHaveLength(3);
+    const { rerender } = render(React.createElement(ChatMessageBubble, { message: merged[1] }));
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    rerender(React.createElement(ChatMessageBubble, { message: { ...report, role: 'user' } }));
+    expect(screen.getByText(label)).toBeInTheDocument();
+  });
+
+  it('renders the sender and display text without user-edit or regeneration actions', () => {
+    render(React.createElement(ChatMessageBubble, { message: incoming, showActions: true }));
+    expect(screen.getByText('Explore')).toBeInTheDocument();
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    expect(screen.queryByText('internal source and guidance')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.regenerate' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'chat.edit' })).not.toBeInTheDocument();
+  });
+
+  it('keeps agent communication visible in the full chat while hiding internal reminders', () => {
+    const previous = useSessionMessagesMock();
+    useSessionMessagesMock.mockReturnValue({ ...previous, messages: [incoming, {
+      ...incoming, id: 'reminder', parts: [{ id: 'internal', type: 'text', synthetic: true, text: 'hidden reminder' }],
+    }] });
+    render(React.createElement(SessionChat, { sessionId: 'sess-1', hideInput: true }));
+    expect(screen.getByText('Halfway through the investigation')).toBeInTheDocument();
+    expect(screen.queryByText('hidden reminder')).not.toBeInTheDocument();
+  });
+});
+
+describe('ChatMessageBubble without its sender frame', () => {
+  it('renders only the message body when the caller draws the sender', () => {
+    const message = {
+      id: 'msg-bare',
+      sessionID: 'sess-1',
+      role: 'assistant',
+      agent: 'rex',
+      timestamp: Date.now(),
+      finish: 'stop',
+      parts: [
+        { id: 'tool-read', sessionID: 'sess-1', type: 'tool', tool: 'read', state: { status: 'completed', input: { filePath: 'app.py' }, output: 'ok' } },
+        { id: 'text-answer', sessionID: 'sess-1', type: 'text', text: 'Threat model submitted.' },
+      ],
+    } as any;
+    // The same message object across renders: switching the frame must not be skipped by the memo.
+    const { container, rerender } = render(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    expect(screen.getByText('Rex')).toBeInTheDocument();
+    expect(container.querySelector('.rounded-full.bg-red-600')).not.toBeNull();
+
+    rerender(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true, bare: true }));
+    expect(screen.getByText('Threat model submitted.')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-group')).toBeInTheDocument();
+    expect(screen.queryByText('Rex')).toBeNull();
+    expect(container.querySelector('.rounded-full.bg-red-600')).toBeNull();
+
+    rerender(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true }));
+    expect(screen.getByText('Rex')).toBeInTheDocument();
+  });
+});

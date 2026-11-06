@@ -1,0 +1,105 @@
+"""
+Shared fixtures for server route tests.
+The isolation (isolated_env) is now provided by tests/server/conftest.py.
+This file only provides route-specific helpers: client, mock_workspace, session_id,
+recording_webhook_store.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import AsyncGenerator
+
+import pytest
+from httpx import AsyncClient, ASGITransport
+
+
+@pytest.fixture
+async def client() -> AsyncGenerator[AsyncClient, None]:
+    """Async HTTP test client for the FastAPI app."""
+    from aegisops.server.app import app
+    transport = ASGITransport(app=app)
+    headers = {"Authorization": "Bearer abc123", "User-Agent": "curl/8.0"}
+    async with AsyncClient(
+        transport=transport,
+        base_url="http://test",
+        headers=headers,
+    ) as ac:
+        yield ac
+
+
+@pytest.fixture(autouse=True)
+def _route_test_api_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide a valid API token for route tests."""
+    from aegisops.server import auth as auth_module
+
+    class SecretManagerStub:
+        def __init__(self, values: dict[str, str]):
+            self._values = values
+
+        def get(self, key: str):
+            return self._values.get(key)
+
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: SecretManagerStub({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+
+
+@pytest.fixture
+def mock_workspace(tmp_path: Path) -> Path:
+    """Patch WorkspaceManager root to a temp directory."""
+    ws_root = tmp_path / "workspace"
+    ws_root.mkdir()
+    (ws_root / "README.md").write_text("# Test workspace\n")
+    subdir = ws_root / "subdir"
+    subdir.mkdir()
+    (subdir / "file.txt").write_text("hello\n")
+
+    from aegisops.workspace.manager import WorkspaceManager
+
+    original_instance = WorkspaceManager._instance
+    manager = WorkspaceManager()
+    manager._workspace_dir = ws_root
+    manager._dirs_ensured = True
+    WorkspaceManager._instance = manager
+
+    yield ws_root
+
+    WorkspaceManager._instance = original_instance
+
+
+@pytest.fixture
+async def session_id(client: AsyncClient) -> str:
+    resp = await client.post("/api/session", json={"title": "fixture-session"})
+    assert resp.status_code == 200, resp.text
+    return resp.json()["id"]
+
+
+@pytest.fixture
+def recording_webhook_store(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[str, str]]:
+    """A workflow store that records webhook deliveries, as a backend that keeps them would.
+
+    The store shipped here records none, so every delivery runs; the webhook
+    route still answers a replay the store recognises as a duplicate, and
+    releases the claim of a delivery refused before it ran.  Returns what is
+    recorded: key -> (delivery id, claim token).
+    """
+    from aegisops.workflow.store import WorkflowStore
+
+    recorded: dict[str, tuple[str, str]] = {}
+
+    async def _claim(key: str, delivery_id: str, window_s: float, claim_token: str = "") -> str | None:
+        if key in recorded:
+            return recorded[key][0]
+        recorded[key] = (delivery_id, claim_token)
+        return None
+
+    async def _release(key: str, claim_token: str) -> None:
+        if key in recorded and recorded[key][1] == claim_token:
+            del recorded[key]
+
+    monkeypatch.setattr(WorkflowStore, "claim_webhook_delivery", staticmethod(_claim))
+    monkeypatch.setattr(WorkflowStore, "release_webhook_delivery", staticmethod(_release))
+    return recorded

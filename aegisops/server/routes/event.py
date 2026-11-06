@@ -1,0 +1,696 @@
+"""
+Event routes for Server-Sent Events (SSE)
+
+Compatible with AegisOps TypeScript API.
+Provides real-time event streaming to TUI clients.
+
+AegisOps expects GlobalEvent format:
+{
+    "directory": string,  // Project directory
+    "payload": Event      // The actual event
+}
+"""
+
+import asyncio
+import json
+import os
+from collections import deque
+from typing import AsyncGenerator, Optional, TYPE_CHECKING, cast
+from datetime import datetime
+
+from fastapi import APIRouter, Request
+from fastapi.responses import StreamingResponse
+
+from aegisops.auth.context import API_TOKEN_SERVICE_USER_ID, get_current_auth_user
+from aegisops.server.auth import require_user
+from aegisops.utils.log import Log
+from aegisops.utils.id import Identifier
+
+if TYPE_CHECKING:
+    from aegisops.auth.context import AuthUser
+    from aegisops.session.session import SessionInfo
+
+
+router = APIRouter()
+log = Log.create(service="event-routes")
+
+RUNTIME_EVENT_PREFIXES = (
+    "runtime.",
+    "turn.",
+    "context.",
+    "permission.",
+)
+# Client-control commands published through /tui/*. Their properties are
+# copied from the request body, so a sessionID inside them is caller-chosen
+# data, not a routing key.
+CONTROL_EVENT_PREFIXES = ("tui.",)
+EVENT_QUEUE_MAXSIZE = max(100, int(os.getenv("AEGISOPS_EVENT_QUEUE_MAXSIZE", "1000")))
+EVENT_QUEUE_DROP_TO = max(0, min(
+    EVENT_QUEUE_MAXSIZE - 1,
+    int(os.getenv("AEGISOPS_EVENT_QUEUE_DROP_TO", str(EVENT_QUEUE_MAXSIZE // 2))),
+))
+EVENT_QUEUE_COALESCE_AT = max(1, min(
+    EVENT_QUEUE_MAXSIZE,
+    int(os.getenv("AEGISOPS_EVENT_QUEUE_COALESCE_AT", str(min(EVENT_QUEUE_MAXSIZE, 64)))),
+))
+
+
+# Current directory context for SSE events
+_current_directory: str = os.getcwd()
+
+
+def _is_control_event(event: dict) -> bool:
+    event_type = event.get("type")
+    return isinstance(event_type, str) and event_type.startswith(CONTROL_EVENT_PREFIXES)
+
+
+def _event_session_id(event: dict) -> Optional[str]:
+    """Extract the session id from the event shapes emitted by the runtime."""
+    properties = event.get("properties")
+    if not isinstance(properties, dict):
+        return None
+
+    for key in ("sessionID", "session_id"):
+        value = properties.get(key)
+        if isinstance(value, str) and value:
+            return value
+
+    for container_name in ("part", "info"):
+        container = properties.get(container_name)
+        if not isinstance(container, dict):
+            continue
+        for key in ("sessionID", "session_id"):
+            value = container.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    event_type = event.get("type")
+    runtime_type = properties.get("runtimeType")
+    semantic_type = runtime_type if event_type == "runtime.event" else event_type
+    if isinstance(semantic_type, str) and semantic_type.startswith("session."):
+        value = properties.get("id")
+        if isinstance(value, str) and value:
+            return value
+        info = properties.get("info")
+        if isinstance(info, dict):
+            value = info.get("id")
+            if isinstance(value, str) and value:
+                return value
+    return None
+
+
+async def _get_event_session(session_id: str) -> Optional["SessionInfo"]:
+    """Load a session without inheriting the publisher's auth context."""
+    from aegisops.auth.context import reset_current_auth_user, set_current_auth_user
+    from aegisops.session.session import Session, SessionInfo
+    from aegisops.storage.storage import Storage
+
+    token = set_current_auth_user(None)
+    try:
+        session = await Session.get_by_id(session_id)
+        if session is not None:
+            return session
+
+        cached_sessions = getattr(Session, "_all_sessions_cache", None) or []
+        cached = next((item for item in cached_sessions if item.id == session_id), None)
+        if cached is not None:
+            return cached
+
+        for key in await Storage.list_keys(prefix="session:"):
+            if key.endswith(f":{session_id}"):
+                return await Storage.get(key, SessionInfo)
+        return None
+    finally:
+        reset_current_auth_user(token)
+
+
+def _is_actor_event_recipient(user: "AuthUser", actor: Optional["AuthUser"]) -> bool:
+    """Whether a subscriber may receive a non-session event.
+
+    Mirrors ``SessionPolicy``: a user's own events stay with that user, while
+    events with no user in context or from the API-token service identity
+    are system-owned and go to admins (the service identity is admin too).
+    """
+    if actor is None or actor.id == API_TOKEN_SERVICE_USER_ID:
+        return user.role == "admin"
+    return user.id == actor.id
+
+
+def _snapshot_key(event: dict) -> Optional[tuple[str, str, str]]:
+    """Return the identity of a coalescible accumulated-text snapshot."""
+    if event.get("type") != "message.part.updated":
+        return None
+    properties = event.get("properties")
+    part = properties.get("part") if isinstance(properties, dict) else None
+    if not isinstance(part, dict) or part.get("type") not in {"text", "reasoning", "thinking"}:
+        return None
+    session_id = part.get("sessionID")
+    message_id = part.get("messageID")
+    part_id = part.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(message_id, str) or not message_id:
+        return None
+    if not isinstance(part_id, str) or not part_id:
+        return None
+    return session_id, message_id, part_id
+
+
+def _merge_snapshots(previous: dict, current: dict) -> dict:
+    """Keep the latest full part while preserving all unconsumed deltas."""
+    previous_properties = previous.get("properties")
+    current_properties = current.get("properties")
+    if not isinstance(previous_properties, dict) or not isinstance(current_properties, dict):
+        return current
+
+    previous_delta = previous_properties.get("delta")
+    current_delta = current_properties.get("delta")
+    if not isinstance(previous_delta, str):
+        return current
+
+    merged_properties = dict(current_properties)
+    merged_properties["delta"] = previous_delta + (current_delta if isinstance(current_delta, str) else "")
+    return {**current, "properties": merged_properties}
+
+
+class EventQueue(asyncio.Queue[dict]):
+    """Queue with slow-client compaction for accumulated part snapshots."""
+
+    def __init__(self, maxsize: int = 0) -> None:
+        super().__init__(maxsize=maxsize)
+        self._pending_drop_count = 0
+
+    def _pending_events(self) -> deque[dict]:
+        return cast(deque[dict], self.__dict__["_queue"])
+
+    def coalesce_tail_snapshot(self, event: dict) -> bool:
+        """Merge only with the immediately preceding snapshot.
+
+        Control events form an ordering barrier: snapshots on opposite sides of
+        one must remain separate even while a client is backpressured.
+        """
+        key = _snapshot_key(event)
+        pending = self._pending_events()
+        if key is None or not pending:
+            return False
+        queued = pending[-1]
+        if _snapshot_key(queued) != key:
+            return False
+        pending[-1] = _merge_snapshots(queued, event)
+        return True
+
+    def drop_snapshots_until(self, target_size: int) -> int:
+        pending = self._pending_events()
+        dropped = 0
+        while len(pending) > target_size:
+            snapshot_index = next(
+                (index for index, queued in enumerate(pending) if _snapshot_key(queued) is not None),
+                None,
+            )
+            if snapshot_index is None:
+                break
+            del pending[snapshot_index]
+            dropped += 1
+        return dropped
+
+    def report_dropped(self, count: int) -> None:
+        """Emit a recovery marker now or defer it until capacity is freed."""
+        if count <= 0:
+            return
+        self._pending_drop_count += count
+        self._flush_drop_marker()
+
+    def _flush_drop_marker(self) -> None:
+        if self._pending_drop_count <= 0 or self.full():
+            return
+        dropped = self._pending_drop_count
+        self._pending_drop_count = 0
+        super().put_nowait(create_event("server.events_dropped", {
+            "dropped": dropped,
+            "reason": "client_backpressure",
+        }))
+
+    async def get(self) -> dict:
+        event = await super().get()
+        # A queue containing only control events has no safe item to evict for
+        # a marker. Once the client consumes one, append the deferred marker
+        # without sacrificing those control events.
+        self._flush_drop_marker()
+        return event
+
+
+def set_event_directory(directory: str):
+    """Set the current directory for SSE events"""
+    global _current_directory
+    _current_directory = directory
+
+
+def get_event_directory() -> str:
+    """Get the current directory for SSE events"""
+    return _current_directory
+
+
+# Per-subscriber event routing for SSE clients
+class EventBroadcaster:
+    """Route events to the connected SSE clients entitled to them.
+
+    There is no broadcast-to-everyone mode; see ``publish`` for the rules.
+    """
+    
+    _instance: Optional["EventBroadcaster"] = None
+    
+    def __init__(
+        self,
+        queue_maxsize: int = EVENT_QUEUE_MAXSIZE,
+        queue_drop_to: Optional[int] = None,
+        queue_coalesce_at: Optional[int] = None,
+    ) -> None:
+        self._clients: dict[EventQueue, "AuthUser"] = {}
+        self._lock = asyncio.Lock()
+        self._queue_maxsize = max(1, queue_maxsize)
+        self._queue_drop_to = max(
+            0,
+            min(
+                self._queue_maxsize - 1,
+                EVENT_QUEUE_DROP_TO if queue_drop_to is None else queue_drop_to,
+            ),
+        )
+        self._queue_coalesce_at = max(
+            1,
+            min(
+                self._queue_maxsize,
+                EVENT_QUEUE_COALESCE_AT if queue_coalesce_at is None else queue_coalesce_at,
+            ),
+        )
+    
+    @classmethod
+    def get(cls) -> "EventBroadcaster":
+        """Get singleton instance"""
+        if cls._instance is None:
+            cls._instance = EventBroadcaster()
+        return cls._instance
+    
+    async def subscribe(self, user: "AuthUser") -> EventQueue:
+        """Subscribe a new client on behalf of an authenticated user"""
+        if user is None:
+            raise ValueError("SSE subscribers must be authenticated")
+        queue = EventQueue(maxsize=self._queue_maxsize)
+        async with self._lock:
+            self._clients[queue] = user
+        return queue
+    
+    async def unsubscribe(self, queue: EventQueue) -> None:
+        """Unsubscribe a client"""
+        async with self._lock:
+            self._clients.pop(queue, None)
+    
+    async def publish(self, event: dict) -> None:
+        """Deliver an event only to the subscribers entitled to it.
+
+        - Events tied to a session go to users who can read that session.
+        - Other events go to every connection of the user whose request or
+          run published them (the auth user in the publisher's context).
+        - Events published with no user in context (file watchers,
+          schedulers) or by the API-token service identity go to admins.
+        - ``session.deleted`` for a row that is already gone goes to the
+          deleting user (as above) and to admins.
+        - Client-control events (``tui.*``) always follow the publisher rules
+          above, even when their properties carry a sessionID.
+        """
+        async with self._lock:
+            clients = list(self._clients.items())
+
+        session_id = None if _is_control_event(event) else _event_session_id(event)
+        if not session_id:
+            actor = get_current_auth_user()
+            for queue, user in clients:
+                if _is_actor_event_recipient(user, actor):
+                    self._publish_to_queue(queue, event)
+            return
+
+        try:
+            session = await _get_event_session(session_id)
+        except Exception as exc:
+            log.warning("event.session_access_lookup_failed", {
+                "session_id": session_id,
+                "event_type": event.get("type"),
+                "error": str(exc),
+            })
+            return
+        if session is None:
+            if event.get("type") == "session.deleted":
+                # The row is already gone by the time the lifecycle bridge
+                # forwards session.deleted, so there is nothing to filter on.
+                # The payload is just the id; it still never goes to every
+                # connected user.
+                actor = get_current_auth_user()
+                for queue, user in clients:
+                    if user.role == "admin" or _is_actor_event_recipient(user, actor):
+                        self._publish_to_queue(queue, event)
+                return
+            log.debug("event.session_access_missing", {
+                "session_id": session_id,
+                "event_type": event.get("type"),
+            })
+            return
+
+        from aegisops.session.policy import SessionPolicy
+
+        for queue, user in clients:
+            if SessionPolicy.can_read(session, user):
+                self._publish_to_queue(queue, event)
+
+    def _publish_to_queue(self, queue: EventQueue, event: dict) -> None:
+        # Preserve the event cadence for healthy clients. Once a subscriber is
+        # materially behind, compact only adjacent snapshots for the same part;
+        # this bounds accumulated full-text payloads without crossing control
+        # events or changing their relative order.
+        if (
+            queue.qsize() >= self._queue_coalesce_at
+            and queue.coalesce_tail_snapshot(event)
+        ):
+            return
+
+        try:
+            queue.put_nowait(event)
+            return
+        except asyncio.QueueFull:
+            pass
+
+        is_snapshot = _snapshot_key(event) is not None
+        marker_target = min(self._queue_drop_to, max(0, self._queue_maxsize - 2))
+        dropped = queue.drop_snapshots_until(marker_target)
+
+        if is_snapshot and queue.qsize() > marker_target:
+            # A text snapshot must never evict permission/question/session
+            # control events. If removing older snapshots only leaves room for
+            # the recovery marker, keep that marker and discard this ordinary
+            # snapshot so the client knows it must reconcile over REST.
+            # Include the incoming snapshot itself. If the queue consists only
+            # of control events, defer the marker until the client frees one
+            # slot rather than evicting a permission/question/session event.
+            dropped += 1
+            queue.report_dropped(dropped)
+            log.debug("event.queue.snapshot_dropped", {
+                "queue_size": queue.qsize(),
+                "queue_maxsize": self._queue_maxsize,
+                "event_type": event.get("type"),
+            })
+            return
+        else:
+            while queue.qsize() > marker_target:
+                try:
+                    queue.get_nowait()
+                    dropped += 1
+                except asyncio.QueueEmpty:
+                    break
+
+        reported_drops = 0
+        if dropped > 0 and queue.qsize() <= self._queue_maxsize - 2:
+            queue.report_dropped(dropped)
+            reported_drops = dropped
+
+        try:
+            queue.put_nowait(event)
+        except asyncio.QueueFull:
+            dropped += 1
+
+        if dropped > reported_drops:
+            queue.report_dropped(dropped - reported_drops)
+
+        if dropped > 0:
+            log.debug("event.queue.overflow", {
+                "dropped": dropped,
+                "queue_size": queue.qsize(),
+                "queue_maxsize": self._queue_maxsize,
+                "event_type": event.get("type"),
+            })
+    
+    @property
+    def client_count(self) -> int:
+        """Number of connected clients"""
+        return len(self._clients)
+
+    async def shutdown(self) -> None:
+        """Notify all clients that the server is shutting down, then clear."""
+        shutdown_event = create_event("server.shutting_down", {})
+        async with self._lock:
+            for queue in self._clients:
+                self._publish_to_queue(queue, shutdown_event)
+            self._clients.clear()
+        log.info("event.broadcaster.shutdown", {"clients_notified": True})
+
+
+def create_event(event_type: str, properties: dict = None) -> dict:
+    """
+    Create an event object in direct Event format.
+    
+    TUI SDK expects direct Event format for /event endpoint:
+    {
+        "type": string,
+        "properties": object
+    }
+    """
+    return {
+        "type": event_type,
+        "properties": properties or {},
+    }
+
+
+def wrap_global_event(event: dict, directory: str = None) -> dict:
+    """
+    Wrap an event in GlobalEvent format for /global/event endpoint.
+    
+    GlobalEvent format:
+    {
+        "directory": string,
+        "payload": Event
+    }
+    """
+    return {
+        "directory": directory or get_event_directory(),
+        "payload": event,
+    }
+
+
+def is_runtime_event(event_type: str) -> bool:
+    return event_type == "runtime.event" or any(
+        event_type.startswith(prefix) for prefix in RUNTIME_EVENT_PREFIXES
+    )
+
+
+def create_runtime_event(runtime_type: str, properties: dict = None) -> dict:
+    return create_event("runtime.event", {
+        "runtimeType": runtime_type,
+        **(properties or {}),
+    })
+
+
+async def _session_info_payload(session_id: str) -> Optional[dict]:
+    """Full session in the shape TUI/opencode clients keep in their session list.
+
+    Serialised without a request user (the broadcaster applies per-subscriber
+    read filtering; per-user flags such as canWrite are not meaningful in a
+    broadcast).
+    """
+    session = await _get_event_session(session_id)
+    if session is None:
+        return None
+    from aegisops.auth.context import reset_current_auth_user, set_current_auth_user
+    from aegisops.server.routes.session import _session_to_response
+
+    token = set_current_auth_user(None)
+    try:
+        return _session_to_response(session).model_dump(by_alias=True)
+    except Exception as exc:  # noqa: BLE001 - a lifecycle event must never break the publisher
+        log.warning("event.session_info_payload_failed", {"session_id": session_id, "error": str(exc)})
+        return None
+    finally:
+        reset_current_auth_user(token)
+
+
+async def _with_session_info(event_type: str, properties: Optional[dict]) -> Optional[dict]:
+    """``session.updated`` published as ``{id, status}`` (archive/restore/rename
+    routes) is invisible to TUI clients, which only act on ``properties.info``.
+    Attach the full session while keeping the original keys for WebUI consumers."""
+    if event_type != "session.updated" or not isinstance(properties, dict):
+        return properties
+    if isinstance(properties.get("info"), dict):
+        return properties
+    session_id = properties.get("id")
+    if not isinstance(session_id, str) or not session_id:
+        return properties
+    info = await _session_info_payload(session_id)
+    if info is None:
+        return properties
+    return {**properties, "info": info}
+
+
+_lifecycle_bridge_installed = False
+
+
+def install_session_lifecycle_bridge() -> None:
+    """Forward Bus session lifecycle events to the SSE stream.
+
+    ``Session.create`` / ``Session.delete`` only publish on the in-process Bus;
+    nothing carried them to SSE, so TUI session lists never learned about
+    sessions created or deleted elsewhere (OPS-0255 / OPS-0257). Emitted in the
+    TUI/opencode shape: ``session.updated {info: <full session>}`` (the client
+    inserts unknown ids) and ``session.deleted {info: {id}}``.
+    """
+    global _lifecycle_bridge_installed
+    if _lifecycle_bridge_installed:
+        return
+    _lifecycle_bridge_installed = True
+    from aegisops.bus.bus import Bus
+    from aegisops.bus.events import SessionCreated, SessionDeleted
+
+    async def _on_created(event: dict) -> None:
+        info = (event.get("properties") or {}).get("info") or {}
+        session_id = info.get("id")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        payload = await _session_info_payload(session_id)
+        if payload is None:
+            return
+        await publish_event("session.updated", {"info": payload})
+
+    async def _on_deleted(event: dict) -> None:
+        session_id = (event.get("properties") or {}).get("sessionID")
+        if not isinstance(session_id, str) or not session_id:
+            return
+        await publish_event("session.deleted", {"info": {"id": session_id}})
+
+    Bus.subscribe(SessionCreated, _on_created)
+    Bus.subscribe(SessionDeleted, _on_deleted)
+    log.info("event.session_lifecycle_bridge.installed", {})
+
+
+# Helper to publish events
+async def publish_event(event_type: str, properties: dict = None, directory: str = None):
+    """
+    Publish an event to the SSE clients entitled to it.
+    
+    Recipients are resolved by ``EventBroadcaster.publish``: session readers
+    for session events, otherwise the auth user of the current context (or
+    admins for system-originated events). Nothing is sent to every user.
+    
+    Events are sent in direct Event format (type + properties) for TUI compatibility.
+    The /event endpoint expects direct events, not wrapped in GlobalEvent.
+    """
+    properties = await _with_session_info(event_type, properties)
+    event = create_event(event_type, properties)
+    broadcaster = EventBroadcaster.get()
+    
+    # Debug: 记录事件发布
+    if event_type == "message.part.updated":
+        text_len = properties.get("part", {}).get("text", "") if properties else ""
+        delta = properties.get("delta", "") if properties else ""
+        log.debug("event.publish.part_updated", {
+            "clients": broadcaster.client_count,
+            "text_length": len(text_len) if text_len else 0,
+            "delta_length": len(delta) if delta else 0,
+        })
+    
+    # Send direct event format for /event endpoint compatibility
+    await broadcaster.publish(event)
+    if is_runtime_event(event_type) and event_type != "runtime.event":
+        await broadcaster.publish(create_runtime_event(event_type, properties))
+
+
+async def publish_runtime_event(runtime_type: str, properties: dict = None, directory: str = None):
+    """Publish runtime semantic event on the normalized runtime channel."""
+    broadcaster = EventBroadcaster.get()
+    await broadcaster.publish(create_runtime_event(runtime_type, properties))
+
+
+async def sse_generator(
+    queue: EventQueue,
+    request: Request,
+    directory: str = None,
+) -> AsyncGenerator[str, None]:
+    """
+    Generate SSE events in direct Event format.
+    
+    TUI SDK expects direct Event format:
+    {
+        "type": string,
+        "properties": object
+    }
+    """
+    try:
+        # Send initial connection event in direct Event format
+        init_event = create_event("server.connected", {})
+        yield f"data: {json.dumps(init_event)}\n\n"
+        
+        while True:
+            # Check if client disconnected
+            if await request.is_disconnected():
+                break
+            
+            try:
+                # Wait for event with timeout
+                # Events from publish_event are already in direct Event format
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                yield f"data: {json.dumps(event)}\n\n"
+                if event.get("type") == "server.shutting_down":
+                    break
+            except asyncio.TimeoutError:
+                # Send heartbeat in direct Event format (matches AegisOps)
+                heartbeat = create_event("server.heartbeat", {})
+                yield f"data: {json.dumps(heartbeat)}\n\n"
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await EventBroadcaster.get().unsubscribe(queue)
+
+
+@router.get(
+    "",
+    summary="Subscribe to events",
+    description="Subscribe to server-sent events (SSE) stream"
+)
+async def subscribe_events(request: Request):
+    """
+    Subscribe to SSE event stream
+    
+    Returns:
+        StreamingResponse with SSE events
+    """
+    user = require_user(request)
+    queue = await EventBroadcaster.get().subscribe(user)
+    
+    log.info("event.subscribe", {
+        "clients": EventBroadcaster.get().client_count,
+    })
+    
+    return StreamingResponse(
+        sse_generator(queue, request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        }
+    )
+
+
+# Export for use in other modules
+__all__ = [
+    "router", 
+    "publish_event", 
+    "publish_runtime_event",
+    "EventBroadcaster",
+    "create_event",
+    "create_runtime_event",
+    "wrap_global_event",
+    "is_runtime_event",
+    "set_event_directory",
+    "get_event_directory",
+    "sse_generator",
+]
+
+
+# Wire Bus session lifecycle → SSE as soon as the routes module is loaded (app.py
+# imports it at startup); idempotent, no event loop needed to subscribe.
+install_session_lifecycle_bridge()

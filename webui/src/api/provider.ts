@@ -1,0 +1,367 @@
+import client from './client';
+import type {
+  ProviderCredentials,
+  ProviderCredentialInput,
+  ProviderInfoV2,
+  ModelDefinitionV2,
+  DefaultModelConfig,
+  FallbackModelsConfig,
+  UsageStats,
+  CustomProviderCreate,
+  CustomProviderInfo,
+  APIServiceSummary,
+  CustomModelCreate,
+  CustomModelInfo,
+  ModelSettingV2,
+  CatalogProvider,
+  APIServiceMetadata,
+  ModelDiscoveryResult,
+  ModelImportInput,
+  ModelImportResult,
+  InventoryModelInput,
+  ModelInventoryDraft,
+} from '@/types';
+
+const API_SERVICES_LIST_CACHE_TTL_MS = 5000;
+
+function requestApiServicesList() {
+  return client.get<APIServiceSummary[]>('/api/provider/api-services');
+}
+
+type APIServiceListResponse = Awaited<ReturnType<typeof requestApiServicesList>>;
+
+let apiServicesListInFlight: Promise<APIServiceListResponse> | null = null;
+let apiServicesListInFlightGeneration: number | null = null;
+let apiServicesListCache: { response: APIServiceListResponse; updatedAt: number } | null = null;
+let apiServicesListGeneration = 0;
+
+function cloneApiServicesResponse(response: APIServiceListResponse): APIServiceListResponse {
+  const services = Array.isArray(response.data) ? response.data : [];
+  return {
+    ...response,
+    data: services.map((service) => ({ ...service })),
+  };
+}
+
+function invalidateApiServicesListCache(): void {
+  apiServicesListGeneration += 1;
+  apiServicesListCache = null;
+}
+
+function listApiServicesCached(options: { force?: boolean } = {}) {
+  const useCache = !options.force;
+  if (useCache && apiServicesListCache && Date.now() - apiServicesListCache.updatedAt < API_SERVICES_LIST_CACHE_TTL_MS) {
+    return Promise.resolve(cloneApiServicesResponse(apiServicesListCache.response));
+  }
+  if (
+    useCache
+    && apiServicesListInFlight
+    && apiServicesListInFlightGeneration === apiServicesListGeneration
+  ) {
+    return apiServicesListInFlight.then(cloneApiServicesResponse);
+  }
+
+  if (options.force) {
+    invalidateApiServicesListCache();
+  }
+  const requestGeneration = apiServicesListGeneration;
+  const request = requestApiServicesList()
+    .then((response) => {
+      if (requestGeneration === apiServicesListGeneration) {
+        apiServicesListCache = {
+          response: cloneApiServicesResponse(response),
+          updatedAt: Date.now(),
+        };
+      }
+      return response;
+    })
+    .finally(() => {
+      if (apiServicesListInFlight === request) {
+        apiServicesListInFlight = null;
+        apiServicesListInFlightGeneration = null;
+      }
+    });
+  apiServicesListInFlight = request;
+  apiServicesListInFlightGeneration = requestGeneration;
+
+  return request.then(cloneApiServicesResponse);
+}
+
+// ==================== Provider API (Legacy + Enhanced) ====================
+
+export const providerAPI = {
+  discoverModels: (id: string, credentials: { api_key?: string; base_url?: string } = {}) =>
+    client.post<ModelDiscoveryResult>(`/api/provider/${encodeURIComponent(id)}/discover-models`, credentials),
+
+  importModels: (id: string, models: ModelImportInput[]) =>
+    client.post<ModelImportResult>(`/api/provider/${encodeURIComponent(id)}/import-models`, { models }),
+
+  /** List all providers (returns AegisOps-compatible format) */
+  list: () =>
+    client.get<{ all: ProviderInfoV2[]; default: Record<string, string>; connected: string[] }>('/api/provider'),
+
+  get: (id: string) =>
+    client.get<ProviderInfoV2>(`/api/provider/${encodeURIComponent(id)}`),
+
+  getModels: (id: string) =>
+    client.get<any[]>(`/api/provider/${encodeURIComponent(id)}/models`),
+
+  update: (id: string, data: {
+    api_key?: string;
+    base_url?: string;
+    custom_settings?: Record<string, any>;
+  }) =>
+    client.put(`/api/provider/${encodeURIComponent(id)}`, data),
+
+  test: (id: string) =>
+    client.post(`/api/provider/${encodeURIComponent(id)}/test`),
+
+  getStatistics: (id: string) =>
+    client.get(`/api/provider/${encodeURIComponent(id)}/statistics`),
+
+  getModelInventory: (id: string) => client.get<{ models: InventoryModelInput[] }>(`/api/provider/${encodeURIComponent(id)}/model-inventory`),
+  saveModelInventory: (id: string, draft: ModelInventoryDraft) => client.post<ModelImportResult>(`/api/provider/${encodeURIComponent(id)}/model-inventory`, draft),
+  // Authentication checks can make two bounded upstream requests.
+  checkKey: (id: string, credentials?: { api_key?: string; base_url?: string }) => client.post<{ status: 'valid' | 'invalid' | 'unverified'; code: string }>(`/api/provider/${encodeURIComponent(id)}/check-key`, credentials ?? {}, { timeout: 60_000 }),
+
+  // Credentials management (LLM providers — uses _llm_key convention)
+  getCredentials: (id: string) =>
+    client.get<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/credentials`),
+
+  revealCredentials: (id: string) =>
+    client.post<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/credentials/reveal`),
+
+  setCredentials: (id: string, credentials: ProviderCredentialInput) =>
+    client.post<{ success: boolean; message: string }>(`/api/provider/${encodeURIComponent(id)}/credentials`, credentials),
+
+  // Credentials management (API services — uses _api_key convention)
+  getServiceCredentials: (id: string) =>
+    client.get<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/service-credentials`),
+
+  revealServiceCredentials: (id: string) =>
+    client.post<ProviderCredentials>(`/api/provider/${encodeURIComponent(id)}/service-credentials/reveal`),
+
+  setServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
+    client.post<{ success: boolean; message: string }>(`/api/provider/${encodeURIComponent(id)}/service-credentials`, credentials)
+      .then((response) => {
+        invalidateApiServicesListCache();
+        return response;
+      }),
+
+  configureServiceCredentials: (id: string, credentials: ProviderCredentialInput) =>
+    client.post<{
+      success: boolean; message: string; latency_ms?: number; error?: string;
+    }>(`/api/provider/${encodeURIComponent(id)}/service-credentials/configure`, credentials)
+      .then((response) => {
+        if (response.data.success) {
+          invalidateApiServicesListCache();
+        }
+        return response;
+      }),
+
+  deleteCredentials: (id: string) =>
+    client.delete<{ success: boolean }>(`/api/provider/${encodeURIComponent(id)}/credentials`),
+
+  testCredentials: (id: string, modelId?: string) =>
+    client.post<{
+      success: boolean; message: string; latency_ms?: number;
+      model_count?: number; error?: string;
+      model_id?: string; question?: string; answer?: string;
+    }>(
+      `/api/provider/${encodeURIComponent(id)}/test-credentials`,
+      modelId ? { model_id: modelId } : {}
+    ),
+
+  // API service status (connectivity)
+  listApiServices: (options?: { force?: boolean }) =>
+    listApiServicesCached(options),
+
+  getServiceMetadata: (id: string) =>
+    client.get<APIServiceMetadata>(`/api/provider/${encodeURIComponent(id)}/metadata`),
+
+  updateApiService: (id: string, data: { enabled?: boolean; verify_ssl?: boolean; group?: string | null }) =>
+    client.patch<APIServiceSummary>(`/api/provider/api-services/${encodeURIComponent(id)}`, data)
+      .then((response) => {
+        invalidateApiServicesListCache();
+        return response;
+      }),
+
+  deleteApiService: (id: string) =>
+    client.delete<{ success: boolean }>(`/api/provider/api-services/${encodeURIComponent(id)}`)
+      .then((response) => {
+        invalidateApiServicesListCache();
+        return response;
+      }),
+
+  getApiServiceStatuses: () =>
+    client.get<Record<string, { status: string; message?: string; latency_ms?: number; tool_tested?: string; error?: string; checked_at?: number }>>(
+      '/api/provider/api-services/status'
+    ),
+
+  refreshApiServiceStatuses: () =>
+    client.post<{ statuses: Record<string, any>; refreshed_at: number }>(
+      '/api/provider/api-services/refresh'
+    ).then((response) => {
+      invalidateApiServicesListCache();
+      return response;
+    }),
+
+  getApiServiceStatus: (id: string) =>
+    client.get<{ status: string; message?: string; latency_ms?: number; tool_tested?: string; error?: string; checked_at?: number }>(
+      `/api/provider/${encodeURIComponent(id)}/status`
+    ),
+
+  // API service metadata
+  getMetadata: (id: string) =>
+    client.get<APIServiceMetadata>(`/api/provider/${encodeURIComponent(id)}/metadata`),
+};
+
+// ==================== Provider Catalog API ====================
+
+export const catalogAPI = {
+  /** Get all available provider types with metadata and models */
+  list: () =>
+    client.get<{ providers: CatalogProvider[] }>('/api/provider/catalog'),
+};
+
+// ==================== Model V2 API ====================
+
+export const modelV2API = {
+  /** List model definitions with full metadata */
+  listDefinitions: (options?: { provider?: string; enabled_only?: boolean }) =>
+    client.get<{ models: ModelDefinitionV2[]; total: number }>(
+      '/api/model/v2/definitions',
+      {
+        params: {
+          ...(options?.provider ? { provider: options.provider } : {}),
+          ...(options?.enabled_only ? { enabled_only: true } : {}),
+        },
+      }
+    ),
+
+  /** Get single model definition */
+  getDefinition: (providerId: string, modelId: string) =>
+    client.get<ModelDefinitionV2>(`/api/model/v2/definitions/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
+
+  /** Create or update a model definition (upsert) */
+  createDefinition: (providerId: string, data: CustomModelCreate) =>
+    client.post<CustomModelInfo>(`/api/custom/models/${encodeURIComponent(providerId)}`, data),
+
+  /** Delete model definition */
+  deleteDefinition: (providerId: string, modelId: string) =>
+    client.delete(`/api/model/v2/definitions/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
+};
+
+// ==================== Default Model API ====================
+
+export const defaultModelAPI = {
+  /** Get all default models */
+  getAll: () =>
+    client.get<{ defaults: DefaultModelConfig[] }>('/api/default-model'),
+
+  /** Get default model for a type */
+  get: (modelType: string) =>
+    client.get<DefaultModelConfig>(`/api/default-model/${encodeURIComponent(modelType)}`),
+
+  /**
+   * Get the resolved default LLM model.
+   * Checks both structured default_models.llm and legacy top-level "model" string.
+   */
+  getResolved: () =>
+    client.get<{ provider_id: string; model_id: string }>('/api/default-model/resolved'),
+
+  /** Set default model for a type */
+  set: (modelType: string, providerId: string, modelId: string) =>
+    client.put<DefaultModelConfig>(`/api/default-model/${encodeURIComponent(modelType)}`, {
+      provider_id: providerId,
+      model_id: modelId,
+    }),
+
+  /** Delete default model for a type */
+  delete: (modelType: string) =>
+    client.delete(`/api/default-model/${encodeURIComponent(modelType)}`),
+
+  /** Get the ordered runtime fallback chain used by WebUI Auto sessions. */
+  getFallbacks: () =>
+    client.get<FallbackModelsConfig>('/api/default-model/fallbacks'),
+
+  /** Replace the ordered runtime fallback chain. An empty list clears it. */
+  setFallbacks: (fallbackProviders: FallbackModelsConfig['fallback_providers']) =>
+    client.put<FallbackModelsConfig>('/api/default-model/fallbacks', {
+      fallback_providers: fallbackProviders,
+    }),
+
+};
+
+// ==================== Usage API ====================
+
+export const usageAPI = {
+  /** Get usage statistics */
+  getSummary: (params?: { start_date?: string; end_date?: string; provider_id?: string }) =>
+    client.get<UsageStats>('/api/usage/summary', { params }),
+};
+
+// ==================== Custom Provider API ====================
+
+export const customAPI = {
+  /** List custom providers */
+  listProviders: () =>
+    client.get<CustomProviderInfo[]>('/api/custom/providers'),
+
+  /** Create custom provider */
+  createProvider: (data: CustomProviderCreate) =>
+    client.post<CustomProviderInfo>('/api/custom/providers', data),
+
+  /** Delete custom provider */
+  deleteProvider: (id: string) =>
+    client.delete(`/api/custom/providers/${encodeURIComponent(id)}`),
+
+  /** List custom models for provider */
+  listModels: (providerId: string) =>
+    client.get<CustomModelInfo[]>(`/api/custom/models/${encodeURIComponent(providerId)}`),
+
+  /** Add custom model to provider */
+  createModel: (providerId: string, data: CustomModelCreate) =>
+    client.post<CustomModelInfo>(`/api/custom/models/${encodeURIComponent(providerId)}`, data),
+
+  /** Delete custom model */
+  deleteModel: (providerId: string, modelId: string) =>
+    client.delete(`/api/custom/models/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
+};
+
+// ==================== Model Settings API ====================
+
+export const modelSettingsAPI = {
+  /** Get model settings */
+  get: (providerId: string, modelId: string) =>
+    client.get<ModelSettingV2>(`/api/model/v2/settings/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`),
+
+  /** Update model settings (enable/disable, parameters) */
+  update: (providerId: string, modelId: string, data: { enabled?: boolean; default_parameters?: Record<string, any> }) =>
+    client.put<ModelSettingV2>(`/api/model/v2/settings/${encodeURIComponent(providerId)}/${encodeURIComponent(modelId)}`, data),
+};
+
+// ==================== Provider Category Helpers ====================
+
+const CHINESE_PROVIDERS = new Set([
+  'deepseek', 'volcengine', 'alibaba', 'tencent', 'siliconflow',
+  'moonshot', 'zhipu', 'baichuan', 'minimax', 'yi', 'stepfun',
+  'threatbook',
+]);
+const LOCAL_PROVIDERS = new Set(['ollama', 'local', 'openai-compatible', 'gateway']);
+
+export function getProviderCategory(id: string): 'chinese' | 'international' | 'local' {
+  if (CHINESE_PROVIDERS.has(id)) return 'chinese';
+  if (LOCAL_PROVIDERS.has(id)) return 'local';
+  return 'international';
+}
+
+export function getCategoryLabel(category: string): string {
+  switch (category) {
+    case 'connected': return '已连接';
+    case 'chinese': return '中国 Provider';
+    case 'international': return '国际 Provider';
+    case 'local': return '本地 / 自定义';
+    default: return category;
+  }
+}

@@ -1,0 +1,840 @@
+"""
+Tests for ConfigWriter — aegisops.json provider CRUD.
+
+Covers:
+- ConfigWriter.add_provider / get_provider_raw / remove_provider
+- ConfigWriter.update_provider_field
+- ConfigWriter.add_model / remove_model
+- ConfigWriter.build_provider_config
+- ConfigWriter.list_provider_ids
+- Atomic write safety
+"""
+
+import json
+
+import pytest
+from aegisops.config.config import Config
+
+
+@pytest.fixture
+def temp_project(tmp_path, monkeypatch):
+    """Create an isolated user config directory with a preloaded aegisops.json."""
+    config_dir = tmp_path / "home" / ".aegisops" / "config"
+    config_dir.mkdir(parents=True)
+    monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(config_dir))
+    Config._global_config = None
+    Config._cached_config = None
+    config_file = config_dir / "aegisops.json"
+    config_file.write_text(json.dumps({
+        "provider": {
+            "anthropic": {
+                "npm": "@ai-sdk/anthropic",
+                "options": {
+                    "apiKey": "{secret:anthropic_llm_key}",
+                    "baseURL": "https://api.anthropic.com"
+                },
+                "models": {
+                    "claude-sonnet-4-5": {"name": "Claude Sonnet 4.5"}
+                }
+            }
+        },
+        "mcp": {"test": {"type": "local"}},
+    }, indent=2))
+    return config_dir
+
+
+class TestConfigWriter:
+
+    def test_read_raw(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        data = ConfigWriter._read_raw()
+        assert "provider" in data
+        assert "anthropic" in data["provider"]
+        assert "mcp" in data  # Other sections preserved
+
+    def test_list_provider_ids(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ids = ConfigWriter.list_provider_ids()
+        assert ids == ["anthropic"]
+
+    def test_get_provider_raw(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        raw = ConfigWriter.get_provider_raw("anthropic")
+        assert raw is not None
+        assert raw["npm"] == "@ai-sdk/anthropic"
+        assert raw["options"]["baseURL"] == "https://api.anthropic.com"
+
+    def test_get_provider_raw_nonexistent(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.get_provider_raw("nonexistent") is None
+
+    def test_add_provider(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.add_provider("openai", {
+            "npm": "@ai-sdk/openai",
+            "options": {"apiKey": "{secret:openai_llm_key}", "baseURL": "https://api.openai.com/v1"},
+            "models": {"gpt-4": {"name": "GPT-4"}},
+        })
+
+        ids = ConfigWriter.list_provider_ids()
+        assert "openai" in ids
+        assert "anthropic" in ids  # Still there
+
+        raw = ConfigWriter.get_provider_raw("openai")
+        assert raw["npm"] == "@ai-sdk/openai"
+        assert raw["models"]["gpt-4"]["name"] == "GPT-4"
+
+    def test_add_provider_preserves_other_sections(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.add_provider("google", {
+            "npm": "@ai-sdk/google",
+            "options": {},
+            "models": {},
+        })
+
+        data = ConfigWriter._read_raw()
+        assert "mcp" in data
+        assert data["mcp"]["test"]["type"] == "local"
+
+    def test_remove_provider(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        result = ConfigWriter.remove_provider("anthropic")
+        assert result is True
+        assert ConfigWriter.get_provider_raw("anthropic") is None
+        assert ConfigWriter.list_provider_ids() == []
+
+    def test_remove_provider_nonexistent(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.remove_provider("nonexistent") is False
+
+    def test_remove_provider_preserves_other_sections(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.remove_provider("anthropic")
+        data = ConfigWriter._read_raw()
+        assert "mcp" in data
+
+    def test_update_provider_field(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        result = ConfigWriter.update_provider_field(
+            "anthropic", "options.baseURL", "https://new-url.com"
+        )
+        assert result is True
+
+        raw = ConfigWriter.get_provider_raw("anthropic")
+        assert raw["options"]["baseURL"] == "https://new-url.com"
+        # apiKey should be preserved
+        assert raw["options"]["apiKey"] == "{secret:anthropic_llm_key}"
+
+    def test_update_provider_field_nested_create(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        # Create a new nested path
+        result = ConfigWriter.update_provider_field(
+            "anthropic", "extra.nested.key", "value"
+        )
+        assert result is True
+
+        raw = ConfigWriter.get_provider_raw("anthropic")
+        assert raw["extra"]["nested"]["key"] == "value"
+
+    def test_update_provider_field_nonexistent_provider(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        result = ConfigWriter.update_provider_field(
+            "nonexistent", "options.baseURL", "test"
+        )
+        assert result is False
+
+    def test_add_model(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        result = ConfigWriter.add_model(
+            "anthropic", "claude-opus-4", {"name": "Claude Opus 4"}
+        )
+        assert result is True
+
+        raw = ConfigWriter.get_provider_raw("anthropic")
+        assert "claude-opus-4" in raw["models"]
+        assert raw["models"]["claude-opus-4"]["name"] == "Claude Opus 4"
+        # Original model still there
+        assert "claude-sonnet-4-5" in raw["models"]
+
+    def test_add_model_nonexistent_provider(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.add_model("nonexistent", "model", {}) is False
+
+    def test_remove_model(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        result = ConfigWriter.remove_model("anthropic", "claude-sonnet-4-5")
+        assert result is True
+
+        raw = ConfigWriter.get_provider_raw("anthropic")
+        assert "claude-sonnet-4-5" not in raw["models"]
+
+    def test_remove_model_nonexistent(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.remove_model("anthropic", "nonexistent") is False
+
+    def test_build_provider_config(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        config = ConfigWriter.build_provider_config(
+            "deepseek",
+            npm="@ai-sdk/openai-compatible",
+            base_url="https://api.deepseek.com/v1",
+            models={"deepseek-v4-flash": {"name": "DeepSeek V4 Flash"}},
+        )
+
+        assert config["npm"] == "@ai-sdk/openai-compatible"
+        assert config["options"]["apiKey"] == "{secret:deepseek_llm_key}"
+        assert config["options"]["baseURL"] == "https://api.deepseek.com/v1"
+        assert config["models"]["deepseek-v4-flash"]["name"] == "DeepSeek V4 Flash"
+
+    def test_build_provider_config_no_url(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        config = ConfigWriter.build_provider_config("test")
+        assert "baseURL" not in config["options"]
+        assert config["options"]["apiKey"] == "{secret:test_llm_key}"
+
+    def test_atomic_write_no_corruption(self, temp_project):
+        """Verify the file is valid JSON after multiple operations."""
+        from aegisops.config.config_writer import ConfigWriter
+
+        for i in range(10):
+            ConfigWriter.add_provider(f"provider-{i}", {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {},
+                "models": {},
+            })
+
+        # Read raw and verify
+        data = ConfigWriter._read_raw()
+        assert len(data["provider"]) == 11  # 10 new + 1 original
+
+        for i in range(5):
+            ConfigWriter.remove_provider(f"provider-{i}")
+
+        data = ConfigWriter._read_raw()
+        assert len(data["provider"]) == 6
+
+    def test_empty_config_file(self, tmp_path, monkeypatch):
+        """ConfigWriter handles missing or empty config gracefully."""
+        config_dir = tmp_path / "home" / ".aegisops" / "config"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(config_dir))
+        Config._global_config = None
+        Config._cached_config = None
+        (config_dir / "aegisops.json").write_text("{}")
+
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.list_provider_ids() == []
+
+        ConfigWriter.add_provider("test", {"npm": "x", "options": {}, "models": {}})
+        assert ConfigWriter.list_provider_ids() == ["test"]
+
+    def test_no_config_file(self, tmp_path, monkeypatch):
+        """ConfigWriter creates aegisops.json if it doesn't exist."""
+        config_dir = tmp_path / "home" / ".aegisops" / "config"
+        config_dir.mkdir(parents=True)
+        monkeypatch.setenv("AEGISOPS_CONFIG_DIR", str(config_dir))
+        Config._global_config = None
+        Config._cached_config = None
+
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.add_provider("new", {"npm": "x", "options": {}, "models": {}})
+
+        config_file = config_dir / "aegisops.json"
+        assert config_file.exists()
+        data = json.loads(config_file.read_text())
+        assert "new" in data["provider"]
+
+
+class TestConfigWriterSections:
+
+    def test_update_merges_into_the_section_and_creates_missing_objects(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        written = ConfigWriter.update_config_section("channels.feishu", {"enabled": True, "appId": "cli_a"})
+        assert written == {"enabled": True, "appId": "cli_a"}
+        ConfigWriter.update_config_section("channels.feishu", {"appSecret": "{secret:channel_feishu_appSecret}"})
+
+        data = json.loads((temp_project / "aegisops.json").read_text())
+        assert data["channels"]["feishu"] == {
+            "enabled": True, "appId": "cli_a", "appSecret": "{secret:channel_feishu_appSecret}",
+        }
+        # Everything else in the file is kept.
+        assert data["mcp"] == {"test": {"type": "local"}} and "anthropic" in data["provider"]
+
+    @pytest.mark.parametrize(("section", "values"), [
+        ("", {"a": 1}), ("channels..feishu", {"a": 1}), ("mcp.test.type", {"a": 1}), ("channels.feishu", ["a"]),
+    ])
+    def test_update_refuses_what_is_not_an_object(self, temp_project, section, values):
+        from aegisops.config.config_writer import ConfigWriter
+
+        before = (temp_project / "aegisops.json").read_text()
+        with pytest.raises(ValueError):
+            ConfigWriter.update_config_section(section, values)
+        assert (temp_project / "aegisops.json").read_text() == before
+
+
+class TestConfigWriterModelSettings:
+    """Test model_settings section CRUD."""
+
+    def test_get_model_setting_empty(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.get_model_setting("openai", "gpt-4o") is None
+
+    def test_set_and_get_model_setting(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_model_setting("openai", "gpt-4o", {
+            "enabled": False,
+            "default_parameters": {"temperature": 0.5},
+        })
+
+        setting = ConfigWriter.get_model_setting("openai", "gpt-4o")
+        assert setting is not None
+        assert setting["enabled"] is False
+        assert setting["default_parameters"]["temperature"] == 0.5
+
+    def test_update_model_setting_merges(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_model_setting("openai", "gpt-4o", {
+            "enabled": True,
+            "default_parameters": {"temperature": 0.5},
+        })
+        ConfigWriter.set_model_setting("openai", "gpt-4o", {
+            "enabled": False,
+        })
+
+        setting = ConfigWriter.get_model_setting("openai", "gpt-4o")
+        assert setting["enabled"] is False
+        # Previous value preserved via merge
+        assert setting["default_parameters"]["temperature"] == 0.5
+
+    def test_remove_model_setting(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_model_setting("openai", "gpt-4o", {"enabled": True})
+        assert ConfigWriter.remove_model_setting("openai", "gpt-4o") is True
+        assert ConfigWriter.get_model_setting("openai", "gpt-4o") is None
+
+    def test_remove_nonexistent_model_setting(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.remove_model_setting("openai", "gpt-4o") is False
+
+    def test_get_all_model_settings(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_model_setting("openai", "gpt-4o", {"enabled": True})
+        ConfigWriter.set_model_setting("anthropic", "claude-sonnet", {"enabled": False})
+
+        all_settings = ConfigWriter.get_all_model_settings()
+        assert "openai/gpt-4o" in all_settings
+        assert "anthropic/claude-sonnet" in all_settings
+        assert len(all_settings) == 2
+
+    def test_effective_default_parameters_follow_scope_precedence(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        data = ConfigWriter._read_raw()
+        data["default_models"] = {
+            "default_parameters": {
+                "reasoning_effort": "low",
+                "temperature": 0.1,
+            },
+        }
+        data["model_settings"] = {
+            "anthropic/claude-sonnet-4-5": {
+                "default_parameters": {
+                    "reasoning_effort": "high",
+                }
+            }
+        }
+        ConfigWriter._write_raw(data)
+
+        parameters = ConfigWriter.get_effective_model_default_parameters(
+            "anthropic",
+            "claude-sonnet-4-5",
+        )
+
+        assert parameters == {
+            "reasoning_effort": "high",
+            "temperature": 0.1,
+        }
+
+    def test_model_settings_preserve_other_sections(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_model_setting("openai", "gpt-4o", {"enabled": True})
+
+        data = ConfigWriter._read_raw()
+        assert "provider" in data
+        assert "anthropic" in data["provider"]
+        assert "mcp" in data
+
+
+class TestConfigWriterAgentGroups:
+    def test_group_only_write_preserves_raw_references_and_other_fields(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        raw = {
+            "plugin": ["example.external.plugin"],
+            "provider": {"example": {"options": {"apiKey": "{secret:example_key}"}}},
+            "mcp": {"example": {"url": "{env:MCP_URL}", "enabled": False}},
+            "agent": {
+                "editable": {"prompt": "{file:prompts/custom.md}", "temperature": 0.7, "group": "Before"},
+                "other": {"model": "{env:MODEL_ALIAS}", "group": "Other"},
+            },
+            "future_key": {"nested": [1, {"keep": True}]},
+        }
+        path = temp_project / "aegisops.json"
+        path.write_text(json.dumps(raw), encoding="utf-8")
+
+        ConfigWriter.set_agent_group("editable", "Operations")
+
+        raw["agent"]["editable"]["group"] = "Operations"
+        assert json.loads(path.read_text(encoding="utf-8")) == raw
+
+    @pytest.mark.parametrize("group", [None, ""])
+    def test_explicit_clear_writes_only_empty_group(self, temp_project, group):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.set_agent_group("custom-runtime", group)
+
+        assert ConfigWriter._read_raw()["agent"] == {"custom-runtime": {"group": ""}}
+
+    def test_uses_existing_jsonc_without_touching_json(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        original_json = (temp_project / "aegisops.json").read_bytes()
+        path = temp_project / "aegisops.jsonc"
+        path.write_text('{/* references stay raw */ "plugin":["custom.plugin"],'
+                        '"agent":{"editable":{"prompt":"{file:prompt.md}"}}}', encoding="utf-8")
+
+        ConfigWriter.set_agent_group("editable", "Ops")
+
+        assert json.loads(path.read_text(encoding="utf-8")) == {
+            "plugin": ["custom.plugin"],
+            "agent": {"editable": {"prompt": "{file:prompt.md}", "group": "Ops"}},
+        }
+        assert (temp_project / "aegisops.json").read_bytes() == original_json
+
+    @pytest.mark.parametrize("content", ['{"agent":', '[]', '{"agent":[]}', '{"agent":{"editable":false}}'])
+    def test_malformed_config_is_not_overwritten(self, temp_project, content):
+        from aegisops.config.config_writer import ConfigWriter
+
+        path = temp_project / "aegisops.json"
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(ValueError):
+            ConfigWriter.set_agent_group("editable", "Ops")
+        assert path.read_text(encoding="utf-8") == content
+
+
+class TestConfigWriterMcpGroups:
+    @pytest.mark.parametrize("group", ["Operations", "", None])
+    def test_replacement_preserves_omitted_group_without_mutating_input(self, temp_project, group):
+        from aegisops.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw["mcp"]["custom-server"] = {
+            "type": "local", "command": ["old-command"], "group": group,
+        }
+        ConfigWriter._write_raw(raw)
+        incoming = {"type": "remote", "url": "{env:MCP_URL}", "enabled": False}
+
+        ConfigWriter.add_mcp_server("custom-server", incoming)
+
+        assert ConfigWriter.get_mcp_server("custom-server") == {**incoming, "group": group or ""}
+        assert "group" not in incoming
+        assert ConfigWriter._read_raw()["provider"] == raw["provider"]
+
+    @pytest.mark.parametrize("group", [None, ""])
+    def test_replacement_honors_explicit_clear(self, temp_project, group):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.add_mcp_server("custom-server", {"type": "remote", "group": "Old"})
+        ConfigWriter.add_mcp_server("custom-server", {"type": "remote", "group": group})
+
+        assert ConfigWriter.get_mcp_server("custom-server")["group"] == ""
+
+    def test_first_save_does_not_invent_group(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        incoming = {"type": "remote", "url": "http://127.0.0.1:9/unused", "enabled": False}
+        ConfigWriter.add_mcp_server("custom-server", incoming)
+        assert ConfigWriter.get_mcp_server("custom-server") == incoming
+
+    def test_single_field_clear_preserves_connection(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.add_mcp_server("custom-server", {"type": "remote", "group": "Old", "url": "{env:MCP_URL}"})
+        assert ConfigWriter.update_mcp_server_field("custom-server", "group", None)
+        assert ConfigWriter.get_mcp_server("custom-server") == {
+            "type": "remote", "group": "", "url": "{env:MCP_URL}",
+        }
+
+    def test_corrupt_config_aborts_without_replacement(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        path = temp_project / "aegisops.json"
+        path.write_text('{"mcp":', encoding="utf-8")
+        with pytest.raises(ValueError):
+            ConfigWriter.add_mcp_server("custom-server", {"type": "remote"})
+        assert path.read_text(encoding="utf-8") == '{"mcp":'
+
+
+class TestConfigWriterToolSettings:
+    """Test tool_settings section CRUD (user-level overlay for plugin tools)."""
+
+    def test_list_empty(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.list_tool_settings() == {}
+
+    def test_get_missing_returns_none(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.get_tool_setting("onesec_threat") is None
+
+    def test_set_and_get(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False})
+        entry = ConfigWriter.get_tool_setting("onesec_threat")
+        assert entry == {"enabled": False}
+        assert ConfigWriter.list_tool_settings() == {"onesec_threat": {"enabled": False}}
+
+    def test_set_merges_existing_keys(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False, "note": "x"})
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": True})
+        entry = ConfigWriter.get_tool_setting("onesec_threat")
+        assert entry == {"enabled": True, "note": "x"}
+
+    def test_delete_existing(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False})
+        assert ConfigWriter.delete_tool_setting("onesec_threat") is True
+        assert ConfigWriter.get_tool_setting("onesec_threat") is None
+        assert ConfigWriter.list_tool_settings() == {}
+
+    def test_delete_last_entry_pops_section(self, temp_project):
+        """Removing the last entry should drop ``tool_settings`` entirely."""
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("a", {"enabled": False})
+        ConfigWriter.set_tool_setting("b", {"enabled": True})
+
+        ConfigWriter.delete_tool_setting("a")
+        assert "tool_settings" in ConfigWriter._read_raw()
+
+        ConfigWriter.delete_tool_setting("b")
+        assert "tool_settings" not in ConfigWriter._read_raw()
+
+    def test_delete_missing_returns_false(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.delete_tool_setting("not_set") is False
+
+    def test_group_change_on_core_tool_is_rejected_before_other_fields(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        path = temp_project / "aegisops.json"
+        original = path.read_bytes()
+        with pytest.raises(ValueError, match="read.only"):
+            ConfigWriter.set_tool_setting("get_time", {"group": "User changed", "enabled": False})
+        assert path.read_bytes() == original
+
+    def test_custom_group_clear_preserves_enable_override(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.set_tool_setting("user-only-tool", {"enabled": False, "group": "Ops"})
+        ConfigWriter.set_tool_setting("user-only-tool", {"group": None})
+        assert ConfigWriter.get_tool_setting("user-only-tool") == {"enabled": False, "group": ""}
+
+    @pytest.mark.parametrize("content", ['{"tool_settings":', '[]', '{"tool_settings":[]}', '{"tool_settings":{"user-only-tool":false}}'])
+    def test_group_update_does_not_overwrite_corrupt_config(self, temp_project, content):
+        from aegisops.config.config_writer import ConfigWriter
+
+        path = temp_project / "aegisops.json"
+        path.write_text(content, encoding="utf-8")
+        with pytest.raises(ValueError):
+            ConfigWriter.set_tool_setting("user-only-tool", {"group": "Ops"})
+        assert path.read_text(encoding="utf-8") == content
+
+    def test_set_empty_name_raises(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        with pytest.raises(ValueError):
+            ConfigWriter.set_tool_setting("", {"enabled": True})
+
+    def test_preserves_other_sections(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_tool_setting("onesec_threat", {"enabled": False})
+        data = ConfigWriter._read_raw()
+        assert "provider" in data
+        assert "anthropic" in data["provider"]
+        assert data["tool_settings"]["onesec_threat"]["enabled"] is False
+
+    def test_corrupt_settings_section_treated_as_empty(self, temp_project):
+        """If tool_settings is somehow not a dict, the API should not crash."""
+        import json as _json
+        from aegisops.config.config import Config
+        cfg_path = Config.get_config_file()
+        data = _json.loads(cfg_path.read_text())
+        data["tool_settings"] = "garbage"
+        cfg_path.write_text(_json.dumps(data))
+
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.list_tool_settings() == {}
+        assert ConfigWriter.get_tool_setting("anything") is None
+
+
+class TestConfigWriterDefaultModels:
+    """Test default_models section CRUD."""
+
+    def test_get_default_model_empty(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.get_default_model("llm") is None
+
+    def test_set_and_get_default_model(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_default_model("llm", "anthropic", "claude-sonnet-4-20250514")
+
+        default = ConfigWriter.get_default_model("llm")
+        assert default is not None
+        assert default["provider_id"] == "anthropic"
+        assert default["model_id"] == "claude-sonnet-4-20250514"
+
+    def test_overwrite_default_model(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_default_model("llm", "anthropic", "claude-sonnet")
+        ConfigWriter.set_default_model("llm", "openai", "gpt-4o")
+
+        default = ConfigWriter.get_default_model("llm")
+        assert default["provider_id"] == "openai"
+        assert default["model_id"] == "gpt-4o"
+
+    def test_delete_default_model(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_default_model("llm", "openai", "gpt-4o")
+        assert ConfigWriter.delete_default_model("llm") is True
+        assert ConfigWriter.get_default_model("llm") is None
+
+    def test_delete_nonexistent_default_model(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        assert ConfigWriter.delete_default_model("llm") is False
+
+    def test_get_all_default_models(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_default_model("llm", "anthropic", "claude-sonnet")
+        ConfigWriter.set_default_model("text-embedding", "openai", "text-embedding-3-small")
+
+        all_defaults = ConfigWriter.get_all_default_models()
+        assert "llm" in all_defaults
+        assert "text-embedding" in all_defaults
+        assert len(all_defaults) == 2
+
+    def test_get_all_default_models_excludes_default_parameters(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        data = ConfigWriter._read_raw()
+        data["default_models"] = {
+            "default_parameters": {"reasoning_effort": "medium"},
+            "llm": {
+                "provider_id": "anthropic",
+                "model_id": "claude-sonnet",
+            },
+        }
+        ConfigWriter._write_raw(data)
+
+        assert ConfigWriter.get_all_default_models() == {
+            "llm": {
+                "provider_id": "anthropic",
+                "model_id": "claude-sonnet",
+            }
+        }
+
+    def test_default_models_preserve_other_sections(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+        ConfigWriter.set_default_model("llm", "anthropic", "claude")
+
+        data = ConfigWriter._read_raw()
+        assert "provider" in data
+        assert "mcp" in data
+
+
+class TestConfigWriterFallbackModels:
+    """Test ordered runtime fallback configuration."""
+
+    def test_get_fallback_providers_empty(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        assert ConfigWriter.get_fallback_providers() == []
+
+    def test_set_and_get_fallback_providers_preserves_order(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        fallbacks = [
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+            {"provider_id": "google", "model_id": "gemini-flash"},
+        ]
+
+        ConfigWriter.set_fallback_providers(fallbacks)
+
+        assert ConfigWriter.get_fallback_providers() == fallbacks
+
+    def test_set_fallback_providers_preserves_other_config(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw["smallModel"] = "openai/gpt-4o-mini"
+        ConfigWriter._write_raw(raw)
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "google", "model_id": "gemini-flash"},
+        ])
+
+        updated = ConfigWriter._read_raw()
+        assert updated["smallModel"] == "openai/gpt-4o-mini"
+        assert "provider" in updated
+        assert "mcp" in updated
+
+    def test_set_fallback_providers_reads_jsonc(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        json_path = temp_project / "aegisops.json"
+        jsonc_path = temp_project / "aegisops.jsonc"
+        jsonc_path.write_text(
+            """{
+              // Preserve provider configuration while updating fallbacks.
+              "provider": {"anthropic": {"models": {}}},
+              "smallModel": "anthropic/claude-haiku"
+            }
+            """,
+            encoding="utf-8",
+        )
+        json_path.unlink()
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+        ])
+
+        updated = ConfigWriter._read_raw()
+        assert "anthropic" in updated["provider"]
+        assert updated["smallModel"] == "anthropic/claude-haiku"
+        assert updated["fallback_providers"] == [
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+        ]
+
+    def test_invalid_config_is_not_overwritten(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        config_path = temp_project / "aegisops.json"
+        config_path.write_text("{ invalid", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Unable to read config file"):
+            ConfigWriter.set_fallback_providers([
+                {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+            ])
+
+        assert config_path.read_text(encoding="utf-8") == "{ invalid"
+
+    def test_empty_fallback_providers_removes_key(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+        ])
+        ConfigWriter.set_fallback_providers([])
+
+        assert "fallback_providers" not in ConfigWriter._read_raw()
+
+    def test_detects_inline_fallback_override(self, temp_project, monkeypatch):
+        from aegisops.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv(
+            "AEGISOPS_CONFIG_CONTENT",
+            json.dumps({"fallback_providers": []}),
+        )
+        Config._global_config = None
+
+        assert (
+            ConfigWriter.get_fallback_override_source()
+            == "AEGISOPS_CONFIG_CONTENT"
+        )
+
+    def test_detects_custom_config_fallback_override(
+        self,
+        temp_project,
+        tmp_path,
+    ):
+        from aegisops.config.config_writer import ConfigWriter
+
+        custom_path = tmp_path / "custom.jsonc"
+        custom_path.write_text(
+            '{"fallback_providers": [/* external */ '
+            '{"provider_id": "openai", "model_id": "gpt-4o"}]}',
+            encoding="utf-8",
+        )
+        Config.get_global().config_path = str(custom_path)
+
+        assert ConfigWriter.get_fallback_override_source() == "AEGISOPS_CONFIG"
+
+    def test_detects_config_json_fallback_override(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        (temp_project / "config.json").write_text(
+            json.dumps({"fallback_providers": []}),
+            encoding="utf-8",
+        )
+
+        assert ConfigWriter.get_fallback_override_source() == "config.json"
+
+    def test_higher_priority_config_without_fallback_allows_save(
+        self,
+        temp_project,
+    ):
+        from aegisops.config.config_writer import ConfigWriter
+
+        (temp_project / "config.json").write_text(
+            json.dumps({"smallModel": "anthropic/claude-haiku"}),
+            encoding="utf-8",
+        )
+
+        assert ConfigWriter.get_fallback_override_source() is None
+
+    def test_get_skips_malformed_entries_without_rewriting(self, temp_project):
+        from aegisops.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw_entries = [
+            {"provider_id": " openai ", "model_id": " gpt-4o "},
+            {"provider_id": "openai", "model_id": "gpt-4o"},
+            {"provider_id": "", "model_id": "empty-provider"},
+            {"provider_id": "stale", "model_id": "removed/model"},
+            "invalid",
+        ]
+        raw["fallback_providers"] = raw_entries
+        ConfigWriter._write_raw(raw)
+
+        assert ConfigWriter.get_fallback_providers() == [
+            {"provider_id": "openai", "model_id": "gpt-4o"},
+            {"provider_id": "stale", "model_id": "removed/model"},
+        ]
+        assert ConfigWriter._read_raw()["fallback_providers"] == raw_entries
+
+    def test_typed_config_normalizes_malformed_and_duplicate_entries(self):
+        from aegisops.config.config import ConfigInfo
+
+        config = ConfigInfo.model_validate({
+            "smallModel": "openai/gpt-4o-mini",
+            "fallback_providers": [
+                {"provider_id": " openai ", "model_id": " gpt-4o "},
+                {"provider_id": "openai", "model_id": "gpt-4o"},
+                {"provider_id": "", "model_id": "missing"},
+                "invalid",
+            ],
+        })
+
+        assert config.small_model == "openai/gpt-4o-mini"
+        assert [entry.model_dump() for entry in config.fallback_providers or []] == [
+            {"provider_id": "openai", "model_id": "gpt-4o"},
+        ]

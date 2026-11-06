@@ -1,0 +1,51 @@
+"""
+AegisOps Updater
+
+Provides self-update capability via GitHub releases.
+Downloads source archives and delegates source replacement to a detached
+handoff — no git binary required at runtime.  An installed extension can add
+an update channel of its own (aegisops.updater.channels).
+"""
+
+from aegisops.updater.channels import (
+    ChannelRelease,
+    InstallPlan,
+    InstalledReleaseChannel,
+    UpdateChannel,
+    get_update_channel,
+    register_update_channel,
+    update_channel_names,
+)
+from aegisops.updater.deploy import DeployMode, detect_deploy_mode
+from aegisops.updater.models import VersionInfo, UpdateProgress, UpdateStage
+from aegisops.updater.updater import (
+    build_updated_frontend,
+    check_update,
+    get_current_version,
+    get_latest_release,
+    install_or_repair_source,
+    perform_update,
+    remove_components,
+)
+
+__all__ = [
+    "ChannelRelease",
+    "DeployMode",
+    "InstallPlan",
+    "InstalledReleaseChannel",
+    "UpdateChannel",
+    "detect_deploy_mode",
+    "VersionInfo",
+    "UpdateProgress",
+    "UpdateStage",
+    "build_updated_frontend",
+    "check_update",
+    "get_current_version",
+    "get_latest_release",
+    "get_update_channel",
+    "install_or_repair_source",
+    "perform_update",
+    "register_update_channel",
+    "remove_components",
+    "update_channel_names",
+]

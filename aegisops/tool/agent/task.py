@@ -1,0 +1,97 @@
+"""Compatibility alias for delegate_task.
+
+The runtime keeps ``task`` as a registered tool name for workflow/backward
+compatibility, but all scheduling behavior lives in ``delegate_task``.
+Each call creates an independent session. Interactive delegation is asynchronous.
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from aegisops.tool.agent.delegate_task import delegate_task_tool
+from aegisops.tool.registry import (
+    ParameterType,
+    ToolCategory,
+    ToolContext,
+    ToolParameter,
+    ToolRegistry,
+    ToolResult,
+)
+
+
+DESCRIPTION = """Compatibility alias for delegate_task.
+
+Use delegate_task directly for new prompts. Workflows may continue using task;
+it accepts the same single-subagent shape and forwards it to delegate_task.
+Each call creates an independent session. Interactive delegation is asynchronous.
+"""
+
+
+@ToolRegistry.register_function(
+    name="task",
+    group="代理协作",
+    description=DESCRIPTION,
+    category=ToolCategory.SYSTEM,
+    native=False,
+    parameters=[
+        ToolParameter(
+            name="description",
+            type=ParameterType.STRING,
+            description="Optional short task description (3-5 words)",
+            required=False,
+        ),
+        ToolParameter(
+            name="prompt",
+            type=ParameterType.STRING,
+            description="Detailed prompt for the subagent.",
+            required=True,
+        ),
+        ToolParameter(
+            name="subagent_type",
+            type=ParameterType.STRING,
+            description="Delegatable agent name. Each call creates a new session.",
+            required=True,
+        ),
+        ToolParameter(
+            name="load_skills",
+            type=ParameterType.ARRAY,
+            description="Optional skill names to inject into the delegated agent",
+            required=False,
+            default=[],
+        ),
+        ToolParameter(
+            name="command",
+            type=ParameterType.STRING,
+            description="Deprecated command name retained for caller compatibility",
+            required=False,
+        ),
+        ToolParameter(
+            name="model",
+            type=ParameterType.STRING,
+            description="Optional model override (provider/model or model)",
+            required=False,
+        ),
+    ],
+)
+async def task_tool(
+    ctx: ToolContext,
+    description: Optional[str] = None,
+    prompt: Optional[str] = None,
+    subagent_type: Optional[str] = None,
+    load_skills: Optional[list] = None,
+    run_in_background: bool = False,
+    command: Optional[str] = None,
+    model: Optional[str] = None,
+) -> ToolResult:
+    """Forward legacy task calls to delegate_task."""
+    return await delegate_task_tool(
+        ctx=ctx,
+        prompt=prompt,
+        load_skills=load_skills,
+        description=description,
+        run_in_background=run_in_background,
+        subagent_type=subagent_type,
+        command=command,
+        model=model,
+    )

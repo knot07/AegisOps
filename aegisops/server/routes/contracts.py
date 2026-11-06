@@ -1,0 +1,104 @@
+"""Page data access contract routes."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+from typing import Any
+
+from fastapi import APIRouter, Body, Depends
+from fastapi.responses import JSONResponse
+
+from aegisops.auth.context import AuthUser
+from aegisops.server.auth import require_user
+from aegisops.contracts.access.models import ContractRuntimeError
+from aegisops.contracts.access.runtime import OperationRuntime
+from aegisops.config.config import get_user_plugins_root
+
+router = APIRouter()
+_runtime: OperationRuntime | None = None
+_runtime_override = False
+_runtime_signature: tuple[tuple[str, int, int], ...] = ()
+
+
+@router.post("/contracts/webui/pages/{page_path:path}/access/{contract_id}/operations/{operation_name}")
+async def execute_webui_contract_operation(
+    page_path: str,
+    contract_id: str,
+    operation_name: str,
+    body: dict[str, Any] | None = Body(default=None),
+    user: AuthUser = Depends(require_user),
+):
+    # A page's data contract is part of the page: it is served only where the
+    # page is (aegisops.hub.access). A contract path that is not a page id
+    # (``test/records``) names no page of the page store, so there is no page
+    # to ask about; the runtime decides.
+    from aegisops.contracts.webui.store import PAGE_ID_RE
+    from aegisops.server.routes.webui import _require_page_access
+
+    if PAGE_ID_RE.fullmatch(page_path):
+        await _require_page_access(page_path)
+    try:
+        runtime = await asyncio.to_thread(_get_runtime)
+        response = await asyncio.to_thread(runtime.execute,
+            page_id=page_path,
+            contract_id=contract_id,
+            operation_name=operation_name,
+            payload=body,
+            principal=user,
+        )
+    except ContractRuntimeError as exc:
+        return JSONResponse(status_code=exc.status_code, content={"error": exc.to_detail()})
+    return JSONResponse(status_code=response.status_code, content=response.body)
+
+
+def reset_route_dependencies(*, runtime: OperationRuntime | None = None) -> None:
+    """Test helper to inject isolated route dependencies."""
+    global _runtime, _runtime_override, _runtime_signature
+    _runtime = runtime
+    _runtime_override = runtime is not None
+    _runtime_signature = _contract_plugin_signature()
+
+
+def _get_runtime() -> OperationRuntime:
+    global _runtime, _runtime_signature
+    if _runtime_override and _runtime is not None:
+        return _runtime
+
+    signature = _contract_plugin_signature()
+    if _runtime is None or signature != _runtime_signature:
+        _runtime = OperationRuntime()
+        _runtime_signature = signature
+    return _runtime
+
+
+def _contract_plugin_signature() -> tuple[tuple[str, int, int], ...]:
+    roots = (
+        get_user_plugins_root() / "contracts" / "access",
+        Path.cwd() / ".aegisops" / "plugins" / "contracts" / "access",
+    )
+    entries: list[tuple[str, int, int]] = []
+    seen: set[Path] = set()
+    for root in roots:
+        resolved_root = root.resolve()
+        if resolved_root in seen or not resolved_root.is_dir():
+            continue
+        seen.add(resolved_root)
+        plugin_files = [
+            path
+            for suffix in ("*.py", "*.json", "*.yaml", "*.yml")
+            for path in resolved_root.rglob(suffix)
+        ]
+        for path in sorted(plugin_files):
+            try:
+                relative_parts = path.relative_to(resolved_root).parts
+            except ValueError:
+                continue
+            if any(part.startswith(".") or part == "__pycache__" for part in relative_parts):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            entries.append((str(path.resolve()), stat.st_mtime_ns, stat.st_size))
+    return tuple(entries)

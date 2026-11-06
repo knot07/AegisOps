@@ -1,0 +1,3038 @@
+"""
+Session Loop Module
+
+Core session execution loop logic extracted from runner.py.
+Implements the main session processing loop with support for:
+- Message processing
+- Tool execution
+- Compaction
+- Subtask handling
+- Reminders
+
+Ported from original SessionPrompt.loop() pattern.
+"""
+
+import asyncio
+import hashlib
+import inspect
+import time
+from typing import Optional, List, Dict, Any, Callable, Awaitable, Literal
+from dataclasses import dataclass, field
+from datetime import datetime
+
+from aegisops.utils.log import Log
+from aegisops.utils.id import Identifier
+from aegisops.session.session import (
+    DEDICATED_AGENT_POLICY_METADATA_KEY,
+    Session,
+    SessionInactiveError,
+    SessionInfo,
+    SessionNotFoundError,
+    is_model_auto_session_category,
+)
+from aegisops.session.message import Message, MessageInfo, MessageRole
+from aegisops.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
+from aegisops.session.core.task_utils import fire_and_forget
+from aegisops.session.core.turn_state import (
+    set_turn_state,
+    set_context_state,
+    clear_turn_state,
+)
+from aegisops.session.lifecycle.compaction import (
+    SessionCompaction,
+    CompactionPolicy,
+    build_compaction_policy,
+    run_compaction,
+)
+from aegisops.session.lifecycle.compaction.compaction import _get_compaction_history
+from aegisops.session.prompt import SessionPrompt
+from aegisops.session.context_usage import (
+    build_context_usage_snapshot,
+    estimate_observed_context_tokens,
+    has_observation_baseline,
+    latest_observation,
+)
+from aegisops.provider.provider import Provider
+from aegisops.session.goal import GoalManager
+from aegisops.session.runtime_controls import runtime_controls
+from aegisops.agent.scheduling import session_mode
+
+
+log = Log.create(service="session.loop")
+
+
+MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
+POST_COMPACTION_COOLDOWN_STEPS = 2
+# Minimum spacing between mid-turn composer-meter pushes for one session.
+CONTEXT_USAGE_PUSH_INTERVAL_SECONDS = 1.5
+# Longest an overflow waits for the meter to show its pre-cleanup size.
+CONTEXT_USAGE_PUSH_WAIT_SECONDS = 5.0
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
+
+
+def _part_field(part: Any, name: str, default: Any = None) -> Any:
+    """消息 part 既可能是 pydantic 对象也可能是 dict（旧存储），统一取字段。"""
+    if isinstance(part, dict):
+        return part.get(name, default)
+    return getattr(part, name, default)
+
+
+@dataclass(frozen=True)
+class RuntimeModel:
+    """Concrete provider/model candidate used by Auto failover."""
+
+    provider_id: str
+    model_id: str
+
+
+@dataclass
+class AutoFailoverCooldown:
+    """Process-local Hermes-style starting candidate cooldown."""
+
+    model: RuntimeModel
+    primary: RuntimeModel
+    expires_at: float
+    reason: str
+
+
+@dataclass
+class LoopContext:
+    """Context for session loop execution"""
+    session: SessionInfo
+    provider_id: str
+    model_id: str
+    agent_name: str
+    step: int = 0
+    max_steps_reached: bool = False
+    abort_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # SessionContext interface for decoupled session access
+    session_ctx: Optional[Any] = None  # Type: Optional[SessionContext]
+    # Offset so observability step numbers are cumulative across the session
+    trace_step_offset: int = 0
+    # Track current step asyncio.Task so abort() can cancel it immediately
+    _current_step_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    # This execution's agent inbox generation (bound when the loop starts)
+    inbox: Optional[Any] = field(default=None, repr=False)
+    # Memory bootstrap data loaded once on step 1; passed to each SessionRunner
+    memory_bootstrap_data: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    # Reusable runner artifacts that stay stable across steps in the same loop.
+    runner_static_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
+    # Overflow compactions in a row that have not brought the prompt back under
+    # the threshold (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS); reset
+    # once a later check finds the prompt under it.
+    overflow_compaction_attempts: int = 0
+    # Tool result truncation attempted once per run (matches OpenClaw toolResultTruncationAttempted)
+    tool_result_truncation_attempted: bool = False
+    # Cooldown window to prefer cheap cleanup over repeated full compaction.
+    last_compaction_step: Optional[int] = None
+    last_cleanup_step: Optional[int] = None
+    # ``input + cache.read + output + reasoning`` reported by the provider on
+    # the most recent finished assistant turn.  Overflow decisions compare it
+    # with a current message estimate so tool output produced after that model
+    # call cannot be missed.
+    last_observed_prompt_tokens: int = 0
+    # Mid-turn ``context.usage.updated`` pushes (throttled, never awaited).
+    last_context_usage_push_at: float = 0.0
+    context_usage_push_task: Optional[asyncio.Task] = field(default=None, repr=False)
+    auto_failover: bool = False
+    # Entrypoint authorization is separate from persisted model_auto. Only a
+    # WebUI message route may set this bit; non-WebUI entrypoints use the default.
+    auto_failover_allowed: bool = False
+    model_candidates: List[RuntimeModel] = field(default_factory=list)
+    candidate_index: int = 0
+    model_candidate_policy: Literal["fixed", "automatic", "configured"] = "automatic"
+    auto_candidates_initialized: bool = False
+    turn_user_id: Optional[str] = None
+    turn_additional_context: Optional[str] = None
+    stop_hook_active: bool = False
+    session_start_pending: bool = False
+    execution_activity: Dict[str, Any] = field(default_factory=dict, repr=False)
+    # Goal verdict on the turn that ended the loop ("inactive" without a goal).
+    goal_verdict: Optional[str] = None
+
+    @property
+    def trace_step(self) -> int:
+        """Session-cumulative step number for observability."""
+        return self.trace_step_offset + self.step
+    
+    def should_abort(self) -> bool:
+        """Check if loop should abort"""
+        return self.abort_event.is_set()
+    
+    def signal_abort(self) -> None:
+        """Signal abort to stop loop, and cancel the current step task if running."""
+        self.abort_event.set()
+        task = self._current_step_task
+        if task is not None and not task.done():
+            task.cancel()
+
+
+@dataclass
+class LoopCallbacks:
+    """Callbacks for loop events"""
+    on_step_start: Optional[Callable[[int], Awaitable[None]]] = None
+    on_step_end: Optional[Callable[[int], Awaitable[None]]] = None
+    on_compaction: Optional[Callable[[], Awaitable[None]]] = None
+    on_error: Optional[Callable[[str], Awaitable[None]]] = None
+    on_reminder: Optional[Callable[[str], Awaitable[None]]] = None
+    # SSE event publishing callback (for TUI/WebUI real-time updates)
+    event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None
+    # Runner-level callbacks (text delta, tool events, permissions, etc.)
+    # Type: Optional[RunnerCallbacks] - using Any to avoid circular import
+    runner_callbacks: Optional[Any] = None
+    # Destination-bound delivery for inbox continuations, not the initial run.
+    on_background_result: Optional[Callable[["LoopResult"], Awaitable[None]]] = None
+
+
+@dataclass
+class LoopResult:
+    """Result of loop execution"""
+    action: str  # "stop", "continue", "compact", "error", "queued"
+    last_message: Optional[MessageInfo] = None
+    error: Optional[str] = None
+    provider_id: Optional[str] = None
+    model_id: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class SessionLoop:
+    """
+    Session loop manager
+    
+    Handles the main session execution loop with support for:
+    - Message iteration
+    - Compaction triggers
+    - Subtask management
+    - Reminder injection
+    - Loop control (abort, pause, resume)
+    """
+    
+    # Active loop contexts by session ID
+    _active_loops: Dict[str, LoopContext] = {}
+    _auto_failover_cooldowns: Dict[str, AutoFailoverCooldown] = {}
+
+    @classmethod
+    def clear_auto_failover_state(cls, session_id: str) -> None:
+        """Clear process-local routing state when WebUI Auto is disabled."""
+        cls._auto_failover_cooldowns.pop(session_id, None)
+
+    @classmethod
+    async def validate_runtime_model(
+        cls,
+        provider_id: str,
+        model_id: str,
+        *,
+        config: Optional[Any] = None,
+    ) -> tuple[bool, str]:
+        """Validate a configured LLM candidate without a network health probe."""
+        from aegisops.config.config import Config
+        from aegisops.provider.model_manager import get_model_manager
+        from aegisops.provider.types import ModelType
+
+        Provider._ensure_initialized()
+        config = config or await Config.get()
+        if provider_id in (getattr(config, "disabled_providers", None) or []):
+            return False, "provider_disabled"
+        enabled_providers = getattr(config, "enabled_providers", None) or []
+        if enabled_providers and provider_id not in enabled_providers:
+            return False, "provider_disabled"
+        try:
+            await Provider.apply_config(config, provider_id=provider_id)
+        except Exception as exc:
+            log.warn("session.model.candidate_config_failed", {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "error": str(exc),
+            })
+            return False, "provider_config_error"
+
+        provider = Provider.get(provider_id)
+        if provider is None:
+            return False, "provider_not_found"
+
+        definition = get_model_manager().get_model(provider_id, model_id)
+        if definition is None:
+            return False, "model_not_found"
+        if getattr(definition, "model_type", None) != ModelType.LLM:
+            return False, "not_llm"
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if setting is not None and not setting.enabled:
+            return False, "model_disabled"
+        if not provider.is_configured():
+            return False, "provider_not_configured"
+        return True, "available"
+
+    @classmethod
+    async def _build_model_candidates(
+        cls,
+        primary: RuntimeModel,
+        *,
+        route_seed: str,
+        preferred: Optional[RuntimeModel] = None,
+        config: Optional[Any] = None,
+    ) -> List[RuntimeModel]:
+        """Build a configured chain or the stable automatic discovery chain."""
+        from aegisops.config.config import Config
+        from aegisops.provider.model_manager import get_model_manager
+        from aegisops.provider.types import ModelType
+
+        config = config or await Config.get()
+        await Provider.apply_config(config)
+
+        configured_fallbacks = getattr(config, "fallback_providers", None) or []
+        if configured_fallbacks:
+            candidates = [primary]
+            seen = {(primary.provider_id, primary.model_id)}
+            for index, raw in enumerate(configured_fallbacks):
+                provider_id = (
+                    raw.get("provider_id")
+                    if isinstance(raw, dict)
+                    else raw.provider_id
+                )
+                model_id = (
+                    raw.get("model_id")
+                    if isinstance(raw, dict)
+                    else raw.model_id
+                )
+                candidate = RuntimeModel(
+                    provider_id=provider_id,
+                    model_id=model_id,
+                )
+                identity = (candidate.provider_id, candidate.model_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+
+                available, reason = await cls.validate_runtime_model(
+                    candidate.provider_id,
+                    candidate.model_id,
+                    config=config,
+                )
+                if not available:
+                    log.warn("session.model.fallback_skipped", {
+                        "provider_id": candidate.provider_id,
+                        "model_id": candidate.model_id,
+                        "configured_index": index,
+                        "reason": reason,
+                    })
+                    continue
+                candidates.append(candidate)
+            return candidates
+
+        definitions = get_model_manager().list_models(
+            model_type=ModelType.LLM,
+            enabled_only=True,
+        )
+        discovered = {
+            RuntimeModel(definition.provider_id, definition.id)
+            for definition in definitions
+        }
+        discovered.discard(primary)
+
+        same_provider: List[RuntimeModel] = []
+        other_providers: List[RuntimeModel] = []
+        for candidate in sorted(
+            discovered,
+            key=lambda item: (item.provider_id, item.model_id),
+        ):
+            available, reason = await cls.validate_runtime_model(
+                candidate.provider_id,
+                candidate.model_id,
+                config=config,
+            )
+            if not available:
+                log.debug("session.model.fallback_skipped", {
+                    "provider_id": candidate.provider_id,
+                    "model_id": candidate.model_id,
+                    "reason": reason,
+                })
+                continue
+
+            if candidate.provider_id == primary.provider_id:
+                same_provider.append(candidate)
+            else:
+                other_providers.append(candidate)
+
+        candidates = [primary]
+        for tier, pool in (
+            ("same_provider", same_provider),
+            ("other_provider", other_providers),
+        ):
+            if not pool:
+                continue
+            selected = (
+                preferred
+                if preferred is not None and preferred in pool
+                else cls._stable_candidate_choice(pool, route_seed, tier)
+            )
+            candidates.append(selected)
+        return candidates
+
+    @staticmethod
+    def _stable_candidate_choice(
+        candidates: List[RuntimeModel],
+        route_seed: str,
+        tier: str,
+    ) -> RuntimeModel:
+        """Choose pseudo-randomly without Python's process-randomized hash()."""
+        ordered = sorted(
+            candidates,
+            key=lambda item: (item.provider_id, item.model_id),
+        )
+        digest = hashlib.sha256(
+            f"{route_seed}\0{tier}".encode("utf-8")
+        ).digest()
+        index = int.from_bytes(digest[:8], "big") % len(ordered)
+        return ordered[index]
+
+    @classmethod
+    async def validate_auto_configuration(cls) -> tuple[bool, str]:
+        """Validate that a newly selected Auto mode has a usable chain."""
+        from aegisops.config.config import Config
+
+        default_llm = await Config.resolve_default_llm()
+        if not default_llm:
+            return False, "default_model_missing"
+        primary = RuntimeModel(
+            default_llm["provider_id"],
+            default_llm["model_id"],
+        )
+        available, reason = await cls.validate_runtime_model(
+            primary.provider_id,
+            primary.model_id,
+        )
+        if not available:
+            return False, f"primary_{reason}"
+        return True, "available"
+
+    @classmethod
+    def _active_cooldown_model(
+        cls,
+        session_id: str,
+        primary: RuntimeModel,
+    ) -> Optional[RuntimeModel]:
+        """Return a still-valid cooldown target for the current primary."""
+        cooldown = cls._auto_failover_cooldowns.get(session_id)
+        if cooldown is None:
+            return None
+        if cooldown.expires_at <= time.monotonic() or cooldown.primary != primary:
+            cls._auto_failover_cooldowns.pop(session_id, None)
+            return None
+        return cooldown.model
+
+    @classmethod
+    def _cooldown_candidate_index(
+        cls,
+        session_id: str,
+        candidates: List[RuntimeModel],
+    ) -> int:
+        if not candidates:
+            return 0
+        cooldown_model = cls._active_cooldown_model(session_id, candidates[0])
+        if cooldown_model is None:
+            return 0
+        try:
+            return candidates.index(cooldown_model)
+        except ValueError:
+            cls._auto_failover_cooldowns.pop(session_id, None)
+            return 0
+
+    @classmethod
+    def _select_candidate(cls, ctx: LoopContext, index: int) -> None:
+        candidate = ctx.model_candidates[index]
+        ctx.candidate_index = index
+        ctx.provider_id = candidate.provider_id
+        ctx.model_id = candidate.model_id
+        ctx.session.provider = candidate.provider_id
+        ctx.session.model = candidate.model_id
+        # Prompt and model-capability caches are keyed in most places, but a
+        # fresh dict makes the runtime rebuild guarantee explicit. The tool
+        # loop guard is turn state rather than model state, so it must survive
+        # a provider switch to keep repeated-tool protection effective.
+        tool_loop_guard = ctx.runner_static_cache.get("tool_loop_guard")
+        ctx.runner_static_cache.clear()
+        if tool_loop_guard is not None:
+            ctx.runner_static_cache["tool_loop_guard"] = tool_loop_guard
+    
+    @classmethod
+    def is_running(cls, session_id: str) -> bool:
+        """Check if loop is running for session"""
+        return session_id in cls._active_loops
+    
+    @classmethod
+    def get_context(cls, session_id: str) -> Optional[LoopContext]:
+        """Get loop context for session"""
+        return cls._active_loops.get(session_id)
+    
+    @classmethod
+    def abort(cls, session_id: str, *, only_category: Optional[str] = None) -> bool:
+        """Abort running loop; ``only_category`` filters the descendants it stops."""
+        from aegisops.session.agent_inbox import AgentInbox
+        ctx = cls._active_loops.get(session_id)
+        inbox = AgentInbox._inboxes.get(session_id)
+        if inbox and AgentInbox.dispatch(inbox, lambda: cls.abort(session_id, only_category=only_category)):
+            return ctx is not None
+        AgentInbox.stop(session_id, only_category=only_category)
+        if ctx:
+            ctx.signal_abort()
+            return True
+        return False
+    
+    @classmethod
+    def abort_children(cls, parent_session_id: str, *, only_category: Optional[str] = None) -> int:
+        """Abort all child loops whose session.parent_id matches, recursively.
+
+        ``only_category`` restricts the abort to children of that session
+        category, so a caller can stop the subagent sessions it spawned
+        (``category="task"``) without touching sessions the user created from
+        the same parent (WebUI "new from parent", ``category="user"``).
+        The filter holds all the way down, including the agent inbox tree: a
+        user session's own subagents are its children, not this parent's. A
+        filtered call also reaches children with no loop running right now
+        (submitted but not started yet, or idle while their own children
+        still run), which only the inbox tree knows about.
+        """
+        aborted = 0
+        child_ids = [
+            sid for sid, ctx in list(cls._active_loops.items())
+            if getattr(ctx.session, 'parent_id', None) == parent_session_id
+            and (
+                only_category is None
+                or getattr(ctx.session, 'category', 'user') == only_category
+            )
+        ]
+        for sid in child_ids:
+            ctx = cls._active_loops.get(sid)
+            if ctx and not ctx.should_abort():
+                cls.abort(sid, only_category=only_category)
+                aborted += 1
+            aborted += cls.abort_children(sid, only_category=only_category)
+        if only_category is not None:
+            from aegisops.session.agent_inbox import AgentInbox
+            for sid in AgentInbox.child_ids(parent_session_id, only_category=only_category) - set(child_ids):
+                cls.abort(sid, only_category=only_category)
+        return aborted
+
+    # ------------------------------------------------------------------
+    # 文件快照：用户轮次起点 snapshot part → 每步 patch part → 轮次结束 diff
+    # ------------------------------------------------------------------
+    @classmethod
+    def _snapshot_worktree(cls, ctx: LoopContext) -> Optional[str]:
+        import os
+
+        worktree = getattr(ctx.session, "directory", None)
+        if not worktree or not os.path.isdir(worktree):
+            return None
+        return worktree
+
+    @classmethod
+    async def _track_turn_snapshot(cls, ctx: LoopContext, last_user: MessageInfo) -> Optional[str]:
+        """步开始前记录 git tree 快照；用户消息还没有 snapshot part 时补上（轮次起点）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not worktree:
+            return None
+        try:
+            from aegisops.snapshot.snapshot import Snapshot
+
+            snapshot = await Snapshot.track(ctx.session.project_id, worktree)
+        except Exception as exc:
+            log.debug("loop.snapshot.track_failed", {"session_id": ctx.session.id, "error": str(exc)})
+            return None
+        if not snapshot:
+            return None
+        try:
+            parts = await Message.parts(last_user.id, ctx.session.id)
+            if not any(_part_field(part, "type") == "snapshot" for part in parts):
+                from aegisops.session.message import SnapshotPart
+
+                await Message.add_part(
+                    ctx.session.id,
+                    last_user.id,
+                    SnapshotPart(sessionID=ctx.session.id, messageID=last_user.id, snapshot=snapshot),
+                )
+        except Exception as exc:
+            log.warn("loop.snapshot.part_failed", {"session_id": ctx.session.id, "error": str(exc)})
+        return snapshot
+
+    @classmethod
+    async def _record_step_patch(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        last_user: MessageInfo,
+        snapshot: Optional[str],
+    ) -> None:
+        """步结束后把本步改动过的文件记成 assistant 消息的 patch part（hash=改动前快照）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not snapshot or not worktree:
+            return
+        try:
+            from aegisops.snapshot.snapshot import Snapshot
+
+            patch = await Snapshot.patch(ctx.session.project_id, worktree, snapshot)
+        except Exception as exc:
+            log.debug("loop.snapshot.patch_failed", {"session_id": ctx.session.id, "error": str(exc)})
+            return
+        if not patch.files:
+            return
+        try:
+            messages = await Message.list(ctx.session.id)
+            assistant = next(
+                (
+                    msg
+                    for msg in reversed(messages)
+                    if msg.role == MessageRole.ASSISTANT and getattr(msg, "parentID", None) == last_user.id
+                ),
+                None,
+            )
+            if assistant is None:
+                return
+            from aegisops.session.message import PatchPart
+
+            part = PatchPart(sessionID=ctx.session.id, messageID=assistant.id, hash=snapshot, files=patch.files)
+            await Message.add_part(ctx.session.id, assistant.id, part)
+            await cls._publish_runtime_event(callbacks, "message.part.updated", {"part": part.model_dump(by_alias=True)})
+            log.info("loop.snapshot.patch_recorded", {
+                "session_id": ctx.session.id,
+                "message_id": assistant.id,
+                "files": len(patch.files),
+            })
+        except Exception as exc:
+            log.warn("loop.snapshot.patch_part_failed", {"session_id": ctx.session.id, "error": str(exc)})
+
+    @classmethod
+    async def _record_turn_diffs(cls, ctx: LoopContext, last_user: MessageInfo) -> None:
+        """轮次结束：按快照算出会话/消息级文件 diff 存起来（GET /session/{id}/diff 读的就是它）。"""
+        worktree = cls._snapshot_worktree(ctx)
+        if not worktree:
+            return
+        try:
+            from aegisops.session.lifecycle.summary import SessionSummary
+
+            await SessionSummary.record_turn_diffs(
+                session_id=ctx.session.id,
+                user_message_id=last_user.id,
+                project_id=ctx.session.project_id,
+                worktree=worktree,
+            )
+        except Exception as exc:
+            log.warn("loop.snapshot.diff_failed", {"session_id": ctx.session.id, "error": str(exc)})
+
+    @classmethod
+    def end_cancelled_execution(cls, session_id: str) -> None:
+        """Stop what a cancelled, not aborted, execution left running.
+
+        Subagents report back through the session's agent inbox. A user abort
+        has already stopped them and closed it (abort()). Cancellation by
+        whoever awaits this loop (a workflow node timeout cancelling the
+        delegate_task future, a background-task watchdog, session lifecycle)
+        has not. Close the inbox, so a stopped child's late "Sub-agent
+        stopped" report cannot wake this session again, then stop its
+        subagents. Only category "task": a session the user created from this
+        one (WebUI "new from parent") is a child by parent_id too but keeps
+        running. Delegations still in flight see the closed inbox and do not
+        start their child (delegate_task checks before submitting).
+        """
+        from aegisops.session.agent_inbox import AgentInbox
+        AgentInbox.close(session_id)
+        cls.abort_children(session_id, only_category="task")
+
+    @classmethod
+    def _end_cancelled_loop(cls, ctx: LoopContext) -> None:
+        """end_cancelled_execution() for a cancel the runner did not handle.
+
+        The runner does it before draining tool calls when the cancel lands in
+        the model stream; this covers every other await of the step and the
+        loop between steps. Skipped after a user abort, which stopped all of
+        it already, and once done for this execution: input that reached a
+        new inbox generation since then belongs to the next execution.
+        """
+        if ctx.should_abort() or (ctx.inbox is not None and ctx.inbox.stopped):
+            return
+        cls.end_cancelled_execution(ctx.session.id)
+
+    @classmethod
+    async def _publish_runtime_event(
+        cls,
+        callbacks: "LoopCallbacks",
+        event_name: str,
+        payload: Dict[str, Any],
+    ) -> None:
+        if not callbacks.event_publish_callback:
+            return
+        try:
+            await callbacks.event_publish_callback(event_name, payload)
+        except Exception as exc:
+            log.debug("loop.runtime_event.publish_failed", {
+                "event": event_name,
+                "error": str(exc),
+            })
+
+    @classmethod
+    def _schedule_context_usage_push(
+        cls,
+        ctx: LoopContext,
+        callbacks: "LoopCallbacks",
+        *,
+        force: bool = False,
+    ) -> None:
+        """Refresh the composer context meter between steps of a turn.
+
+        The route only publishes usage when the turn ends, so a long tool
+        loop left the meter frozen at its pre-turn value.  The snapshot is
+        built in the background and throttled so it never delays a step.
+        ``force`` (after pruning or compaction changed the prompt) skips the
+        throttle and publishes after any push still in flight, so a snapshot
+        taken before the cleanup cannot land last.
+        """
+        publish = callbacks.event_publish_callback
+        if publish is None:
+            return
+        now = time.monotonic()
+        pending = ctx.context_usage_push_task
+        pending = pending if pending is not None and not pending.done() else None
+        if not force and (
+            pending is not None
+            or now - ctx.last_context_usage_push_at < CONTEXT_USAGE_PUSH_INTERVAL_SECONDS
+        ):
+            return
+        ctx.last_context_usage_push_at = now
+        session_id = ctx.session.id
+
+        async def _push() -> None:
+            if pending is not None:
+                try:
+                    await pending
+                except Exception:
+                    pass
+            try:
+                snapshot = await build_context_usage_snapshot(
+                    session_id,
+                    session=ctx.session,
+                    provider_id=ctx.provider_id,
+                    model_id=ctx.model_id,
+                )
+                await publish("context.usage.updated", snapshot.model_dump(by_alias=True))
+            except Exception as exc:
+                log.debug("loop.context_usage_push_failed", {
+                    "session_id": session_id,
+                    "error": str(exc),
+                })
+
+        ctx.context_usage_push_task = fire_and_forget(
+            _push(),
+            label="context_usage_push",
+            name=f"context_usage:{session_id}",
+        )
+
+    @classmethod
+    async def _push_context_usage_before_cleanup(
+        cls,
+        ctx: LoopContext,
+        callbacks: "LoopCallbacks",
+    ) -> None:
+        """Publish the size that triggered an overflow before cleanup starts.
+
+        A push still building its snapshot would otherwise read the history
+        mid-prune and show the pruned figure under "Compacting context", which
+        looks like compaction started far below the threshold.
+        """
+        cls._schedule_context_usage_push(ctx, callbacks, force=True)
+        task = ctx.context_usage_push_task
+        if task is not None and not task.done():
+            # ``wait`` neither raises for a cancelled push nor cancels it when
+            # this loop is cancelled; the timeout keeps a slow snapshot from
+            # holding up compaction.
+            await asyncio.wait({task}, timeout=CONTEXT_USAGE_PUSH_WAIT_SECONDS)
+
+    @classmethod
+    async def _publish_turn_stopped(
+        cls,
+        callbacks: "LoopCallbacks",
+        session_id: str,
+        *,
+        step: int,
+        stop_reason: str,
+    ) -> None:
+        turn_state = set_turn_state(
+            session_id,
+            step=step,
+            status="stopped",
+            stop_reason=stop_reason,
+            queued_message_detected=False,
+        )
+        await cls._publish_runtime_event(
+            callbacks,
+            "turn.stopped",
+            turn_state.model_dump(by_alias=True),
+        )
+
+    @classmethod
+    async def _publish_session_status(
+        cls,
+        callbacks: "LoopCallbacks",
+        session_id: str,
+        status: str,
+    ) -> None:
+        if not callbacks.event_publish_callback:
+            return
+        try:
+            from aegisops.session.agent_inbox import AgentInbox
+            await callbacks.event_publish_callback("session.status", {
+                "sessionID": session_id,
+                "status": {"type": status},
+                "ancestorSessionIDs": AgentInbox.ancestors(session_id),
+            })
+        except Exception as exc:
+            log.debug("loop.session_status.publish_failed", {
+                "session_id": session_id,
+                "status": status,
+                "error": str(exc),
+            })
+
+    @classmethod
+    async def _publish_session_notice(
+        cls,
+        callbacks: "LoopCallbacks",
+        session_id: str,
+        *,
+        level: str,
+        message: str,
+        details: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        if not callbacks.event_publish_callback:
+            return
+        try:
+            await callbacks.event_publish_callback("session.notice", {
+                "sessionID": session_id,
+                "level": level,
+                "message": message,
+                "details": details or {},
+            })
+        except Exception as exc:
+            log.debug("loop.session_notice.publish_failed", {"error": str(exc)})
+
+    @classmethod
+    def _has_recent_compaction_cooldown(cls, ctx: LoopContext) -> bool:
+        return (
+            ctx.last_compaction_step is not None
+            and (ctx.step - ctx.last_compaction_step) <= POST_COMPACTION_COOLDOWN_STEPS
+        )
+
+    @classmethod
+    async def _detect_queued_user_message(
+        cls,
+        _session_id: str,
+        post_messages: List[MessageInfo],
+        current_user_id: str,
+        _last_message: Optional[MessageInfo],
+    ) -> Optional[MessageInfo]:
+        if not post_messages:
+            return None
+
+        newest_user = None
+        for msg in reversed(post_messages):
+            if msg.role == MessageRole.USER:
+                newest_user = msg
+                break
+
+        if newest_user is None:
+            return None
+        if newest_user.id <= current_user_id:
+            return None
+        # A fallback assistant is created after a user message that arrived
+        # while the primary model was running. Its newer ID must not make that
+        # user message look handled; the current turn's user ID is the stable
+        # boundary for queued work.
+        return newest_user
+    
+    @classmethod
+    async def run(
+        cls,
+        session_id: str,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        callbacks: Optional[LoopCallbacks] = None,
+        working_directory: Optional[str] = None,
+        auto_failover: bool = False,
+    ) -> LoopResult:
+        """One live runner per session: the run holds the session's execution lease (aegisops.session.ownership)."""
+        from aegisops.session.ownership import SessionExecutionLease, SessionOwnershipLost, current_lease
+
+        kwargs = dict(provider_id=provider_id, model_id=model_id, agent_name=agent_name,
+                      callbacks=callbacks, working_directory=working_directory, auto_failover=auto_failover)
+        from aegisops.session import turn_receipt
+        from aegisops.content.managed import task_scope
+
+        async def run_with_lease(lease: SessionExecutionLease) -> LoopResult:
+            lease.require_owned()
+            with task_scope(f"session:{session_id}#{lease.generation}"):
+                result = await cls._run_owned(session_id, **kwargs)
+            lease.require_owned()
+            if result.action == "queued":
+                turn_receipt.note_handed_off()
+            return result
+
+        # Callers that must atomically prepare input before execution may
+        # already own this session. Borrow only the current context's lease;
+        # its owner retains renewal/release responsibility. _run_owned still
+        # enforces lifecycle and the in-process single-runner boundary.
+        borrowed_lease = current_lease(session_id)
+        if borrowed_lease is not None:
+            try:
+                return await run_with_lease(borrowed_lease)
+            except SessionOwnershipLost as exc:
+                return LoopResult(action="error", error=str(exc))
+
+        if cls.is_running(session_id):
+            result = await cls._run_owned(session_id, **kwargs)
+            if result.action == "queued":
+                turn_receipt.note_handed_off()  # the run going on here answers it
+            return result
+        lease = await SessionExecutionLease.acquire(session_id)
+        if lease is None:
+            # Another worker's run takes the new message on its next step.
+            turn_receipt.note_handed_off()
+            return LoopResult(action="queued", error="Loop already running")
+        try:
+            async with lease:
+                # One run is one task: managed definitions it reads keep the
+                # version they had when it first read them.
+                return await run_with_lease(lease)
+        except SessionOwnershipLost as exc:
+            return LoopResult(action="error", error=str(exc))
+        finally:
+            # Agent input left for the next execution starts it only once the
+            # lease row is released; an earlier wake loses the acquire race.
+            from aegisops.session.agent_inbox import AgentInbox
+            if session_id in AgentInbox._inboxes:
+                AgentInbox.wake(session_id, (callbacks or LoopCallbacks()).event_publish_callback)
+
+    @classmethod
+    @session_mode
+    async def _run_owned(
+        cls,
+        session_id: str,
+        provider_id: Optional[str] = None,
+        model_id: Optional[str] = None,
+        agent_name: Optional[str] = None,
+        callbacks: Optional[LoopCallbacks] = None,
+        working_directory: Optional[str] = None,
+        auto_failover: bool = False,
+    ) -> LoopResult:
+        """
+        Run session loop
+        
+        Main entry point matching AegisOps' SessionPrompt.loop()
+        
+        When provider_id/model_id are not provided, resolves from:
+        1. Session's stored model (if set during creation)
+        2. Global default LLM (default_models.llm -> config.model)
+        3. Environment variables
+        4. Hardcoded fallback
+        
+        Args:
+            session_id: Session ID to process
+            provider_id: Provider ID
+            model_id: Model ID
+            agent_name: Agent name (default: build)
+            callbacks: Loop callbacks
+            
+        Returns:
+            LoopResult with final state
+        """
+        # Check if already running.
+        # Return action="queued" (not "error") so the route layer knows to skip
+        # creating a spurious empty assistant message.  The new user message is
+        # already persisted in the DB; the active loop will pick it up on its
+        # next iteration once it finishes the current step.
+        if cls.is_running(session_id):
+            log.info("loop.already_running", {"session_id": session_id})
+            if auto_failover:
+                active_ctx = cls._active_loops.get(session_id)
+                if (
+                    active_ctx is not None
+                    and is_model_auto_session_category(
+                        getattr(active_ctx.session, "category", "user")
+                    )
+                ):
+                    active_ctx.auto_failover_allowed = True
+                    from aegisops.session.agent_inbox import AgentInbox
+                    AgentInbox.get(session_id).auto_failover_allowed = True
+            return LoopResult(
+                action="queued",
+                error="Loop already running",
+            )
+        
+        # Get session
+        session = await Session.get_by_id(session_id)
+        if not session:
+            log.warning("loop.session_not_found", {"session_id": session_id})
+            return LoopResult(
+                action="error",
+                error=f"Session {session_id} not found",
+            )
+        if session.status != "active":
+            log.warning("loop.session_not_active", {
+                "session_id": session_id,
+                "status": session.status,
+            })
+            return LoopResult(
+                action="error",
+                error=f"Session {session_id} is {session.status}",
+            )
+        effective_agent_name = agent_name or session.agent or "rex"
+        from aegisops.session.agent_policy import (
+            AgentSessionPolicyError,
+            prepare_session_for_agent,
+        )
+
+        runtime_agent = None
+        try:
+            from aegisops.agent.registry import Agent
+
+            runtime_agent = await Agent.get(effective_agent_name)
+            if runtime_agent is None:
+                return LoopResult(
+                    action="error",
+                    error=f"Agent {effective_agent_name!r} is not available",
+                )
+            session = await prepare_session_for_agent(session, runtime_agent)
+        except AgentSessionPolicyError as exc:
+            log.warning("loop.agent_session_policy_rejected", {
+                "session_id": session_id,
+                "agent": effective_agent_name,
+                "error": str(exc),
+            })
+            return LoopResult(action="error", error=str(exc))
+        if working_directory and not (
+            isinstance(getattr(session, "metadata", None), dict)
+            and isinstance(
+                session.metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY),
+                dict,
+            )
+        ):
+            session = session.model_copy(update={"directory": working_directory})
+        
+        # Resolve model when not explicitly provided
+        if not provider_id or not model_id:
+            resolved_provider, resolved_model = await cls._resolve_model(
+                session, provider_id, model_id
+            )
+            provider_id = provider_id or resolved_provider
+            model_id = model_id or resolved_model
+        
+        primary_model = RuntimeModel(
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        model_candidates = [primary_model]
+        candidate_index = 0
+        auto_failover = bool(
+            auto_failover
+            and is_model_auto_session_category(
+                getattr(session, "category", "user")
+            )
+        )
+
+        # Keep the in-memory session aligned with the runtime model so
+        # downstream helpers (title generation, compaction checks, etc.) see
+        # the model actually selected for this loop iteration. Unpinned
+        # sessions must not persist these values; otherwise switching the
+        # global default model would keep older sessions stuck on stale data.
+        if provider_id:
+            session.provider = provider_id
+        if model_id:
+            session.model = model_id
+        
+        # Create SessionContext interface for decoupled access
+        from aegisops.session.core.context import DefaultSessionContext
+        session_ctx = DefaultSessionContext(session)
+        
+        # Compute trace step offset from existing assistant messages so
+        # observability step numbers are cumulative across the whole session.
+        trace_offset = 0
+        try:
+            existing_msgs = await Message.list(session_id)
+            trace_offset = sum(1 for m in existing_msgs if m.role == "assistant")
+        except Exception as _trace_err:
+            log.debug("loop.trace_offset.error", {"error": str(_trace_err)})
+        
+        # Create context
+        ctx = LoopContext(
+            session=session,
+            provider_id=provider_id,
+            model_id=model_id,
+            agent_name=effective_agent_name,
+            session_ctx=session_ctx,
+            trace_step_offset=trace_offset,
+            auto_failover=auto_failover,
+            auto_failover_allowed=auto_failover,
+            model_candidates=model_candidates,
+            candidate_index=candidate_index,
+            session_start_pending=trace_offset == 0,
+        )
+        
+        # Register under the same lock used by archive/delete. This closes the
+        # gap where archival could commit after the status check above but
+        # before the loop became visible to the lifecycle stop logic.
+        async with Session.lifecycle_lock(session_id):
+            latest_session = await Session.get_by_id(session_id)
+            if latest_session is None:
+                log.warning("loop.session_not_found_before_register", {
+                    "session_id": session_id,
+                })
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} not found",
+                )
+            if latest_session.status != "active":
+                log.warning("loop.session_not_active_before_register", {
+                    "session_id": session_id,
+                    "status": latest_session.status,
+                })
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} is {latest_session.status}",
+                )
+            if Session.is_lifecycle_transitioning(session_id):
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} is changing lifecycle state",
+                )
+            if cls.is_running(session_id):
+                return LoopResult(
+                    action="queued",
+                    error="Loop already running",
+                )
+            cls._active_loops[session_id] = ctx
+            from aegisops.session.agent_inbox import AgentInbox
+            inbox = AgentInbox.bind(session_id)
+            ctx.inbox = inbox
+            inbox.parent_id = session.parent_id
+            inbox.category = getattr(session, "category", None)
+            inbox.auto_failover_allowed = ctx.auto_failover_allowed
+            if callbacks and callbacks.on_background_result:
+                inbox.on_result = callbacks.on_background_result
+        
+        # Set status to busy
+        SessionStatus.set(session_id, SessionStatusBusy())
+        
+        try:
+            # Mark orphaned running tool parts as error (e.g. from server restart).
+            # Wrapped in try/except so cleanup failures never block the session loop.
+            try:
+                from aegisops.session.orphan_tools import abort_orphan_running_parts
+
+                await abort_orphan_running_parts(session_id)
+            except Exception as exc:
+                log.warn("loop.orphan_cleanup_failed", {
+                    "session_id": session_id,
+                    "error": str(exc),
+                })
+        
+            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
+            # Run loop iteration
+            from aegisops.session.agent_inbox import AgentInbox
+            while True:
+                result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
+                # A cancelled execution ends here (its inbox is closed); input
+                # sent since then is left to the next one, woken by run().
+                if (ctx.should_abort() or result.error or (ctx.inbox is not None and ctx.inbox.stopped)
+                        or not AgentInbox.get(session_id).messages):
+                    await cls._settle_todos(ctx, result)
+                    return result
+        except asyncio.CancelledError:
+            # Cancelled between steps (a cancelled step is handled in _run_loop).
+            cls._end_cancelled_loop(ctx)
+            # Settle in its own task: the cancellation must reach the caller now.
+            from aegisops.session.background_tasks import track_background_task
+            track_background_task(fire_and_forget(
+                cls._settle_todos(ctx, None), label="loop.todo_settle",
+            ))
+            raise
+        except Exception as e:
+            log.error("loop.error", {"session_id": session_id, "error": str(e)})
+            # Report error to callbacks so CLI/TUI can display it
+            if callbacks and callbacks.on_error:
+                try:
+                    await callbacks.on_error(str(e))
+                except Exception as _cb_err:
+                    log.debug("loop.error.callback_failed", {"error": str(_cb_err)})
+            try:
+                from aegisops.bus.bus import Bus
+                from aegisops.bus.events import SessionError
+                await Bus.publish(SessionError, {
+                    "sessionID": session_id,
+                    "error": str(e),
+                })
+            except Exception as exc:
+                log.warn("loop.error.event_error", {"error": str(exc)})
+            result = LoopResult(
+                action="error",
+                error=str(e),
+                provider_id=ctx.provider_id,
+                model_id=ctx.model_id,
+            )
+            await cls._settle_todos(ctx, result)
+            return result
+        finally:
+            try:
+                clear_turn_state(session_id)
+            
+                # Set status to idle
+                SessionStatus.set(session_id, SessionStatusIdle())
+                from aegisops.session.ownership import require_execution_allowed, SessionOwnershipLost
+                from aegisops.task.lease import ExecutionOwnershipError
+                try:
+                    require_execution_allowed(session_id)
+                    can_publish_idle = True
+                except (SessionOwnershipLost, ExecutionOwnershipError):
+                    can_publish_idle = False
+                if can_publish_idle:
+                    await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
+            
+                    # Touch session (update timestamp)
+                    await Session.touch(session.project_id, session_id)
+
+                    # Publish idle event
+                    try:
+                        from aegisops.bus.bus import Bus
+                        from aegisops.bus.events import SessionIdle
+                        await Bus.publish(SessionIdle, {"sessionID": session_id})
+                    except Exception as exc:
+                        log.warn("loop.idle.event_error", {"error": str(exc)})
+            finally:
+                cls._active_loops.pop(session_id, None)
+                # Agent-triggered loops have no HTTP prompt chain to drain the
+                # user's existing queue when they finish.
+                from aegisops.session.interaction_queue import InteractionQueue
+                if not Session.is_lifecycle_transitioning(session_id) and await InteractionQueue.list(session_id):
+                    from aegisops.server.routes.session import _schedule_prompt_queue_drain
+                    await _schedule_prompt_queue_drain(session_id, session.directory)
+
+    @classmethod
+    async def _settle_todos(cls, ctx: LoopContext, result: Optional[LoopResult]) -> None:
+        """Leave no todo in progress once this run is over (see Todo.settle).
+
+        ``result`` is None for a cancelled run.  The decision is taken under
+        the session write lock, so a todo write or a stop that lands in the
+        meantime is neither overwritten nor missed.
+        """
+        session_id = ctx.session.id
+        try:
+            from aegisops.server.routes.question import has_pending_questions
+            from aegisops.session.agent_inbox import AgentInbox
+            from aegisops.session.features.todo import Todo
+
+            if not Todo.has_in_progress(await Todo.get_snapshot(session_id)):
+                return  # most runs: nothing to settle, no lock taken
+            last = result.last_message if result is not None else None
+            agent_finished = (
+                result is not None
+                and result.action != "error"
+                and not result.error
+                and last is not None
+                and getattr(last, "finish", None) == "stop"
+                and not getattr(last, "error", None)
+                # A goal that is paused, blocked or waiting is not done.
+                and ctx.goal_verdict in (None, "inactive", "complete")
+            )
+
+            async def settle() -> None:
+                current = await Todo.get_snapshot(session_id)
+                # No await from here to the write, so a stop or a newer run
+                # that comes in while reading is still seen.
+                active = cls._active_loops.get(session_id)
+                if active is not None and active is not ctx:
+                    return  # a newer run owns the list now
+                stopped = ctx.should_abort() or (ctx.inbox is not None and ctx.inbox.stopped)
+                # The plan is still live while the user owes an answer or
+                # delegated work can report back (to a stopped run it cannot).
+                if not stopped and (
+                    has_pending_questions(session_id) or AgentInbox.has_pending_reports(session_id)
+                ):
+                    return
+                finished = agent_finished and not stopped
+                todos = Todo.settle(current, finished=finished)
+                if todos is None:
+                    return
+                await Todo.update(session_id, todos)
+                log.info("loop.todo_settled", {
+                    "session_id": session_id,
+                    "finished": finished,
+                    "cleared": not todos,
+                })
+
+            await Session.run_active_write(session_id, settle)
+        except (SessionInactiveError, SessionNotFoundError):
+            pass  # archived or deleted while running
+        except Exception as exc:
+            log.warn("loop.todo_settle.error", {"session_id": session_id, "error": str(exc)})
+
+    @staticmethod
+    async def _resolve_model(
+        session: Any,
+        provider_id: Optional[str],
+        model_id: Optional[str],
+        *,
+        include_source: bool = False,
+    ) -> tuple:
+        """
+        Resolve provider_id and model_id for session execution.
+        
+        Priority:
+        1. Explicitly passed provider_id / model_id (already handled by caller)
+        2. Session's stored model/provider (set during Session.create)
+        3. Agent model override from Storage (set via WebUI)
+        4. Agent-specific model from AgentInfo.model (agent.yaml / config)
+        5. Parent session's model/provider (inherits from parent — TUI/CLI default)
+        6. Global default LLM (default_models.llm -> config.model)
+        7. Environment variables
+        8. Hardcoded fallback
+        
+        Returns:
+            (provider_id, model_id) tuple
+        """
+        import os
+        
+        resolved_provider = provider_id
+        resolved_model = model_id
+        source = "explicit" if provider_id and model_id else "unknown"
+        
+        # Priority 2: Session's stored model/provider
+        if (not resolved_provider or not resolved_model) and Session.has_pinned_model(session):
+            resolved_provider = resolved_provider or session.provider
+            resolved_model = resolved_model or session.model
+            if resolved_provider and resolved_model:
+                source = "session"
+        
+        # Priority 3: Agent model override from Storage (set via WebUI)
+        if not resolved_provider or not resolved_model:
+            agent_name = getattr(session, 'agent', None)
+            if agent_name:
+                try:
+                    from aegisops.storage.storage import Storage
+                    overrides = await Storage.read("agent/model_overrides")
+                    if isinstance(overrides, dict) and agent_name in overrides:
+                        override = overrides[agent_name]
+                        override_provider = override.get('providerID')
+                        override_model = override.get('modelID')
+                        if override_provider and override_model:
+                            resolved_provider = override_provider
+                            resolved_model = override_model
+                            source = "agent_override"
+                except Exception as _e:
+                    log.debug("loop.resolve_model.storage_override_failed", {"error": str(_e)})
+        
+        # Priority 4: Agent-specific model from AgentInfo
+        if not resolved_provider or not resolved_model:
+            agent_name = getattr(session, 'agent', None)
+            if agent_name:
+                try:
+                    from aegisops.agent.registry import Agent
+                    agent_info = await Agent.get(agent_name)
+                    if agent_info and agent_info.model:
+                        resolved_provider = resolved_provider or agent_info.model.provider_id
+                        resolved_model = resolved_model or agent_info.model.model_id
+                        if resolved_provider and resolved_model:
+                            source = "agent"
+                except Exception as _e:
+                    log.debug("loop.resolve_model.agent_model_failed", {"error": str(_e)})
+        
+        # Priority 5: Parent session's model/provider (inherit from Rex etc.)
+        if not resolved_provider or not resolved_model:
+            parent_id = getattr(session, 'parent_id', None)
+            if parent_id:
+                try:
+                    parent = await Session.get_by_id(parent_id)
+                    if Session.has_pinned_model(parent):
+                        resolved_provider = resolved_provider or getattr(parent, 'provider', None)
+                        resolved_model = resolved_model or getattr(parent, 'model', None)
+                        if resolved_provider and resolved_model:
+                            source = "parent_session"
+                except Exception as _e:
+                    log.debug("loop.resolve_model.parent_failed", {"error": str(_e)})
+        
+        # Priority 6: Global default LLM (default_models.llm -> config.model)
+        if not resolved_provider or not resolved_model:
+            try:
+                from aegisops.config.config import Config
+                default_llm = await Config.resolve_default_llm()
+                if default_llm:
+                    resolved_provider = resolved_provider or default_llm["provider_id"]
+                    resolved_model = resolved_model or default_llm["model_id"]
+                    if resolved_provider and resolved_model:
+                        source = "config"
+            except Exception as _e:
+                log.debug("loop.resolve_model.config_default_failed", {"error": str(_e)})
+        
+        # Priority 7: Environment variables
+        if not resolved_provider:
+            resolved_provider = os.environ.get("LLM_PROVIDER")
+        if not resolved_model:
+            resolved_model = os.environ.get("LLM_MODEL")
+        if resolved_provider and resolved_model and source == "unknown":
+            source = "env_default"
+        
+        # Priority 8: Hardcoded fallback
+        from aegisops.session.core.defaults import fallback_provider_id, fallback_model_id
+        resolved_provider = resolved_provider or fallback_provider_id()
+        resolved_model = resolved_model or fallback_model_id()
+        if source == "unknown":
+            source = "fallback"
+
+        if include_source:
+            return resolved_provider, resolved_model, source
+        return resolved_provider, resolved_model
+
+    @classmethod
+    async def _reset_auto_turn_candidates(
+        cls,
+        ctx: LoopContext,
+        primary: RuntimeModel,
+        user_message_id: str,
+        config: Any,
+    ) -> int:
+        """Rebuild and activate the configured or automatic chain for one turn."""
+        configured = bool(getattr(config, "fallback_providers", None))
+        if configured:
+            cls.clear_auto_failover_state(ctx.session.id)
+            preferred = None
+        else:
+            preferred = cls._active_cooldown_model(ctx.session.id, primary)
+
+        ctx.model_candidates = await cls._build_model_candidates(
+            primary,
+            route_seed=f"{ctx.session.id}:{user_message_id}",
+            preferred=preferred,
+            config=config,
+        )
+        ctx.model_candidate_policy = (
+            "configured" if configured else "automatic"
+        )
+        ctx.auto_failover = True
+        next_index = (
+            0
+            if configured
+            else cls._cooldown_candidate_index(
+                ctx.session.id,
+                ctx.model_candidates,
+            )
+        )
+        cls._select_candidate(ctx, next_index)
+        ctx.auto_candidates_initialized = True
+        return next_index
+
+    @classmethod
+    async def _pending_real_user(
+        cls,
+        ctx: LoopContext,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+    ) -> Optional[MessageInfo]:
+        """Find the human turn hidden by inbox input, without replaying old hooks."""
+        parts = await Message.parts(last_user.id, ctx.session.id)
+        if not any(bool(getattr(part, "synthetic", False)) for part in parts):
+            return last_user
+
+        from aegisops.session.agent_inbox import AgentInbox
+        prepared_id = ctx.turn_user_id or AgentInbox.get(ctx.session.id).prepared_user_id
+        # An assistant can be created after a queued human input while still
+        # answering the previous turn. Its parent, not its own ID, is the boundary.
+        handled_ids = {getattr(msg, "parentID", None) for msg in messages
+                       if msg.role == MessageRole.ASSISTANT}
+        for msg in reversed(messages):
+            if msg.role != MessageRole.USER:
+                continue
+            if msg.id == prepared_id or msg.id in handled_ids:
+                break
+            parts = await Message.parts(msg.id, ctx.session.id)
+            if not any(bool(getattr(part, "synthetic", False)) for part in parts):
+                return msg
+        return None
+
+    @classmethod
+    async def _prepare_auto_turn(
+        cls,
+        ctx: LoopContext,
+        last_user: MessageInfo,
+    ) -> bool:
+        """Synchronize routing when the loop advances to a real WebUI turn.
+
+        Returns:
+            True when ``last_user`` starts a new non-synthetic user turn.
+        """
+        if last_user.id == ctx.turn_user_id:
+            return False
+
+        parts = await Message.parts(last_user.id, ctx.session.id)
+        if any(bool(getattr(part, "synthetic", False)) for part in parts):
+            return False
+
+        if ctx.turn_user_id is None:
+            ctx.turn_user_id = last_user.id
+            if ctx.auto_failover and ctx.auto_failover_allowed:
+                from aegisops.config.config import Config
+
+                primary = ctx.model_candidates[0]
+                config = await Config.get()
+                await cls._reset_auto_turn_candidates(
+                    ctx,
+                    primary,
+                    last_user.id,
+                    config=config,
+                )
+            return True
+
+        ctx.turn_user_id = last_user.id
+        persisted_session = await Session.get_by_id(ctx.session.id)
+        persisted_model_auto = bool(
+            persisted_session
+            and is_model_auto_session_category(
+                getattr(persisted_session, "category", "user")
+            )
+            and getattr(persisted_session, "model_auto", False)
+        )
+        persisted_auto = persisted_model_auto and ctx.auto_failover_allowed
+
+        user_model = getattr(last_user, "model", None)
+        user_provider_id = None
+        user_model_id = None
+        if isinstance(user_model, dict):
+            user_provider_id = user_model.get("providerID") or user_model.get("provider_id")
+            user_model_id = user_model.get("modelID") or user_model.get("model_id")
+
+        if not persisted_auto:
+            ctx.auto_failover = False
+            if not persisted_model_auto:
+                cls.clear_auto_failover_state(ctx.session.id)
+                ctx.auto_failover_allowed = False
+            provider_id = (
+                getattr(persisted_session, "provider", None)
+                if Session.has_pinned_model(persisted_session)
+                else user_provider_id
+            ) or ctx.provider_id
+            model_id = (
+                getattr(persisted_session, "model", None)
+                if Session.has_pinned_model(persisted_session)
+                else user_model_id
+            ) or ctx.model_id
+            ctx.model_candidates = [RuntimeModel(provider_id, model_id)]
+            ctx.model_candidate_policy = "fixed"
+            cls._select_candidate(ctx, 0)
+            log.info("session.model.auto_disabled_for_turn", {
+                "session_id": ctx.session.id,
+                "provider_id": provider_id,
+                "model_id": model_id,
+            })
+            return True
+
+        from aegisops.config.config import Config
+
+        config = await Config.get()
+        previous = RuntimeModel(ctx.provider_id, ctx.model_id)
+        default_llm = await Config.resolve_default_llm()
+        primary = RuntimeModel(
+            provider_id=(default_llm or {}).get("provider_id") or user_provider_id or ctx.provider_id,
+            model_id=(default_llm or {}).get("model_id") or user_model_id or ctx.model_id,
+        )
+        next_index = await cls._reset_auto_turn_candidates(
+            ctx,
+            primary,
+            last_user.id,
+            config=config,
+        )
+        active = ctx.model_candidates[next_index]
+        log.info("session.model.auto_turn_reset", {
+            "session_id": ctx.session.id,
+            "from_provider_id": previous.provider_id,
+            "from_model_id": previous.model_id,
+            "to_provider_id": active.provider_id,
+            "to_model_id": active.model_id,
+            "cooldown_active": next_index > 0,
+        })
+        return True
+
+    @classmethod
+    async def _run_user_prompt_before_hook(
+        cls,
+        ctx: LoopContext,
+        last_user: MessageInfo,
+    ) -> None:
+        """Run UserPromptBefore once for a newly observed real user turn."""
+        try:
+            from aegisops.hooks.pipeline import HookPipeline
+
+            prompt = await Message.get_text_content(last_user)
+            hook_ctx = await HookPipeline.run_user_prompt_before({
+                "sessionID": ctx.session.id,
+                "sessionCategory": ctx.session.category,
+                "workspace": ctx.session.directory,
+                "agent": getattr(last_user, "agent", None) or ctx.agent_name,
+                "model": {
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                "messageID": last_user.id,
+                "prompt": prompt,
+            })
+            additional_context = hook_ctx.output.get("additionalContext")
+            if isinstance(additional_context, str) and additional_context.strip():
+                ctx.turn_additional_context = additional_context.strip()
+        except Exception as exc:
+            log.debug("loop.hook.user_prompt_before.error", {
+                "session_id": ctx.session.id,
+                "message_id": last_user.id,
+                "error": str(exc),
+            })
+
+    @classmethod
+    async def _run_turn_after_hook(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        last_user: MessageInfo,
+        last_message: MessageInfo,
+    ) -> bool:
+        """Run turn.after with terminal facts; never continue from hook output."""
+        try:
+            from aegisops.hooks.pipeline import HookPipeline
+
+            hook_user = last_user
+            if ctx.turn_user_id:
+                hook_user = (
+                    await Message.get(ctx.session.id, ctx.turn_user_id)
+                    or last_user
+                )
+            user_text = await Message.get_text_content(hook_user)
+            assistant_text = await Message.get_text_content(last_message)
+            await HookPipeline.run_turn_after({
+                "sessionID": ctx.session.id,
+                "sessionCategory": ctx.session.category,
+                "workspace": ctx.session.directory,
+                "agent": getattr(last_message, "agent", None) or ctx.agent_name,
+                "model": {
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                "step": ctx.trace_step,
+                "userMessage": {
+                    "id": hook_user.id,
+                    "content": user_text,
+                },
+                "assistantMessage": {
+                    "id": last_message.id,
+                    "content": assistant_text,
+                },
+                "terminalOutcome": {
+                    "status": "success",
+                    "finish_reason": "stop",
+                },
+            })
+        except Exception as exc:
+            log.debug("loop.hook.turn_after.error", {
+                "session_id": ctx.session.id,
+                "message_id": getattr(last_message, "id", None),
+                "error": str(exc),
+            })
+            return False
+        return False
+
+    @classmethod
+    async def _finalize_deferred_failure(
+        cls,
+        ctx: LoopContext,
+        failure: Any,
+        last_user: MessageInfo,
+    ) -> None:
+        """Persist only the final Auto candidate failure."""
+        if not failure.assistant_message_id:
+            assistant = await Message.create(
+                session_id=ctx.session.id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=getattr(last_user, "agent", None) or ctx.agent_name or "rex",
+                model_id=ctx.model_id,
+                provider_id=ctx.provider_id,
+                parent_id=last_user.id,
+                error=failure.error_data,
+                finish="error",
+            )
+            failure.assistant_message_id = assistant.id
+            return
+        await Message.update(
+            ctx.session.id,
+            failure.assistant_message_id,
+            error=failure.error_data,
+            finish="error",
+        )
+
+    @classmethod
+    async def _process_step_with_failover(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+    ) -> Any:
+        """Run one logical step, moving across candidates without replaying output."""
+        from aegisops.session.runner import RunnerCallbacks, SessionRunner
+
+        while True:
+            runner_cbs = callbacks.runner_callbacks
+            if runner_cbs is None:
+                runner_cbs = RunnerCallbacks()
+            if callbacks.event_publish_callback and not runner_cbs.event_publish_callback:
+                runner_cbs.event_publish_callback = callbacks.event_publish_callback
+
+            runner = SessionRunner(
+                session=ctx.session,
+                provider_id=ctx.provider_id,
+                model_id=ctx.model_id,
+                agent_name=ctx.agent_name,
+                abort_event=ctx.abort_event,
+                callbacks=runner_cbs,
+                session_ctx=ctx.session_ctx,
+                memory_bootstrap_data=ctx.memory_bootstrap_data,
+                static_cache=ctx.runner_static_cache,
+                defer_step_errors=ctx.auto_failover,
+                failover_available=(
+                    ctx.auto_failover
+                    and ctx.candidate_index + 1 < len(ctx.model_candidates)
+                ),
+                turn_additional_context=ctx.turn_additional_context,
+                session_start_pending=ctx.session_start_pending,
+            )
+            runner._step = ctx.trace_step
+            ctx.execution_activity = runner.execution_activity
+
+            try:
+                step_result = await runner._process_step(messages, last_user)
+            finally:
+                ctx.execution_activity["state"] = "processing"
+                ctx.execution_activity["active_tools"] = {}
+            ctx.max_steps_reached |= bool(getattr(runner, "max_steps_reached", False))
+            if runner._session_start_fired:
+                ctx.session_start_pending = False
+            failure = step_result.failure
+            if not ctx.auto_failover or failure is None:
+                return step_result
+
+            next_index = ctx.candidate_index + 1
+            has_next = next_index < len(ctx.model_candidates)
+            if not failure.allow_fallback or not has_next:
+                if (
+                    ctx.model_candidate_policy == "automatic"
+                    and failure.allow_fallback
+                    and not has_next
+                    and ctx.candidate_index > 0
+                    and failure.reason not in {"rate_limit", "billing"}
+                ):
+                    expires_at = time.monotonic() + CHAIN_EXHAUSTION_COOLDOWN_SECONDS
+                    existing_cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
+                    if not (
+                        existing_cooldown
+                        and existing_cooldown.expires_at > expires_at
+                    ):
+                        cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
+                            model=ctx.model_candidates[ctx.candidate_index],
+                            primary=ctx.model_candidates[0],
+                            expires_at=expires_at,
+                            reason="chain_exhausted",
+                        )
+                await cls._finalize_deferred_failure(ctx, failure, last_user)
+                return step_result
+
+            # A candidate may be removed only while its attempt is completely
+            # replay-safe. Failure to delete stops the switch to avoid leaving
+            # two assistant cards for one logical response.
+            if failure.assistant_message_id:
+                try:
+                    deleted = await Message.delete(
+                        ctx.session.id,
+                        failure.assistant_message_id,
+                    )
+                except Exception as exc:
+                    deleted = False
+                    log.error("session.model.fallback_cleanup_failed", {
+                        "session_id": ctx.session.id,
+                        "message_id": failure.assistant_message_id,
+                        "error": str(exc),
+                    })
+                if not deleted:
+                    await cls._finalize_deferred_failure(ctx, failure, last_user)
+                    return step_result
+                await cls._publish_runtime_event(callbacks, "message.removed", {
+                    "sessionID": ctx.session.id,
+                    "messageID": failure.assistant_message_id,
+                })
+
+            previous = ctx.model_candidates[ctx.candidate_index]
+            next_candidate = ctx.model_candidates[next_index]
+
+            if ctx.model_candidate_policy == "automatic":
+                if ctx.candidate_index == 0 and failure.reason in {"rate_limit", "billing"}:
+                    cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
+                        model=next_candidate,
+                        primary=ctx.model_candidates[0],
+                        expires_at=time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS,
+                        reason=failure.reason,
+                    )
+                else:
+                    cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
+                    if cooldown and cooldown.expires_at > time.monotonic():
+                        cooldown.model = next_candidate
+
+            cls._select_candidate(ctx, next_index)
+            event_payload = {
+                "sessionID": ctx.session.id,
+                "from": {
+                    "providerID": previous.provider_id,
+                    "modelID": previous.model_id,
+                },
+                "to": {
+                    "providerID": next_candidate.provider_id,
+                    "modelID": next_candidate.model_id,
+                },
+                "reason": failure.reason,
+                "candidateIndex": next_index,
+            }
+            log.warn("session.model.fallback", {
+                "from": event_payload["from"],
+                "to": event_payload["to"],
+                "reason": event_payload["reason"],
+                "candidateIndex": event_payload["candidateIndex"],
+            })
+            await cls._publish_runtime_event(
+                callbacks,
+                "session.model.fallback",
+                event_payload,
+            )
+
+    @staticmethod
+    async def _dedicated_agent_violation(
+        session_id: str,
+        messages: List[MessageInfo],
+        step_agent: Optional[str],
+    ) -> Optional[str]:
+        """Re-check a dedicated-agent claim against the step about to run.
+
+        Claims and new user messages share a database lock, but a foreign user
+        message can still be in storage from before the claim checks existed,
+        from an import, or from an older process. It must neither pick the
+        agent for this step nor reach the dedicated agent's context.
+        """
+        current = await Session.get_by_id_unfiltered(session_id)
+        metadata = getattr(current, "metadata", None)
+        policy = (
+            metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+            if isinstance(metadata, dict)
+            else None
+        )
+        if not (isinstance(policy, dict) and policy.get("version") == 1):
+            return None
+        claimed = policy.get("agent")
+        if step_agent != claimed or any(
+            msg.role == MessageRole.USER and getattr(msg, "agent", None) != claimed
+            for msg in messages
+        ):
+            return f"Session {session_id} is dedicated to agent {claimed!r}"
+        return None
+
+    @classmethod
+    async def _run_loop(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+    ) -> LoopResult:
+        """
+        Main loop iteration logic
+        
+        完全匹配 TUI SessionPrompt.loop() 的结构:
+        1. Get messages and analyze (lastUser, lastAssistant, lastFinished)
+        2. Check exit conditions
+        3. Generate title on first step
+        4. Check for pending compaction
+        5. Check context overflow (compaction before step)
+        6. Process step (call LLM + tools)
+        7. Loop until complete
+        """
+        last_message: Optional[MessageInfo] = None
+        loop_error: Optional[str] = None
+        loop_error_code: Optional[str] = None
+        retry_preparation = False
+
+        while not ctx.should_abort():
+            from aegisops.session.ownership import require_execution_allowed
+            require_execution_allowed(ctx.session.id)
+            from aegisops.session.agent_inbox import AgentInbox
+            await AgentInbox.drain(ctx.session.id, callbacks)
+            if ctx.should_abort():
+                break
+            # Set status to busy
+            SessionStatus.set(ctx.session.id, SessionStatusBusy())
+            retrying_preparation = retry_preparation
+            retry_preparation = False
+            if not retrying_preparation:
+                ctx.step += 1
+                turn_state = set_turn_state(
+                    ctx.session.id,
+                    step=ctx.step,
+                    status="started",
+                    queued_message_detected=False,
+                )
+                await cls._publish_runtime_event(callbacks, "turn.started", turn_state.model_dump(by_alias=True))
+                log.info("loop.step", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                })
+
+                # Callback: step start
+                if callbacks.on_step_start:
+                    await callbacks.on_step_start(ctx.step)
+            
+            # Get messages via SessionContext interface
+            messages_started_at = asyncio.get_event_loop().time()
+            if ctx.session_ctx:
+                messages = await ctx.session_ctx.get_messages()
+            else:
+                messages = await Message.list(ctx.session.id)
+            log.debug("loop.messages_loaded", {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "message_count": len(messages),
+                "duration_ms": int((asyncio.get_event_loop().time() - messages_started_at) * 1000),
+            })
+            if not messages:
+                log.info("loop.no_messages", {"session_id": ctx.session.id})
+                await cls._publish_turn_stopped(
+                    callbacks,
+                    ctx.session.id,
+                    step=ctx.step,
+                    stop_reason="no_messages",
+                )
+                break
+            
+            # Analyze messages (matching TUI lines 277-292)
+            last_user: Optional[MessageInfo] = None
+            last_assistant: Optional[MessageInfo] = None
+            last_finished: Optional[MessageInfo] = None
+            tasks: List[tuple[str, Any]] = []  # (type, part) - compaction only
+            
+            scan_started_at = asyncio.get_event_loop().time()
+            for msg in reversed(messages):
+                # Find lastUser
+                if not last_user and msg.role == MessageRole.USER:
+                    last_user = msg
+                
+                # Find lastAssistant
+                if not last_assistant and msg.role == MessageRole.ASSISTANT:
+                    last_assistant = msg
+                
+                # Find lastFinished
+                if not last_finished and msg.role == MessageRole.ASSISTANT and hasattr(msg, 'finish') and msg.finish:
+                    last_finished = msg
+                
+                # Stop when we have both lastUser and lastFinished
+                if last_user and last_finished:
+                    break
+                
+                # Collect pending compaction before lastFinished
+                if not last_finished:
+                    parts = await Message.parts(msg.id, ctx.session.id)
+                    for part in parts:
+                        if part.type == "compaction":
+                            tasks.append(("compaction", part))
+            log.debug("loop.message_scan_complete", {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "task_count": len(tasks),
+                "duration_ms": int((asyncio.get_event_loop().time() - scan_started_at) * 1000),
+            })
+            
+            # Check if we have a user message
+            if not last_user:
+                log.info("loop.no_user_message", {
+                    "session_id": ctx.session.id,
+                    "message_count": len(messages),
+                    "roles": [str(getattr(msg, "role", "")) for msg in messages[-5:]],
+                })
+                await cls._publish_turn_stopped(
+                    callbacks,
+                    ctx.session.id,
+                    step=ctx.step,
+                    stop_reason="no_user_message",
+                )
+                break
+
+            policy_violation = await cls._dedicated_agent_violation(
+                ctx.session.id,
+                messages,
+                getattr(last_user, "agent", None) or ctx.agent_name,
+            )
+            if policy_violation:
+                log.warning("loop.agent_session_policy_rejected", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "error": policy_violation,
+                })
+                loop_error = policy_violation
+                loop_error_code = "agent_session_policy"
+                if callbacks.on_error:
+                    await callbacks.on_error(policy_violation)
+                break
+
+            last_assistant_parts = (
+                await Message.parts(last_assistant.id, ctx.session.id)
+                if last_assistant
+                else []
+            )
+
+            # Check exit conditions (matching TUI lines 295-302)
+            if cls._should_exit(last_user, last_assistant, last_assistant_parts):
+                log.info("loop.exit_condition", {
+                    "session_id": ctx.session.id,
+                    "last_user_id": last_user.id,
+                    "last_assistant_id": last_assistant.id if last_assistant else None,
+                    "finish": last_assistant.finish if last_assistant else None,
+                    "has_tool_parts": any(
+                        getattr(part, "type", None) == "tool"
+                        for part in last_assistant_parts
+                    ),
+                })
+                last_message = last_assistant
+                break
+
+            turn_user = await cls._pending_real_user(ctx, messages, last_user)
+            if turn_user and await cls._prepare_auto_turn(ctx, turn_user):
+                ctx.turn_additional_context = None
+                ctx.stop_hook_active = False
+                await cls._run_user_prompt_before_hook(ctx, turn_user)
+                AgentInbox.get(ctx.session.id).prepared_user_id = turn_user.id
+            if turn_user is None and ctx.auto_failover and ctx.auto_failover_allowed and not ctx.auto_candidates_initialized:
+                # A fresh inbox wake may contain only synthetic input. It still
+                # needs a failover chain, but must not re-run a human turn's hooks.
+                from aegisops.config.config import Config
+                await cls._reset_auto_turn_candidates(
+                    ctx, ctx.model_candidates[0], last_user.id, config=await Config.get(),
+                )
+            AgentInbox.get(ctx.session.id).auto_failover_allowed = ctx.auto_failover_allowed
+
+            # Bootstrap memory on first step (once per loop, stored in ctx)
+            if ctx.step == 1 and not retrying_preparation and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
+                try:
+                    from aegisops.memory.bootstrap import MemoryBootstrap
+                    ctx.memory_bootstrap_data = await MemoryBootstrap(
+                        project_id=ctx.session.project_id,
+                    ).bootstrap(load_daily=False)
+                    log.info("loop.memory_bootstrap_done", {
+                        "session_id": ctx.session.id,
+                        "has_main": ctx.memory_bootstrap_data.get("main_memory") is not None,
+                    })
+                except Exception as e:
+                    log.error("loop.memory_bootstrap_error", {"error": str(e)})
+
+            # Early title generation: fire concurrently with the first LLM call so
+            # the title is ready (or nearly so) by the time the response completes.
+            # This is an optimistic fast-path — CLISessionRunner._process_message()
+            # also calls generate_title_after_first_message() after the loop as a
+            # guaranteed safety net (handles single-run mode where asyncio cleanup
+            # may cancel this task before it finishes).
+            # generate_title_after_first_message is idempotent: if this task saves
+            # the title first, the safety-net call returns immediately.
+            if ctx.step == 1 and not retrying_preparation and not ctx.auto_failover and runtime_controls.get() is None:
+                try:
+                    from aegisops.session.lifecycle.title import SessionTitle
+                    # UserMessageInfo.model is Dict[str, str] {"providerID": ..., "modelID": ...}
+                    user_model = getattr(last_user, 'model', None) if last_user else None
+                    if isinstance(user_model, dict):
+                        title_model_id = user_model.get("modelID", ctx.model_id)
+                        title_provider_id = user_model.get("providerID", ctx.provider_id)
+                    else:
+                        title_model_id = ctx.model_id
+                        title_provider_id = ctx.provider_id
+                    fire_and_forget(
+                        SessionTitle.ensure_title(
+                            session_id=ctx.session.id,
+                            model_id=title_model_id,
+                            provider_id=title_provider_id,
+                            messages=messages,
+                            event_publish_callback=callbacks.event_publish_callback if callbacks else None,
+                        ),
+                        label="title_generation",
+                        name=f"title:{ctx.session.id}",
+                    )
+                except Exception as e:
+                    log.error("loop.title_generation.error", {"error": str(e)})
+            
+            # Check for pending compaction
+            if tasks:
+                task_type, task_part = tasks.pop()
+
+                if task_type == "compaction":
+                    log.info("loop.compaction_pending", {
+                        "session_id": ctx.session.id,
+                        "step": ctx.step,
+                        "auto": getattr(task_part, 'auto', False),
+                    })
+                    
+                    # Callback: compaction
+                    if callbacks.on_compaction:
+                        await callbacks.on_compaction()
+                    
+                    # Build dynamic CompactionPolicy from model info
+                    compaction_policy = cls._build_compaction_policy(ctx)
+                    
+                    # Auto-compaction also surfaces a "Compacting..."
+                    # banner on the UI (driven by ``session.status`` →
+                    # ``compacting``), so we wire the same SSE progress
+                    # adapter as the manual ``/compact`` route.  The
+                    # closure captures ``ctx.session.id`` and the
+                    # publish callback explicitly to keep behaviour
+                    # identical between loop and route paths.
+                    _publish = callbacks.event_publish_callback if callbacks else None
+                    _session_id_for_progress = ctx.session.id
+                    progress_callback = None
+                    if _publish is not None:
+                        async def progress_callback(stage: str, data: dict) -> None:
+                            await _publish("session.compaction_progress", {
+                                "sessionID": _session_id_for_progress,
+                                "stage": stage,
+                                "data": data,
+                            })
+
+                    # Process compaction
+                    try:
+                        compaction_result = await run_compaction(
+                            ctx.session.id,
+                            parent_message_id=last_user.id,
+                            messages=messages,
+                            provider_id=ctx.provider_id,
+                            model_id=ctx.model_id,
+                            auto=getattr(task_part, 'auto', False),
+                            event_publish_callback=_publish,
+                            status_after="busy",
+                            policy=compaction_policy,
+                            progress_callback=progress_callback,
+                        )
+                        
+                        if compaction_result == "stop":
+                            log.error("loop.compaction_failed", {"session_id": ctx.session.id})
+                            if callbacks.on_error:
+                                await callbacks.on_error("Compaction failed")
+                            break
+
+                        if compaction_result == "skipped":
+                            log.info("loop.manual_compaction_skipped", {
+                                "session_id": ctx.session.id,
+                                "step": ctx.step,
+                            })
+
+                        # Continue after compaction (whether compacted or skipped)
+                        continue
+                        
+                    except Exception as e:
+                        log.error("loop.compaction_error", {"error": str(e)})
+                        if callbacks.on_error:
+                            await callbacks.on_error(f"Compaction error: {str(e)}")
+                        break
+            
+            # ----------------------------------------------------------------
+            # Context overflow detection & recovery
+            #
+            # Matches OpenClaw run.ts overflow recovery cascade:
+            #   1. Detect overflow
+            #   2. Try tool result truncation (once per run)
+            #   3. Full compaction (up to MAX_OVERFLOW_COMPACTION_ATTEMPTS)
+            #   4. Give up with error if still overflowing
+            # ----------------------------------------------------------------
+            if last_finished and not getattr(last_finished, 'summary', False):
+                # Get model context limit from aegisops.json / provider registry
+                model_context, model_output, model_input = Provider.resolve_model_info(
+                    ctx.provider_id, ctx.model_id
+                )
+                
+                # Check for overflow using dynamic CompactionPolicy
+                if model_context > 0:
+                    compaction_policy = CompactionPolicy.from_model(
+                        context_window=model_context,
+                        max_output_tokens=model_output or 4096,
+                        max_input_tokens=model_input,
+                    )
+                    
+                    # Build tokens_dict from last_finished.tokens if available.
+                    # last_finished.tokens may be a TokenUsage Pydantic model (not a
+                    # plain dict), so we normalise it to a dict here to ensure the
+                    # provider-reported usage is actually read instead of silently
+                    # falling through to the chars/4 estimation path.
+                    tokens_dict = {}
+                    if hasattr(last_finished, 'tokens') and last_finished.tokens:
+                        raw_tok = last_finished.tokens
+                        if isinstance(raw_tok, dict):
+                            tokens_dict = raw_tok
+                        elif hasattr(raw_tok, 'model_dump'):
+                            tokens_dict = raw_tok.model_dump()
+                        elif hasattr(raw_tok, '__dict__'):
+                            tokens_dict = vars(raw_tok)
+
+                    # Check if provider returned actual usage data (not all zeros)
+                    input_tokens = tokens_dict.get("input", 0)
+                    _cache = tokens_dict.get("cache") or {}
+                    cache_read = _cache.get("read", 0) if isinstance(_cache, dict) else 0
+                    # ``input`` excludes cached tokens on both sides of the
+                    # cache: a cold-cache call reports most of its prompt as
+                    # ``cache.write``.
+                    cache_write = _cache.get("write", 0) if isinstance(_cache, dict) else 0
+                    output_tokens = tokens_dict.get("output", 0)
+                    reasoning_tokens = tokens_dict.get("reasoning", 0)
+                    observed_prompt_tokens = input_tokens + cache_read + cache_write
+                    reported_total = observed_prompt_tokens + output_tokens + reasoning_tokens
+
+                    # Provider usage describes the prompt before the latest
+                    # assistant response and its tool results.  Always compare
+                    # it with a lightweight estimate of the current messages
+                    # so newly produced tool output cannot be missed.
+                    if reported_total > 0:
+                        ctx.last_observed_prompt_tokens = reported_total
+                    # The assistant is marked ``tool-calls`` before its tools
+                    # finish, so a concurrent UI estimate may have cached this
+                    # message without the completed tool output.
+                    SessionPrompt.invalidate_message_cache(last_finished.id)
+                    last_finished_index = next(
+                        (
+                            index
+                            for index, message in enumerate(messages)
+                            if message.id == last_finished.id
+                        ),
+                        len(messages) - 1,
+                    )
+                    observed_index = last_finished_index
+                    observed_total = reported_total if observed_prompt_tokens > 0 else 0
+                    if observed_total <= 0:
+                        # A step can end without provider usage (a stream cut
+                        # mid tool call, a provider that omits it).  Judge by
+                        # the latest call that did report usage plus what came
+                        # after it, as the composer meter does: the
+                        # message-only estimate leaves out the system prompt
+                        # and tool definitions.
+                        earlier = latest_observation(messages[:last_finished_index])
+                        if (
+                            earlier is not None
+                            and earlier.prompt_tokens > 0
+                            and has_observation_baseline(ctx.session.id, earlier.message_id)
+                        ):
+                            observed_index = earlier.index
+                            observed_total = earlier.used_tokens
+
+                    async def _estimate_effective_tokens() -> tuple[int, int, str, int]:
+                        if observed_total > 0:
+                            # Shared with the composer meter, and subtracts
+                            # what cleanup removed since the observed call so
+                            # a pruned prompt is not judged by stale usage.
+                            (
+                                observed_effective,
+                                delta_tokens,
+                                freed_tokens,
+                            ) = await estimate_observed_context_tokens(
+                                ctx.session.id,
+                                messages,
+                                observed_index,
+                                observed_total,
+                            )
+                            return (
+                                observed_effective,
+                                delta_tokens,
+                                "observed+estimated_delta",
+                                freed_tokens,
+                            )
+
+                        estimated_tokens = (
+                            await SessionPrompt.estimate_full_context_tokens(
+                                ctx.session.id,
+                                messages,
+                                policy=compaction_policy,
+                            )
+                        )
+                        return max(reported_total, estimated_tokens), estimated_tokens, "estimated", 0
+
+                    (
+                        effective_tokens,
+                        estimated_component_tokens,
+                        decision_source,
+                        freed_tokens,
+                    ) = await _estimate_effective_tokens()
+                    tokens_dict = {
+                        "input": effective_tokens,
+                        "output": 0,
+                        "cache": {"read": 0, "write": 0},
+                    }
+                    log.info("loop.tokens_decision", {
+                        "session_id": ctx.session.id,
+                        "source": decision_source,
+                        "effective_tokens": effective_tokens,
+                        "observed_tokens": reported_total,
+                        "estimated_component_tokens": estimated_component_tokens,
+                        "freed_tokens": freed_tokens,
+                        "message_count": len(messages),
+                        "overflow_threshold": compaction_policy.overflow_threshold,
+                    })
+                    # The observed call's baseline is recorded now, so a
+                    # concurrent meter snapshot cannot capture it post-cleanup.
+                    cls._schedule_context_usage_push(ctx, callbacks)
+                    
+                    try:
+                        _tok_cache = tokens_dict.get("cache") or {}
+                        current_input_tokens = (
+                            tokens_dict.get("input", 0)
+                            + (_tok_cache.get("read", 0) if isinstance(_tok_cache, dict) else 0)
+                        )
+                        recent_compaction = cls._has_recent_compaction_cooldown(ctx)
+                        near_overflow = current_input_tokens >= compaction_policy.preemptive_threshold
+
+                        if near_overflow and ctx.last_cleanup_step != ctx.step:
+                            try:
+                                message_tokens_before_cleanup = (
+                                    await SessionPrompt.estimate_full_context_tokens(
+                                        ctx.session.id,
+                                        messages,
+                                        policy=compaction_policy,
+                                    )
+                                )
+                                trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
+                                    ctx.session.id,
+                                    context_window_tokens=model_context,
+                                )
+                                ctx.last_cleanup_step = ctx.step
+                                if trunc_count > 0:
+                                    set_context_state(
+                                        ctx.session.id,
+                                        tool_results_compacted=True,
+                                        last_compaction_step=ctx.last_compaction_step,
+                                        last_compaction_reason="pre_compact_cleanup",
+                                    )
+                                    await cls._publish_runtime_event(callbacks, "context.compacted", {
+                                        "sessionID": ctx.session.id,
+                                        "step": ctx.step,
+                                        "reason": "pre_compact_cleanup",
+                                        "truncatedToolResults": trunc_count,
+                                        "cooldownActive": recent_compaction,
+                                    })
+                                    log.info("loop.pre_compact_cleanup_applied", {
+                                        "session_id": ctx.session.id,
+                                        "step": ctx.step,
+                                        "truncated": trunc_count,
+                                        "preemptive_threshold": compaction_policy.preemptive_threshold,
+                                        "input_tokens": current_input_tokens,
+                                        "cooldown_active": recent_compaction,
+                                    })
+                                    message_tokens_after_cleanup = (
+                                        await SessionPrompt.estimate_full_context_tokens(
+                                            ctx.session.id,
+                                            messages,
+                                            policy=compaction_policy,
+                                        )
+                                    )
+                                    baseline_offset_tokens = max(
+                                        0,
+                                        effective_tokens - message_tokens_before_cleanup,
+                                    )
+                                    effective_tokens = (
+                                        message_tokens_after_cleanup + baseline_offset_tokens
+                                    )
+                                    tokens_dict["input"] = effective_tokens
+                                    current_input_tokens = effective_tokens
+                                    log.info("loop.pre_compact_cleanup_rechecked", {
+                                        "session_id": ctx.session.id,
+                                        "effective_tokens": effective_tokens,
+                                        "message_tokens": message_tokens_after_cleanup,
+                                        "baseline_offset_tokens": baseline_offset_tokens,
+                                        "overflow_threshold": (
+                                            compaction_policy.overflow_threshold
+                                        ),
+                                    })
+                                    # Below the threshold nothing overflows, so
+                                    # this skips no summary; the overflow check
+                                    # below would pass it through the same way.
+                                    if effective_tokens <= compaction_policy.overflow_threshold:
+                                        turn_state = set_turn_state(
+                                            ctx.session.id,
+                                            step=ctx.step,
+                                            status="continued",
+                                            continue_reason="pre_compact_cleanup",
+                                            queued_message_detected=False,
+                                        )
+                                        await cls._publish_runtime_event(
+                                            callbacks,
+                                            "turn.continued",
+                                            turn_state.model_dump(by_alias=True),
+                                        )
+                                        continue
+                            except Exception as trunc_err:
+                                log.warn("loop.pre_compact_cleanup_error", {
+                                    "session_id": ctx.session.id,
+                                    "error": str(trunc_err),
+                                })
+
+                        is_overflow = await SessionCompaction.is_overflow(
+                            tokens=tokens_dict,
+                            model_context=model_context,
+                            policy=compaction_policy,
+                        )
+
+                        if not is_overflow and ctx.overflow_compaction_attempts:
+                            # Back under the threshold: the last compaction
+                            # worked, so a later overflow in this turn is new
+                            # output, not the same one coming back.  Counting
+                            # every compaction of the turn ended long tasks at
+                            # the fourth overflow although each one had worked.
+                            log.info("loop.overflow_compaction_attempts_reset", {
+                                "session_id": ctx.session.id,
+                                "step": ctx.step,
+                                "attempts": ctx.overflow_compaction_attempts,
+                                "effective_tokens": effective_tokens,
+                                "overflow_threshold": compaction_policy.overflow_threshold,
+                            })
+                            ctx.overflow_compaction_attempts = 0
+
+                        if is_overflow:
+                            log.info("loop.context_overflow_detected", {
+                                "session_id": ctx.session.id,
+                                "step": ctx.step,
+                                "tokens": tokens_dict,
+                                "tier": compaction_policy.tier.value,
+                                "overflow_compaction_attempts": ctx.overflow_compaction_attempts,
+                            })
+
+                            # Check if we've exhausted compaction attempts
+                            # (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS)
+                            if ctx.overflow_compaction_attempts >= MAX_OVERFLOW_COMPACTION_ATTEMPTS:
+                                # Distinguish "provider down / in cooldown" from
+                                # "context genuinely too large" so users get
+                                # actionable advice instead of a generic error.
+                                compaction_hist = _get_compaction_history(ctx.session.id)
+                                _provider_error = compaction_hist.summary_last_error
+                                _in_cooldown = (
+                                    compaction_hist.summary_cooldown_until > 0
+                                    and compaction_hist.summary_cooldown_until
+                                    > time.monotonic()
+                                )
+                                _cooldown_secs = max(
+                                    0,
+                                    round(compaction_hist.summary_cooldown_until
+                                          - time.monotonic()),
+                                )
+
+                                if _in_cooldown or _provider_error:
+                                    # Provider-side issue: cooldown still active
+                                    # or last call recorded an error.  Tell the
+                                    # user to wait / retry rather than open a new
+                                    # session (their context is fine).
+                                    _notice_msg = (
+                                        "摘要模型暂时不可用，上下文压缩跳过了本轮压缩。"
+                                        + (
+                                            f"冷却剩余约 {_cooldown_secs} 秒，"
+                                            if _in_cooldown else ""
+                                        )
+                                        + "建议稍后继续，或切换到其他模型重试。"
+                                    )
+                                    _error_msg = (
+                                        "Compaction skipped: summary provider unavailable "
+                                        f"({_provider_error or 'cooldown active'})."
+                                        + (
+                                            f" Cooldown expires in ~{_cooldown_secs}s."
+                                            if _in_cooldown else ""
+                                        )
+                                        + " Wait for the provider to recover or switch models."
+                                    )
+                                else:
+                                    # Context is genuinely too large even after
+                                    # repeated compaction — advise reducing scope.
+                                    _notice_msg = (
+                                        "当前任务上下文过重，已经多次 compact 仍接近上限。"
+                                        "建议收敛工具输出、缩小搜索范围，或开启新会话。"
+                                    )
+                                    _error_msg = (
+                                        "Context overflow: prompt too large for the model after "
+                                        f"{ctx.overflow_compaction_attempts} compaction attempts. "
+                                        "Try starting a new session or use a larger-context model."
+                                    )
+
+                                await cls._publish_session_notice(
+                                    callbacks,
+                                    ctx.session.id,
+                                    level="warning",
+                                    message=_notice_msg,
+                                    details={
+                                        "attempts": ctx.overflow_compaction_attempts,
+                                        "maxAttempts": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+                                        "tokens": tokens_dict,
+                                        "providerError": _provider_error or None,
+                                        "cooldownRemainingSeconds": (
+                                            _cooldown_secs if _in_cooldown else 0
+                                        ),
+                                    },
+                                )
+                                log.error("loop.overflow_compaction_exhausted", {
+                                    "session_id": ctx.session.id,
+                                    "attempts": ctx.overflow_compaction_attempts,
+                                    "max": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+                                    "tokens": tokens_dict,
+                                    "in_cooldown": _in_cooldown,
+                                    "provider_error": _provider_error or None,
+                                })
+                                if callbacks.on_error:
+                                    await callbacks.on_error(_error_msg)
+                                break
+
+                            await cls._push_context_usage_before_cleanup(ctx, callbacks)
+
+                            # Recovery step 1: try truncating oversized tool
+                            # results (once per run, matches OpenClaw
+                            # toolResultTruncationAttempted)
+                            if not ctx.tool_result_truncation_attempted:
+                                ctx.tool_result_truncation_attempted = True
+                                try:
+                                    message_tokens_before_cleanup = (
+                                        await SessionPrompt.estimate_full_context_tokens(
+                                            ctx.session.id,
+                                            messages,
+                                            policy=compaction_policy,
+                                        )
+                                    )
+                                    trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
+                                        ctx.session.id,
+                                        context_window_tokens=model_context,
+                                    )
+                                    if trunc_count > 0:
+                                        log.info("loop.oversized_tool_truncated", {
+                                            "session_id": ctx.session.id,
+                                            "truncated": trunc_count,
+                                        })
+                                        # Re-check overflow after truncation
+                                        message_tokens_after_cleanup = (
+                                            await SessionPrompt.estimate_full_context_tokens(
+                                                ctx.session.id,
+                                                messages,
+                                                policy=compaction_policy,
+                                            )
+                                        )
+                                        baseline_offset_tokens = max(
+                                            0,
+                                            effective_tokens - message_tokens_before_cleanup,
+                                        )
+                                        re_est = (
+                                            message_tokens_after_cleanup
+                                            + baseline_offset_tokens
+                                        )
+                                        re_tokens = {
+                                            "input": re_est,
+                                            "output": 0,
+                                            "cache": {"read": 0, "write": 0},
+                                        }
+                                        still_overflow = await SessionCompaction.is_overflow(
+                                            tokens=re_tokens,
+                                            model_context=model_context,
+                                            policy=compaction_policy,
+                                        )
+                                        if not still_overflow:
+                                            log.info("loop.overflow_resolved_by_truncation", {
+                                                "session_id": ctx.session.id,
+                                            })
+                                            # The meter still shows the size before
+                                            # cleanup, and the next step's push falls
+                                            # inside the throttle window.
+                                            cls._schedule_context_usage_push(ctx, callbacks, force=True)
+                                            # Do NOT reset overflow_compaction_attempts
+                                            # (matches OpenClaw OC-65)
+                                            continue
+                                except Exception as trunc_err:
+                                    log.warn("loop.oversized_truncation_error", {
+                                        "session_id": ctx.session.id,
+                                        "error": str(trunc_err),
+                                    })
+                            
+                            # Recovery step 2: full compaction
+                            ctx.overflow_compaction_attempts += 1
+                            if ctx.overflow_compaction_attempts >= 2:
+                                await cls._publish_session_notice(
+                                    callbacks,
+                                    ctx.session.id,
+                                    level="info",
+                                    message=(
+                                        "本轮上下文持续接近模型上限，系统将优先尝试压缩历史工具输出。"
+                                    ),
+                                    details={
+                                        "attempt": ctx.overflow_compaction_attempts,
+                                        "threshold": compaction_policy.overflow_threshold,
+                                        "buffer": compaction_policy.overflow_buffer,
+                                    },
+                                )
+                            log.warn("loop.overflow_compaction_attempt", {
+                                "session_id": ctx.session.id,
+                                "attempt": ctx.overflow_compaction_attempts,
+                                "max": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+                            })
+
+                            # --- Compaction start: notify all UIs ---
+                            if callbacks.on_compaction:
+                                await callbacks.on_compaction()
+                            
+                            # Prune first, then summarize
+                            await SessionCompaction.prune(
+                                ctx.session.id,
+                                policy=compaction_policy,
+                            )
+                            
+                            # Same SSE progress adapter as the manual
+                            # /compact route — mirrored here so the
+                            # overflow-driven path also drives the
+                            # multi-stage UI panel.
+                            _publish_overflow = callbacks.event_publish_callback if callbacks else None
+                            _session_id_overflow = ctx.session.id
+                            progress_callback_overflow = None
+                            if _publish_overflow is not None:
+                                async def progress_callback_overflow(stage: str, data: dict) -> None:
+                                    await _publish_overflow("session.compaction_progress", {
+                                        "sessionID": _session_id_overflow,
+                                        "stage": stage,
+                                        "data": data,
+                                    })
+
+                            # Trigger compaction (summarization + memory flush)
+                            compaction_result = await run_compaction(
+                                ctx.session.id,
+                                parent_message_id=last_user.id,
+                                messages=messages,
+                                provider_id=ctx.provider_id,
+                                model_id=ctx.model_id,
+                                auto=True,
+                                event_publish_callback=_publish_overflow,
+                                status_after="busy",
+                                policy=compaction_policy,
+                                progress_callback=progress_callback_overflow,
+                            )
+
+                            if compaction_result == "stop":
+                                log.error("loop.compaction_failed", {"session_id": ctx.session.id})
+                                if callbacks.on_error:
+                                    await callbacks.on_error("Compaction failed")
+                                break
+
+                            if compaction_result == "skipped":
+                                # Anti-thrashing cooldown or summary-provider
+                                # cooldown fired — nothing was archived, do NOT
+                                # update last_compaction_step or publish the
+                                # compacted event (would mislead cooldown logic
+                                # and UI into thinking compaction succeeded).
+                                log.info("loop.compaction_skipped", {
+                                    "session_id": ctx.session.id,
+                                    "step": ctx.step,
+                                })
+                            else:
+                                # compaction_result == "continue": real success
+                                ctx.last_compaction_step = ctx.step
+                                set_context_state(
+                                    ctx.session.id,
+                                    compaction_performed=True,
+                                    last_compaction_step=ctx.step,
+                                    last_compaction_reason="full_compaction",
+                                )
+                                await cls._publish_runtime_event(callbacks, "context.compacted", {
+                                    "sessionID": ctx.session.id,
+                                    "step": ctx.step,
+                                    "reason": "full_compaction",
+                                    "attempt": ctx.overflow_compaction_attempts,
+                                    "cooldownUntilStep": ctx.step + POST_COMPACTION_COOLDOWN_STEPS,
+                                })
+                                cls._schedule_context_usage_push(ctx, callbacks, force=True)
+                            
+                            # Continuation user message is now created inside
+                            # SessionCompaction.process() (matching AegisOps).
+                            # Just continue — the completed assistant belongs
+                            # to the preceding user turn, so _should_exit()
+                            # won't trigger for the continuation message.
+                            continue
+                    except Exception as e:
+                        log.error("loop.compaction_overflow_check_error", {"error": str(e)})
+            
+            if ctx.should_abort():
+                break
+            if AgentInbox.get(ctx.session.id).messages:
+                retry_preparation = True
+                continue  # Rebuild context without consuming a model step.
+
+            if not ctx.last_context_usage_push_at:
+                # Nothing pushed yet this turn (a new session has no model call
+                # to examine above), so the meter still shows the snapshot
+                # taken before the model was known, without the system prompt.
+                cls._schedule_context_usage_push(ctx, callbacks)
+
+            # 步开始前记录工作区快照（首步时把 snapshot part 挂到用户消息上），
+            # 步结束后据此生成 patch part，revert / diff 都靠它
+            step_snapshot = await cls._track_turn_snapshot(ctx, last_user)
+
+            # Process single step — wrap in a Task so abort() can cancel it immediately
+            # rather than waiting for the current tool call to finish.
+            step_task = asyncio.create_task(
+                cls._process_step_with_failover(
+                    ctx,
+                    callbacks,
+                    messages,
+                    last_user,
+                )
+            )
+            ctx._current_step_task = step_task
+            step_started_at = asyncio.get_event_loop().time()
+            try:
+                step_result = await step_task
+            except asyncio.CancelledError:
+                log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
+                if ctx.should_abort():
+                    # The user's Stop: abort() cancelled the step and already
+                    # ended this execution; finish the loop normally.
+                    break
+                # Any other cancel (the task running this loop, e.g. a background
+                # worker cancelled by its manager) must reach the caller instead of
+                # turning into a normal stop; end the cancelled execution first.
+                cls._end_cancelled_loop(ctx)
+                raise
+            finally:
+                ctx._current_step_task = None
+                log.debug("loop.step_complete", {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "duration_ms": int((asyncio.get_event_loop().time() - step_started_at) * 1000),
+                })
+            
+            # Callback: step end
+            if callbacks.on_step_end:
+                await callbacks.on_step_end(ctx.step)
+
+            await cls._record_step_patch(ctx, callbacks, last_user, step_snapshot)
+            
+            # Handle result
+            if step_result.action == "stop":
+                loop_error = step_result.error
+                loop_error_code = getattr(step_result, "error_code", None)
+                # Report error if step failed
+                if step_result.error and callbacks.on_error:
+                    await callbacks.on_error(step_result.error)
+                
+                # Get last assistant message via SessionContext
+                if ctx.session_ctx:
+                    post_messages = await ctx.session_ctx.get_messages()
+                else:
+                    post_messages = await Message.list(ctx.session.id)
+                last_message = next(
+                    (
+                        msg
+                        for msg in reversed(post_messages)
+                        if msg.role == MessageRole.ASSISTANT
+                        and getattr(msg, "parentID", None) == last_user.id
+                    ),
+                    None,
+                )
+
+                await cls._record_turn_diffs(ctx, last_user)
+
+                if loop_error_code:
+                    break
+                queued_user = await cls._detect_queued_user_message(
+                    ctx.session.id,
+                    post_messages,
+                    last_user.id,
+                    last_message,
+                )
+                if queued_user is not None:
+                    turn_state = set_turn_state(
+                        ctx.session.id,
+                        step=ctx.step,
+                        status="continued",
+                        continue_reason="queued_message",
+                        queued_message_detected=True,
+                    )
+                    await cls._publish_runtime_event(callbacks, "turn.continued", {
+                        **turn_state.model_dump(by_alias=True),
+                        "queuedUserMessageID": queued_user.id,
+                    })
+                    log.info("loop.continuing_for_queued_message", {
+                        "session_id": ctx.session.id,
+                        "queued_user_id": queued_user.id,
+                        "last_assistant_id": last_message.id if last_message else None,
+                    })
+                    continue
+
+                ctx.goal_verdict = None
+                if not step_result.error and last_message is not None and runtime_controls.get() is None:
+                    try:
+                        content_result = Message.get_text_content(last_message)
+                        last_response = (
+                            await content_result
+                            if inspect.isawaitable(content_result)
+                            else content_result
+                        )
+                    except Exception as exc:
+                        log.warn("goal.last_response.error", {
+                            "session_id": ctx.session.id,
+                            "message_id": getattr(last_message, "id", None),
+                            "error": str(exc),
+                        })
+                        last_response = getattr(last_message, "content", "") or ""
+                    pending_user_input = False
+                    try:
+                        from aegisops.server.routes.question import has_pending_questions
+
+                        pending_user_input = has_pending_questions(ctx.session.id)
+                    except Exception as exc:
+                        log.warn("goal.pending_question_check.error", {
+                            "session_id": ctx.session.id,
+                            "error": str(exc),
+                        })
+                    goal_decision = await GoalManager.evaluate_after_turn(
+                        ctx.session.id,
+                        str(last_response or ""),
+                        pending_user_input=pending_user_input,
+                        provider_id=ctx.provider_id,
+                        model_id=ctx.model_id,
+                    )
+                    ctx.goal_verdict = goal_decision.verdict
+                    if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
+                        await cls._publish_runtime_event(callbacks, "session.goal.updated", {
+                            "sessionID": ctx.session.id,
+                            "status": goal_decision.status,
+                            "objective": goal_decision.objective,
+                            "reason": goal_decision.reason,
+                        })
+                    if goal_decision.should_continue and goal_decision.continuation_prompt:
+                        # Hermes-style goal continuation: append a user-role
+                        # prompt to history so the model continues, while
+                        # marking the part synthetic so UIs do not treat it as
+                        # user-authored text.
+                        goal_user = await Message.create(
+                            session_id=ctx.session.id,
+                            role=MessageRole.USER,
+                            content=goal_decision.continuation_prompt,
+                            agent=last_user.agent if hasattr(last_user, "agent") else ctx.agent_name,
+                            model=last_user.model if hasattr(last_user, "model") else {
+                                "providerID": ctx.provider_id,
+                                "modelID": ctx.model_id,
+                            },
+                            provider=last_user.provider if hasattr(last_user, "provider") else ctx.provider_id,
+                            synthetic=True,
+                            part_metadata={
+                                "goalContinuation": True,
+                                "goalVerdict": goal_decision.verdict,
+                                "goalReason": goal_decision.reason,
+                            },
+                        )
+                        turn_state = set_turn_state(
+                            ctx.session.id,
+                            step=ctx.step,
+                            status="continued",
+                            continue_reason="goal",
+                            queued_message_detected=False,
+                        )
+                        await cls._publish_runtime_event(callbacks, "turn.continued", {
+                            **turn_state.model_dump(by_alias=True),
+                            "goalMessageID": goal_user.id,
+                            "goalVerdict": goal_decision.verdict,
+                        })
+                        log.info("loop.continuing_for_goal", {
+                            "session_id": ctx.session.id,
+                            "goal_message_id": goal_user.id,
+                            "reason": goal_decision.reason,
+                        })
+                        continue
+
+                if (
+                    not step_result.error
+                    and not ctx.should_abort()
+                    and last_message is not None
+                    and getattr(last_message, "finish", None) == "stop"
+                    and await cls._run_turn_after_hook(
+                        ctx,
+                        callbacks,
+                        last_user,
+                        last_message,
+                    )
+                ):
+                    continue
+
+                stop_reason = step_result.error or (getattr(last_message, "finish", None) if last_message else None) or "stop"
+                turn_state = set_turn_state(
+                    ctx.session.id,
+                    step=ctx.step,
+                    status="stopped",
+                    stop_reason=stop_reason,
+                    queued_message_detected=False,
+                )
+                await cls._publish_runtime_event(callbacks, "turn.stopped", turn_state.model_dump(by_alias=True))
+
+                break
+            
+            elif step_result.action == "continue":
+                if ctx.session_ctx:
+                    post_messages = await ctx.session_ctx.get_messages()
+                else:
+                    post_messages = await Message.list(ctx.session.id)
+                last_assistant_after_step = next(
+                    (
+                        msg for msg in reversed(post_messages)
+                        if msg.role == MessageRole.ASSISTANT
+                    ),
+                    None,
+                )
+                queued_user = await cls._detect_queued_user_message(
+                    ctx.session.id,
+                    post_messages,
+                    last_user.id,
+                    last_assistant_after_step,
+                )
+                turn_state = set_turn_state(
+                    ctx.session.id,
+                    step=ctx.step,
+                    status="continued",
+                    continue_reason="queued_message" if queued_user is not None else "tool_calls",
+                    queued_message_detected=queued_user is not None,
+                )
+                payload = turn_state.model_dump(by_alias=True)
+                if queued_user is not None:
+                    payload["queuedUserMessageID"] = queued_user.id
+                await cls._publish_runtime_event(callbacks, "turn.continued", payload)
+                # Continue to next iteration
+                continue
+            
+            else:
+                # Unknown action
+                log.warn("loop.unknown_action", {
+                    "session_id": ctx.session.id,
+                    "action": step_result.action,
+                })
+                break
+        
+        # Return result
+        return LoopResult(
+            action="error" if loop_error else "stop",
+            last_message=last_message,
+            error=loop_error,
+            provider_id=ctx.provider_id,
+            model_id=ctx.model_id,
+            metadata={
+                "steps": ctx.step,
+                "trace_step": ctx.trace_step,
+                "max_steps_reached": ctx.max_steps_reached,
+                "session_id": ctx.session.id,
+                "last_compaction_step": ctx.last_compaction_step,
+                **({"stop_reason": loop_error} if loop_error else {}),
+                **({"error_code": loop_error_code} if loop_error_code else {}),
+                **({"aborted": True} if ctx.should_abort() else {}),
+            },
+        )
+    
+    @classmethod
+    def _build_compaction_policy(cls, ctx: LoopContext) -> CompactionPolicy:
+        """
+        Construct a CompactionPolicy from the current model's info.
+        
+        Falls back to ``CompactionPolicy.default()`` when the model info
+        cannot be resolved (e.g. unknown provider or missing context_window).
+        """
+        return build_compaction_policy(ctx.provider_id, ctx.model_id)
+    
+    @classmethod
+    def _should_exit(
+        cls,
+        last_user: MessageInfo,
+        last_assistant: Optional[MessageInfo],
+        last_assistant_parts: Optional[List[Any]] = None,
+    ) -> bool:
+        """
+        Check if loop should exit
+        
+        Ported from original exit logic:
+        - Exit if assistant has responded with finish != tool-calls
+        - Exit if assistant is a response to the latest user message
+        """
+        if not last_assistant:
+            return False
+
+        if any(
+            getattr(part, "type", None) == "tool"
+            for part in (last_assistant_parts or [])
+        ):
+            return False
+        
+        # Check finish reason
+        if last_assistant.finish:
+            if last_assistant.finish not in ("tool-calls", "unknown", "summary"):
+                # Assistant finished with stop/error/etc
+                if getattr(last_assistant, "parentID", None) == last_user.id:
+                    # Assistant responded to this user turn
+                    return True
+        
+        return False
+    
+    @classmethod
+    async def _check_reminders(
+        cls,
+        ctx: LoopContext,
+        messages: List[MessageInfo],
+        callbacks: LoopCallbacks,
+    ) -> None:
+        """
+        Check and inject reminders (P1 feature)
+        
+        Reminders are system messages injected periodically to:
+        - Remind agent of task goals
+        - Prevent drift from original intent
+        - Nudge towards completion
+        """
+        from aegisops.session.features.reminders import SessionReminders, ReminderContext, ReminderConfig
+        
+        # Calculate elapsed time
+        if messages:
+            first_msg = messages[0]
+            if hasattr(first_msg, 'time') and hasattr(first_msg.time, 'created'):
+                first_time = first_msg.time.created
+                current_time = int(datetime.now().timestamp() * 1000)
+                elapsed_ms = current_time - first_time
+            else:
+                elapsed_ms = 0
+        else:
+            elapsed_ms = 0
+        
+        # Extract original task
+        original_task = await SessionReminders.extract_original_task(messages)
+        
+        # Create reminder context
+        reminder_ctx = ReminderContext(
+            session_id=ctx.session.id,
+            step_count=ctx.step,
+            message_count=len(messages),
+            elapsed_ms=elapsed_ms,
+            original_task=original_task,
+        )
+        
+        # Check if reminder should be injected
+        if SessionReminders.should_remind(ctx.session.id, reminder_ctx):
+            # Create and inject reminder
+            reminder_msg = await SessionReminders.create_reminder(
+                ctx.session.id,
+                reminder_ctx,
+            )
+            
+            if reminder_msg and callbacks.on_reminder:
+                await callbacks.on_reminder(await Message.get_text_content(reminder_msg))
+    
+
+# Export
+__all__ = [
+    "SessionLoop",
+    "LoopContext",
+    "LoopCallbacks",
+    "LoopResult",
+]

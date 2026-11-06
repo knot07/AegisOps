@@ -1,0 +1,1587 @@
+"""Workflow execution engine."""
+
+from collections import deque
+from contextlib import nullcontext
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError, as_completed
+from contextvars import copy_context
+import copy
+from dataclasses import dataclass, field
+import hashlib
+from itertools import islice
+import logging
+import os
+import threading
+import time
+import traceback
+import uuid
+import json
+from typing import Any, Callable, Deque, Dict, List, Literal, NamedTuple, Optional, Set, Tuple, TypeVar
+
+from .code_gen import CodeGen, SimpleCodeGen, LLMCodeGen
+from .edge_resolver import EdgeResolver
+from .errors import MaxStepsExceededError, NodeExecutionError, NodeTimeoutError, RunCancelledError, RunTimeoutError
+from .execution_plan import WorkflowExecutionPlan
+from .execution_state import ExecutionResult, StepResult, WorkflowExecutionState
+from .models import Edge, Workflow, Node
+from .repl_runtime import (
+    HostProcessPythonExecRuntime, PythonExecRuntime, Runtime,
+    SandboxPythonExecRuntime, _legacy_registry_cancel_scope,
+)
+
+
+_logger = logging.getLogger("aegisops.workflow.engine")
+
+_T = TypeVar("_T")
+
+StepStartHook = Callable[[str, int, Node, Dict[str, Any]], _T]
+StepEndHook = Callable[[_T, "StepResult"], None]
+
+
+class _ExecOutcome(NamedTuple):
+    """Result of executing a single node within a batch."""
+
+    idx: int
+    outputs: Dict[str, Any]
+    stdout: str
+    error: Optional[str]
+    traceback: Optional[str]
+    duration_ms: float
+    is_timeout: bool = False
+    is_cancelled: bool = False
+
+
+_OBSERVABILITY_DICT_KEY_LIMIT = 50
+DEFAULT_PREVIEW_ITEMS_FOR_DICT = 3
+
+
+class _NodeRunTracker:
+    """Which node run each worker thread is executing, and whether it timed out.
+
+    A host-thread node that hits ``node_timeout_s`` cannot be killed: the
+    engine stops waiting, but the ``wf-node`` / ``wf-par`` thread keeps running
+    the node code, and with it any tool or ``llm.ask`` call in flight on the
+    workflow loop (a subagent session started by ``delegate_task`` keeps
+    consuming the provider's quota for minutes). The runtime's cancel checker
+    is polled from that same thread by ``run_sync_cancellable``, so a thread
+    whose current run is flagged ``timed_out`` cancels the in-flight future at
+    its next poll and unwinds the node. The run is bound thread-locally, so a
+    flag set after the node already finished can never hit a later node that
+    happens to reuse the same OS thread.
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+        self._running: Set["_NodeRun"] = set()
+        self._lock = threading.Lock()
+
+    def bind(self, run: "_NodeRun") -> None:
+        self._local.run = run
+        with self._lock:
+            self._running.add(run)
+
+    def unbind(self, run: "_NodeRun") -> None:
+        self._local.run = None
+        with self._lock:
+            self._running.discard(run)
+
+    def current_thread_marked(self) -> bool:
+        run = getattr(self._local, "run", None)
+        return run is not None and run.timed_out
+
+    def active(self) -> bool:
+        """True while a timed-out node is still executing on some thread."""
+        with self._lock:
+            return any(run.timed_out for run in self._running)
+
+    def residual_checker(self, previous: Optional[Callable[[], bool]]) -> Callable[[], bool]:
+        """Checker left on the runtime after a run while timed-out nodes still unwind."""
+
+        def _residual() -> bool:
+            return self.current_thread_marked() or bool(previous and previous())
+
+        return _residual
+
+
+class _NodeRun:
+    """Bookkeeping for one node execution on a worker thread."""
+
+    __slots__ = ("timed_out",)
+
+    def __init__(self) -> None:
+        self.timed_out = False
+
+
+def _run_node_tracked(
+    tracker: _NodeRunTracker,
+    run: _NodeRun,
+    fn: Callable[..., _T],
+    *args: Any,
+    **kwargs: Any,
+) -> _T:
+    """Run *fn* on the current worker thread with *run* bound to the thread."""
+    tracker.bind(run)
+    try:
+        return fn(*args, **kwargs)
+    finally:
+        tracker.unbind(run)
+
+
+def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
+    """Return a bounded, non-retaining summary for logs and lightweight history."""
+    if depth >= 2:
+        if isinstance(value, (list, tuple, set)):
+            return {"_type": type(value).__name__, "count": len(value)}
+        if isinstance(value, dict):
+            return {"_type": "dict", "keys": list(islice(value.keys(), 20))}
+        if isinstance(value, str) and len(value) > 200:
+            return {"_type": "string", "chars": len(value), "preview": value[:200]}
+        return value
+    if isinstance(value, dict):
+        if len(value) > _OBSERVABILITY_DICT_KEY_LIMIT:
+            # Mark the truncation instead of silently returning a 50-key dict
+            # that reads like the whole payload.
+            return {
+                "_type": "dict",
+                "key_count": len(value),
+                "keys": list(islice(value.keys(), _OBSERVABILITY_DICT_KEY_LIMIT)),
+                "preview": {
+                    key: _summarize_for_observability(item, depth=depth + 1)
+                    for key, item in islice(value.items(), DEFAULT_PREVIEW_ITEMS_FOR_DICT)
+                },
+            }
+        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        if isinstance(value, (list, tuple)):
+            preview_items = value[:3]
+        else:
+            preview_items = islice(value, 3)
+        return {
+            "_type": type(value).__name__,
+            "count": len(value),
+            "preview": [_summarize_for_observability(item, depth=depth + 1) for item in preview_items],
+        }
+    if isinstance(value, str) and len(value) > 200:
+        return {"_type": "string", "chars": len(value), "preview": value[:200]}
+    return value
+
+
+def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
+    """Serialize an output summary for logs with bounded size."""
+    try:
+        text = json.dumps(
+            _summarize_for_observability(outputs),
+            ensure_ascii=False,
+            default=str,
+        )
+    except Exception:
+        text = repr(_summarize_for_observability(outputs))
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"...[truncated:{len(text) - max_chars}]"
+
+
+def _input_hash_for_dedup(node_id: str, inputs: Dict[str, Any]) -> str:
+    """Hash canonical inputs without retaining one full serialized copy."""
+    try:
+        digest = hashlib.sha256()
+        encoder = json.JSONEncoder(
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        )
+        for chunk in encoder.iterencode({"n": node_id, "i": inputs}):
+            digest.update(chunk.encode())
+        return digest.hexdigest()[:16]
+    except Exception:
+        return ""
+
+
+def _default_workflow_loader(workflow_id: str) -> "Workflow":
+    """Default loader: resolves workflow by ID from disk, then legacy KV."""
+    import asyncio
+
+    async def _load():
+        from aegisops.workflow.fs_store import is_managed_workflow, read_workflow_from_fs
+        from aegisops.storage.storage import Storage
+
+        data = read_workflow_from_fs(workflow_id)
+        if data is None and not is_managed_workflow(workflow_id):
+            # Legacy records are for local workflows only: one must not stand
+            # in for a managed workflow whose definition is unusable.
+            data = await Storage.read(f"workflow/{workflow_id}")
+        if data is None:
+            raise NodeExecutionError(
+                node_id="<subworkflow>",
+                message=f"Workflow not found: {workflow_id!r}",
+            )
+        wf_json = data.get("workflowJson") or data
+        if isinstance(wf_json, dict):
+            wf_json = dict(wf_json)
+            wf_json.setdefault("id", workflow_id)
+        return Workflow.from_dict(wf_json)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+
+    if loop is None:
+        return asyncio.run(_load())
+
+    executor = getattr(_default_workflow_loader, "_executor", None)
+    if executor is None:
+        executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="wf-subwf")
+        setattr(_default_workflow_loader, "_executor", executor)
+    # With the caller's context: the run's task scope decides which version of
+    # a managed sub-workflow it gets (aegisops.content.managed.task_scope).
+    fut = executor.submit(copy_context().run, lambda: asyncio.run(_load()))
+    return fut.result()
+
+
+_HTTP_REQUEST_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "url": {"type": "string"},
+        "method": {"type": "string"},
+    },
+    "required": ["url", "method"],
+}
+
+#: Python and logic nodes run code the engine executes itself, outside the tool
+#: registry.  They go through the same gate as a tool under this name, with the
+#: code as the argument a policy can look at.
+WORKFLOW_CODE_TOOL_NAME = "workflow_python"
+
+_WORKFLOW_CODE_TOOL_SCHEMA: Dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "code": {"type": "string"},
+        "code_sha256": {"type": "string"},
+        "node_type": {"type": "string"},
+    },
+    "required": ["code", "code_sha256", "node_type"],
+}
+
+
+def _workflow_code_input(code: str, node: Node) -> Dict[str, Any]:
+    """The gate input for a python or logic node's code."""
+    return {
+        "code": code,
+        "code_sha256": hashlib.sha256(code.encode("utf-8")).hexdigest(),
+        "node_type": str(node.type),
+    }
+
+
+def _with_validated_input(payload: Dict[str, Any], validated_input: Dict[str, Any]) -> Dict[str, Any]:
+    """``payload`` with the input that actually runs once a policy patched it.
+
+    ``raw_input`` keeps what was asked for; ``validated_input`` -- what the
+    outcome is reported against -- becomes what ran, as the tool registry
+    does for a patched tool call.
+    """
+    from aegisops.hooks.contracts import redact_sensitive
+
+    execution = dict(payload.get("tool_execution") or {})
+    tool = dict(execution.get("tool") or {})
+    tool["validated_input"] = redact_sensitive(dict(validated_input))
+    execution["tool"] = tool
+    return {**payload, "tool_execution": execution}
+
+
+@dataclass
+class WorkflowEngine:
+    workflow: Workflow
+    runtime: Optional[Runtime] = None
+    code_gen: Optional[CodeGen] = None
+    max_steps: int = 10_000
+    stop_on_error: bool = True
+    use_llm: bool = False
+    trace: bool = False
+    mutate_workflow: bool = False
+    workflow_path: Optional[str] = None
+    node_timeout_s: Optional[float] = 300.0
+    history_mode: Literal["full", "summary"] = "summary"
+    dataflow_mode: Literal["legacy", "vertex_cache"] = "legacy"
+    execution_plan: Optional[WorkflowExecutionPlan] = None
+    _depth: int = 0
+    max_parallel_workers: int = 4
+    workflow_loader: Optional[Callable[[str], "Workflow"]] = field(default=None, repr=False)
+    # Engine-scoped so a node that timed out in an earlier run() is still
+    # cancellable at its next poll, whichever checker a later run installs.
+    _timed_out_threads: _NodeRunTracker = field(default_factory=_NodeRunTracker, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.max_steps <= 0:
+            raise ValueError("max_steps must be > 0")
+        if self.max_parallel_workers < 1:
+            raise ValueError("max_parallel_workers must be >= 1")
+        if self.history_mode not in ("full", "summary"):
+            raise ValueError("history_mode must be 'full' or 'summary'")
+        if self.dataflow_mode not in ("legacy", "vertex_cache"):
+            raise ValueError("dataflow_mode must be 'legacy' or 'vertex_cache'")
+        if self.runtime is None:
+            self.runtime = PythonExecRuntime()
+        if self.code_gen is None:
+            if self.use_llm:
+                self.code_gen = LLMCodeGen(workflow_path=self.workflow_path)
+            else:
+                self.code_gen = SimpleCodeGen()
+        if self.workflow_loader is None:
+            self.workflow_loader = _default_workflow_loader
+
+    def _get_isolated_runtime(self) -> "Runtime":
+        """Create a thread-isolated runtime copy for parallel node execution.
+
+        PythonExecRuntime uses a shared ``globals`` dict that is NOT thread-safe.
+        For parallel execution each worker thread receives a shallow copy of the
+        globals dict so that ``inputs`` / ``outputs`` bindings don't collide.
+        SandboxPythonExecRuntime spawns a new subprocess per call and is already
+        safe for concurrent use.
+        """
+        assert self.runtime is not None
+        if isinstance(self.runtime, PythonExecRuntime):
+            return PythonExecRuntime(
+                globals=dict(self.runtime.globals),
+                tool_registry=self.runtime.tool_registry,
+                cancel_checker=self.runtime.cancel_checker,
+                cleanup_globals_after_execute=self.runtime.cleanup_globals_after_execute,
+                enable_cancel_trace=self.runtime.enable_cancel_trace,
+                isolated_rpc_max_bytes=self.runtime.isolated_rpc_max_bytes,
+                isolated_rpc_max_inflight_bytes=self.runtime.isolated_rpc_max_inflight_bytes,
+                isolated_rpc_max_response_bytes=self.runtime.isolated_rpc_max_response_bytes,
+                isolated_rpc_max_workers=self.runtime.isolated_rpc_max_workers,
+            )
+        return self.runtime
+
+    def run(
+        self,
+        initial_inputs: Optional[Dict[str, Any]] = None,
+        *,
+        run_id: Optional[str] = None,
+        timeout_s: Optional[float] = None,
+        cancel: Optional[Callable[[], bool]] = None,
+        on_step_start: Optional[StepStartHook[Any]] = None,
+        on_step_end: Optional[StepEndHook[Any]] = None,
+        retain_history: bool = False,
+    ) -> ExecutionResult:
+        assert self.runtime is not None
+        if self.execution_plan is not None and self.execution_plan.workflow is self.workflow:
+            nodes = self.execution_plan.nodes_by_id
+            adj = self.execution_plan.adjacency
+            incoming_from = self.execution_plan.incoming_from
+        else:
+            nodes = self.workflow.nodes_by_id()
+            adj = self.workflow.adjacency()
+            incoming_from: Dict[str, List[str]] = {n.id: [] for n in self.workflow.nodes}
+            for e in self.workflow.edges:
+                incoming_from.setdefault(e.to, []).append(e.from_)
+            for k in incoming_from:
+                incoming_from[k].sort()
+        q: Deque[Tuple[str, Dict[str, Any], Optional[str]]] = deque([(self.workflow.start, initial_inputs or {}, None)])
+        rid = (run_id or uuid.uuid4().hex).strip() or uuid.uuid4().hex
+        state = WorkflowExecutionState(run_id=rid, history_mode=self.history_mode, retain_history=retain_history)
+        edge_resolver = EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace)
+        run_t0 = time.perf_counter()
+        run_deadline_s = float(timeout_s) if timeout_s is not None and timeout_s > 0 else None
+
+        def _run_deadline_exceeded() -> bool:
+            # Also consulted by the runtime's cooperative ``cancelled()`` helper so
+            # a long-running node stops at the run timeout instead of only
+            # being checked between steps.
+            return run_deadline_s is not None and (time.perf_counter() - run_t0) > run_deadline_s
+
+        # Dedup: track (node_id -> last_input_hash) to skip identical re-executions.
+        _dedup_hashes: Dict[str, str] = {}
+        step_timeout_s = self.node_timeout_s if (self.node_timeout_s is not None and self.node_timeout_s > 0) else None
+        timeout_executor: Optional[ThreadPoolExecutor] = None
+        if step_timeout_s is not None:
+            timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
+        timeout_cancel_event = threading.Event()
+        # Host-thread nodes that timed out keep running on their worker thread;
+        # flagging their run makes the next tool / llm.ask cancel poll on that
+        # thread abort the in-flight call instead of letting it run to completion.
+        timed_out_threads = self._timed_out_threads
+        previous_cancel_checker = None
+        previous_enable_cancel_trace = None
+        if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
+            previous_cancel_checker = self.runtime.cancel_checker
+            previous_enable_cancel_trace = getattr(self.runtime, "enable_cancel_trace", None)
+
+            def _runtime_cancel_requested() -> bool:
+                return (
+                    timeout_cancel_event.is_set()
+                    or _run_deadline_exceeded()
+                    or timed_out_threads.current_thread_marked()
+                    or bool(cancel and cancel())
+                )
+
+            self.runtime.cancel_checker = (
+                _runtime_cancel_requested
+                if step_timeout_s is not None or cancel is not None or run_deadline_s is not None
+                else None
+            )
+            # A timeout-only checker is consumed by isolated-process RPC calls
+            # and by the cancel polls inside tool / llm.ask calls. Enabling
+            # sys.settrace for every ordinary workflow line would add a large
+            # steady-state cost, so plain Python code in a timed-out host-thread
+            # node still runs until its next tool / LLM call or its end.
+            if isinstance(self.runtime, PythonExecRuntime):
+                self.runtime.enable_cancel_trace = cancel is not None
+        try:
+
+            def _raise_cancelled() -> None:
+                err = RunCancelledError(rid)
+                err.execution_context = state.build_context()
+                raise err
+
+            def _raise_timed_out() -> None:
+                err = RunTimeoutError(rid, float(run_deadline_s or 0.0))
+                err.execution_context = state.build_context()
+                raise err
+
+            while q:
+                if cancel is not None and cancel():
+                    _raise_cancelled()
+                if _run_deadline_exceeded():
+                    _raise_timed_out()
+                if state.steps >= self.max_steps:
+                    err = MaxStepsExceededError(self.max_steps)
+                    err.execution_context = state.build_context()
+                    raise err
+
+                # ── Phase 1: drain queue, apply join / dedup ──────────────
+                ready: List[Tuple[str, Node, Dict[str, Any], Optional[str]]] = []
+                while q:
+                    node_id, inputs, src_node_id = q.popleft()
+                    state.last_node_id = node_id
+                    node = nodes[node_id]
+
+                    # Join handling
+                    if getattr(node, "join", False) and incoming_from.get(node_id):
+                        expected = incoming_from[node_id]
+                        by_src = state.join_inputs.setdefault(node_id, {})
+                        src_key = src_node_id or "__start__"
+                        buf = by_src.setdefault(src_key, {})
+                        buf.update(inputs)
+                        seen = state.join_seen_sources.setdefault(node_id, set())
+                        if src_node_id is not None:
+                            if src_node_id in expected:
+                                seen.add(src_node_id)
+                        else:
+                            seen.add("__start__")
+                        if len(seen.intersection(set(expected))) < len(expected):
+                            continue
+                        by_src = state.join_inputs.pop(node_id, by_src)
+                        merged: Dict[str, Any] = {}
+                        origin: Dict[str, str] = {}
+                        conflict_mode = getattr(node, "join_conflict", "overwrite")
+                        join_mode = getattr(node, "join_mode", "flat")
+                        namespace_key = getattr(node, "join_namespace_key", "__by_source__") or "__by_source__"
+
+                        def merge_payload(src: str, payload: Dict[str, Any]) -> None:
+                            nonlocal merged, origin
+                            for k, v in payload.items():
+                                if k in merged and conflict_mode == "error" and merged.get(k) != v:
+                                    raise NodeExecutionError(
+                                        node_id=node_id,
+                                        message=(
+                                            "Join conflict on key "
+                                            f"{k!r}: sources {origin.get(k)!r} and {src!r} provided different values"
+                                        ),
+                                    )
+                                merged[k] = v
+                                origin[k] = src
+
+                        for src in expected:
+                            merge_payload(src, by_src.get(src, {}))
+                        for src, payload in sorted(by_src.items(), key=lambda x: x[0]):
+                            if src in set(expected):
+                                continue
+                            merge_payload(src, payload)
+                        if join_mode == "namespace":
+                            merged.setdefault(namespace_key, dict(by_src))
+                        inputs = merged
+                        state.join_seen_sources.pop(node_id, None)
+
+                    # History retention is observational and must not alter
+                    # workflow graph semantics. Stream the hash so summary mode
+                    # can still deduplicate large inputs without retaining a
+                    # second complete JSON payload.
+                    _input_hash = _input_hash_for_dedup(node_id, inputs)
+                    if _input_hash and node_id in _dedup_hashes and _dedup_hashes[node_id] == _input_hash:
+                        _logger.info(
+                            "wf.step.dedup_skip node=%s (identical input hash %s)",
+                            node_id,
+                            _input_hash,
+                            extra={"run_id": rid, "node_id": node_id, "input_hash": _input_hash},
+                        )
+                        continue
+                    if _input_hash:
+                        _dedup_hashes[node_id] = _input_hash
+
+                    ready.append((node_id, node, inputs, src_node_id))
+
+                if not ready:
+                    continue
+
+                # ── Phase 2: execute ready items ──────────────────────────
+                # Process-isolated nodes own a child process and a cancellation
+                # boundary. Keep their engine-level execution serial so a
+                # mixed batch cannot leave an isolated child running after a
+                # host-thread sibling times out.
+                use_parallel = (
+                    self.max_parallel_workers > 1
+                    and len(ready) > 1
+                    and not any(item[1].process_isolated for item in ready)
+                )
+                exec_results: List[_ExecOutcome] = []
+                _outs: Optional[Dict[str, Any]] = None
+                _so = ""
+                _sfut = None
+                _exec_args = None
+                _fut_map = None
+                _fut = None
+                _f2 = None
+                _pool = None
+
+                # Call on_step_start hooks (always from main thread)
+                step_tokens: Dict[int, Any] = {}
+                for _idx, (_nid, _nd, _inp, _) in enumerate(ready):
+                    if self.trace:
+                        _desc = (_nd.description or "").strip().splitlines()[0:1]
+                        _desc_text = _desc[0] if _desc else ""
+                        _par_tag = " [parallel]" if use_parallel else ""
+                        print(
+                            f"\n[WF] step={state.steps + _idx + 1} node={_nid} type={_nd.type} {_desc_text}{_par_tag}".rstrip()
+                        )
+                    _logger.info(
+                        "wf.step.start step=%s node=%s type=%s%s",
+                        state.steps + _idx + 1,
+                        _nid,
+                        _nd.type,
+                        " (parallel)" if use_parallel else "",
+                        extra={"run_id": rid, "step": state.steps + _idx + 1, "node_id": _nid, "node_type": _nd.type},
+                    )
+                    if on_step_start is not None:
+                        try:
+                            step_tokens[_idx] = on_step_start(rid, state.steps + _idx + 1, _nd, _inp)
+                        except Exception:
+                            _logger.exception(
+                                "wf.step_start.hook_error",
+                                extra={"run_id": rid, "step": state.steps + _idx + 1, "node_id": _nid},
+                            )
+
+                if use_parallel:
+                    # ── Parallel execution ────────────────────────────────
+                    _pw = min(len(ready), self.max_parallel_workers)
+
+                    def _par_exec(
+                        _args: Tuple[int, str, Node, Dict[str, Any]],
+                    ) -> _ExecOutcome:
+                        _pi, _pnid, _pnd, _pinp = _args
+                        _t0 = time.perf_counter()
+                        try:
+                            _prt = self._get_isolated_runtime()
+                            _pouts, _pso = self._execute_node(_pnd, _pinp, _runtime=_prt)
+                            return _ExecOutcome(_pi, _pouts, _pso, None, None, (time.perf_counter() - _t0) * 1000.0)
+                        except RunCancelledError as _ce:
+                            return _ExecOutcome(
+                                _pi,
+                                {},
+                                "",
+                                str(_ce),
+                                None,
+                                (time.perf_counter() - _t0) * 1000.0,
+                                False,
+                                True,
+                            )
+                        except Exception as _pe:
+                            _perr = str(_pe)
+                            _ptb: Optional[str] = traceback.format_exc()
+                            _pso_err = ""
+                            if isinstance(_pe, NodeExecutionError):
+                                if getattr(_pe, "stdout", None):
+                                    _pso_err = _pe.stdout or ""
+                                if getattr(_pe, "traceback", None):
+                                    _ptb = _pe.traceback
+                            return _ExecOutcome(_pi, {}, _pso_err, _perr, _ptb, (time.perf_counter() - _t0) * 1000.0)
+
+                    _exec_args = [(i, nid, nd, inp) for i, (nid, nd, inp, _) in enumerate(ready)]
+                    _completed_idx: Set[int] = set()
+                    _node_runs: Dict[int, _NodeRun] = {a[0]: _NodeRun() for a in _exec_args}
+                    _pool = ThreadPoolExecutor(max_workers=_pw, thread_name_prefix="wf-par")
+                    try:
+                        # Each concurrent node needs its own Context: one
+                        # Context cannot be entered by two workers at once.
+                        _fut_map = {
+                            _pool.submit(
+                                copy_context().run, _run_node_tracked,
+                                timed_out_threads, _node_runs[a[0]], _par_exec, a,
+                            ): a[0]
+                            for a in _exec_args
+                        }
+                        try:
+                            for _fut in as_completed(_fut_map.keys(), timeout=step_timeout_s):
+                                _ci = _fut_map[_fut]
+                                _completed_idx.add(_ci)
+                                exec_results.append(_fut.result())
+                        except FuturesTimeoutError:
+                            for _f2, _ci2 in _fut_map.items():
+                                if _ci2 not in _completed_idx:
+                                    _node_runs[_ci2].timed_out = True
+                                    exec_results.append(
+                                        _ExecOutcome(
+                                            idx=_ci2,
+                                            outputs={},
+                                            stdout="",
+                                            error=f"节点执行超时 ({self.node_timeout_s}s)",
+                                            traceback=None,
+                                            duration_ms=(step_timeout_s or 0) * 1000.0,
+                                            is_timeout=True,
+                                        )
+                                    )
+                    finally:
+                        try:
+                            _pool.shutdown(wait=False, cancel_futures=True)
+                        except TypeError:
+                            _pool.shutdown(wait=False)
+                    exec_results.sort(key=lambda x: x.idx)
+                else:
+                    # ── Serial execution (preserves original behaviour) ───
+                    for _idx, (_nid, _nd, _inp, _src) in enumerate(ready):
+                        _t0 = time.perf_counter()
+                        _serial_run = _NodeRun()
+                        try:
+                            if step_timeout_s is not None and timeout_executor is not None:
+                                # ThreadPoolExecutor does not copy ContextVars.
+                                # Preserve the authenticated caller and opaque
+                                # execution context on every reused worker hop.
+                                _sfut = timeout_executor.submit(
+                                    copy_context().run,
+                                    _run_node_tracked,
+                                    timed_out_threads,
+                                    _serial_run,
+                                    self._execute_node,
+                                    _nd,
+                                    _inp,
+                                )
+                                _outs, _so = _sfut.result(timeout=step_timeout_s)
+                            else:
+                                _outs, _so = self._execute_node(_nd, _inp)
+                            exec_results.append(
+                                _ExecOutcome(_idx, _outs, _so, None, None, (time.perf_counter() - _t0) * 1000.0)
+                            )
+                        except FuturesTimeoutError as _fte:
+                            _process_isolated = bool(_nd.process_isolated)
+                            if _process_isolated:
+                                timeout_cancel_event.set()
+                            else:
+                                _serial_run.timed_out = True
+                            _fte_msg = str(_fte).strip()
+                            _err = _fte_msg if _fte_msg else f"节点执行超时 ({self.node_timeout_s}s)"
+                            exec_results.append(
+                                _ExecOutcome(
+                                    _idx, {}, "", _err, None, (time.perf_counter() - _t0) * 1000.0, is_timeout=True
+                                )
+                            )
+                            if timeout_executor is not None:
+                                try:
+                                    timeout_executor.shutdown(
+                                        wait=_process_isolated,
+                                        cancel_futures=True,
+                                    )
+                                except TypeError:
+                                    timeout_executor.shutdown(wait=_process_isolated)
+                                timeout_executor = None
+                            if _process_isolated and not _nd.timeout_fatal:
+                                timeout_cancel_event.clear()
+                            if _nd.timeout_fatal:
+                                break
+                            timeout_executor = ThreadPoolExecutor(
+                                max_workers=1,
+                                thread_name_prefix="wf-node",
+                            )
+                        except RunCancelledError as _ce:
+                            if _run_deadline_exceeded() and not (cancel is not None and cancel()):
+                                # The cooperative interrupt came from the run
+                                # deadline, not from a caller cancellation.
+                                _raise_timed_out()
+                            _ce.execution_context = state.build_context()
+                            raise
+                        except Exception as _e:
+                            _err = str(_e)
+                            _tb: Optional[str] = traceback.format_exc()
+                            _so = ""
+                            if isinstance(_e, NodeExecutionError) and getattr(_e, "stdout", None):
+                                _so = _e.stdout or ""
+                            if isinstance(_e, NodeExecutionError) and getattr(_e, "traceback", None):
+                                _tb = _e.traceback
+                            exec_results.append(
+                                _ExecOutcome(_idx, {}, _so, _err, _tb, (time.perf_counter() - _t0) * 1000.0)
+                            )
+
+                # ── Phase 3: record results, hooks, enqueue downstream ────
+                _stop_exc: Optional[NodeExecutionError] = None
+                for _eo in exec_results:
+                    _nid, _nd, _inp, _src = ready[_eo.idx]
+                    _sn = state.steps + _eo.idx + 1
+                    state.last_node_id = _nid
+                    state.last_outputs = (
+                        _summarize_for_observability(_eo.outputs) if self.history_mode == "summary" else _eo.outputs
+                    )
+
+                    def _build_step_result(
+                        *,
+                        outputs: Dict[str, Any],
+                        stdout: str,
+                        error: Optional[str],
+                        traceback_text: Optional[str] = None,
+                    ) -> StepResult:
+                        if self.history_mode == "summary":
+                            return StepResult(
+                                node_id=_nid,
+                                node_type=_nd.type,
+                                inputs=_summarize_for_observability(_inp),
+                                outputs=_summarize_for_observability(outputs),
+                                stdout=stdout,
+                                error=error,
+                                traceback=traceback_text,
+                                duration_ms=_eo.duration_ms,
+                            )
+                        return StepResult(
+                            node_id=_nid,
+                            node_type=_nd.type,
+                            inputs=_inp,
+                            outputs=outputs,
+                            stdout=stdout,
+                            error=error,
+                            traceback=traceback_text,
+                            duration_ms=_eo.duration_ms,
+                        )
+
+                    if _eo.is_cancelled:
+                        step_res = _build_step_result(
+                            outputs={},
+                            stdout=_eo.stdout,
+                            error=_eo.error or "Run cancelled",
+                            traceback_text=_eo.traceback,
+                        )
+                        state.retain_step(step_res)
+                        if on_step_end is not None and _eo.idx in step_tokens:
+                            try:
+                                on_step_end(step_tokens[_eo.idx], step_res)
+                            except Exception:
+                                _logger.exception(
+                                    "wf.step_end.hook_error",
+                                    extra={"run_id": rid, "step": _sn, "node_id": _nid},
+                                )
+                        _raise_cancelled()
+
+                    if _eo.error is not None:
+                        # ── error / timeout result ────────────────────────
+                        if self.trace:
+                            if _eo.stdout:
+                                print("[WF] stdout=" + _eo.stdout.rstrip())
+                            print(f"[WF] error={_eo.error}")
+                            if _eo.traceback:
+                                print("[WF] traceback:")
+                                print(_eo.traceback.rstrip())
+                        step_res = _build_step_result(
+                            outputs=_eo.outputs,
+                            stdout=_eo.stdout,
+                            error=_eo.error,
+                            traceback_text=_eo.traceback,
+                        )
+                        state.retain_step(step_res)
+                        _status = "timeout" if _eo.is_timeout else "error"
+                        (_logger.warning if _eo.is_timeout else _logger.error)(
+                            f"wf.step.{_status}",
+                            extra={
+                                "run_id": rid,
+                                "step": _sn,
+                                "node_id": _nid,
+                                "node_type": _nd.type,
+                                "error": _eo.error,
+                                **(
+                                    {"timeout_s": self.node_timeout_s}
+                                    if _eo.is_timeout
+                                    else {"traceback": (_eo.traceback or "")[:500]}
+                                ),
+                            },
+                        )
+                        outputs_keys = list(_eo.outputs.keys())
+                        _logger.info(
+                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
+                            _sn,
+                            _nid,
+                            _nd.type,
+                            _status,
+                            _eo.duration_ms,
+                            outputs_keys,
+                            extra={
+                                "run_id": rid,
+                                "step": _sn,
+                                "node_id": _nid,
+                                "node_type": _nd.type,
+                                "status": _status,
+                                "duration_ms": _eo.duration_ms,
+                                "outputs_keys": outputs_keys,
+                                "error": _eo.error,
+                            },
+                        )
+                        if _logger.isEnabledFor(logging.DEBUG):
+                            outputs_for_debug = _outputs_for_log(_eo.outputs)
+                            _logger.debug(
+                                "wf.step.outputs step=%s node=%s status=%s outputs=%s",
+                                _sn,
+                                _nid,
+                                _status,
+                                outputs_for_debug,
+                                extra={
+                                    "run_id": rid,
+                                    "step": _sn,
+                                    "node_id": _nid,
+                                    "node_type": _nd.type,
+                                    "status": _status,
+                                    "outputs": outputs_for_debug,
+                                    "error": _eo.error,
+                                },
+                            )
+                        if on_step_end is not None and _eo.idx in step_tokens:
+                            try:
+                                on_step_end(step_tokens[_eo.idx], step_res)
+                            except Exception:
+                                _logger.exception(
+                                    "wf.step_end.hook_error",
+                                    extra={"run_id": rid, "step": _sn, "node_id": _nid},
+                                )
+                        if _eo.is_timeout and _nd.timeout_fatal and _stop_exc is None:
+                            _stop_exc = NodeTimeoutError(
+                                node_id=_nid,
+                                timeout_s=float(step_timeout_s or 0),
+                                execution_context={
+                                    "run_id": rid,
+                                    "steps": state.steps + len(exec_results),
+                                    "last_node_id": _nid,
+                                    "outputs": state.last_outputs,
+                                    "history": state.history,
+                                },
+                            )
+                            continue
+                        if self.stop_on_error and _stop_exc is None and not _eo.is_timeout:
+                            _stop_exc = NodeExecutionError(
+                                node_id=_nid,
+                                message=_eo.error,
+                                stdout=_eo.stdout,
+                                traceback=_eo.traceback,
+                                execution_context={
+                                    "run_id": rid,
+                                    "steps": state.steps + len(exec_results),
+                                    "last_node_id": _nid,
+                                    "outputs": state.last_outputs,
+                                    "history": state.history,
+                                },
+                            )
+                            continue
+                    else:
+                        # ── success result ────────────────────────────────
+                        if self.trace:
+                            if _eo.stdout:
+                                print("[WF] stdout=" + _eo.stdout.rstrip())
+                            try:
+                                print("[WF] outputs=" + json.dumps(_eo.outputs, ensure_ascii=False, default=str))
+                            except Exception:
+                                print(f"[WF] outputs=<unserializable> {_eo.outputs!r}")
+                        step_res = _build_step_result(
+                            outputs=_eo.outputs,
+                            stdout=_eo.stdout,
+                            error=None,
+                        )
+                        state.retain_step(step_res)
+                        outputs_keys = list(_eo.outputs.keys())
+                        _logger.info(
+                            "wf.step.end step=%s node=%s type=%s status=%s duration_ms=%.3f outputs_keys=%s",
+                            _sn,
+                            _nid,
+                            _nd.type,
+                            "ok",
+                            _eo.duration_ms,
+                            outputs_keys,
+                            extra={
+                                "run_id": rid,
+                                "step": _sn,
+                                "node_id": _nid,
+                                "node_type": _nd.type,
+                                "status": "ok",
+                                "duration_ms": _eo.duration_ms,
+                                "outputs_keys": outputs_keys,
+                                "error": None,
+                            },
+                        )
+                        if _logger.isEnabledFor(logging.DEBUG):
+                            outputs_for_debug = _outputs_for_log(_eo.outputs)
+                            _logger.debug(
+                                "wf.step.outputs step=%s node=%s status=%s outputs=%s",
+                                _sn,
+                                _nid,
+                                "ok",
+                                outputs_for_debug,
+                                extra={
+                                    "run_id": rid,
+                                    "step": _sn,
+                                    "node_id": _nid,
+                                    "node_type": _nd.type,
+                                    "status": "ok",
+                                    "outputs": outputs_for_debug,
+                                    "error": None,
+                                },
+                            )
+                        if on_step_end is not None and _eo.idx in step_tokens:
+                            try:
+                                on_step_end(step_tokens[_eo.idx], step_res)
+                            except Exception:
+                                _logger.exception(
+                                    "wf.step_end.hook_error",
+                                    extra={"run_id": rid, "step": _sn, "node_id": _nid},
+                                )
+
+                    # Enqueue downstream (skip for failed node when stop_on_error)
+                    if _stop_exc is None:
+                        state.record_vertex_output_keys(_nid, _eo.outputs)
+                        for edge, edge_inputs in edge_resolver.resolve(
+                            node=_nd,
+                            node_inputs=_inp,
+                            node_outputs=_eo.outputs,
+                            edges=adj.get(_nid, []),
+                        ):
+                            q.append((edge.to, edge_inputs, _nid))
+
+                state.steps += len(exec_results)
+                # Break references held by this iteration before the next
+                # downstream node starts. Explicit edge mappings only protect
+                # the queued payload; stale outcomes/futures would otherwise
+                # keep excluded values alive for another execution window.
+                ready.clear()
+                exec_results.clear()
+                step_tokens.clear()
+                if _exec_args is not None:
+                    _exec_args.clear()
+                if _fut_map is not None:
+                    _fut_map.clear()
+                _eo = None
+                _inp = {}
+                _outs = None
+                _so = ""
+                _sfut = None
+                _fut = None
+                _f2 = None
+                _pool = None
+                step_res = None
+                if _stop_exc is not None:
+                    raise _stop_exc
+                if cancel is not None and cancel():
+                    _raise_cancelled()
+                if _run_deadline_exceeded():
+                    # A node interrupted by the deadline returns partial output;
+                    # the run must not read as succeeded.
+                    _raise_timed_out()
+
+            pending_joins = []
+            for nid, buf in state.join_inputs.items():
+                n = nodes.get(nid)
+                if n is not None and getattr(n, "join", False):
+                    expected = incoming_from.get(nid, [])
+                    seen = state.join_seen_sources.get(nid, set())
+                    pending_joins.append((nid, expected, sorted(seen)))
+            if pending_joins:
+                msg = "Join node(s) did not receive all incoming inputs: " + "; ".join(
+                    f"{nid} expected={expected} seen={seen}" for nid, expected, seen in pending_joins
+                )
+                raise NodeExecutionError(node_id=pending_joins[0][0], message=msg)
+            return state.to_result()
+        finally:
+            if timeout_executor is not None:
+                try:
+                    timeout_executor.shutdown(wait=False, cancel_futures=True)
+                except TypeError:
+                    timeout_executor.shutdown(wait=False)
+            if isinstance(self.runtime, (PythonExecRuntime, SandboxPythonExecRuntime)):
+                if timed_out_threads.active():
+                    # Serial nodes read the checker off the shared runtime; a
+                    # timed-out one is still unwinding and must keep seeing its
+                    # mark so its next tool / llm.ask poll cancels the call.
+                    self.runtime.cancel_checker = timed_out_threads.residual_checker(previous_cancel_checker)
+                else:
+                    self.runtime.cancel_checker = previous_cancel_checker
+                if isinstance(self.runtime, PythonExecRuntime):
+                    self.runtime.enable_cancel_trace = bool(previous_enable_cancel_trace)
+
+    def run_node(self, node_id: str, inputs: Dict[str, Any]) -> "StepResult":
+        """Public API: execute a single node by id and return a StepResult.
+
+        Unlike the full ``run()`` loop, this method executes exactly one node
+        in isolation without traversing edges or updating shared state.  It is
+        intended for external callers (e.g. the /run-node API endpoint) that
+        want to drive execution step-by-step.
+        """
+        nodes = self.workflow.nodes_by_id()
+        if node_id not in nodes:
+            raise KeyError(f"Node {node_id!r} not found in workflow")
+        node = nodes[node_id]
+        t0 = time.perf_counter()
+        try:
+            outputs, stdout = self._execute_node(node, inputs)
+            return StepResult(
+                node_id=node_id,
+                node_type=node.type,
+                inputs=inputs,
+                outputs=outputs,
+                stdout=stdout,
+                duration_ms=(time.perf_counter() - t0) * 1000.0,
+            )
+        except Exception as e:
+            tb = traceback.format_exc()
+            return StepResult(
+                node_id=node_id,
+                node_type=node.type,
+                inputs=inputs,
+                outputs={},
+                error=str(e),
+                traceback=tb,
+                duration_ms=(time.perf_counter() - t0) * 1000.0,
+            )
+
+    def _execute_node(
+        self,
+        node: Node,
+        inputs: Dict[str, Any],
+        *,
+        _runtime: Optional["Runtime"] = None,
+    ) -> Tuple[Dict[str, Any], str]:
+        """Execute a single node; returns (outputs, stdout) or raises.
+
+        When *_runtime* is supplied it is used instead of ``self.runtime`` for
+        python / logic nodes.  This allows the parallel execution path to pass
+        in a thread-isolated runtime copy.
+        """
+        _rt = _runtime or self.runtime
+        assert _rt is not None
+        node_id = node.id
+        if node.type == "python":
+            assert node.code is not None
+            if node.process_isolated and isinstance(_rt, PythonExecRuntime):
+                _rt = HostProcessPythonExecRuntime(
+                    tool_registry=_rt.tool_registry,
+                    cancel_checker=_rt.cancel_checker,
+                    inherited_fd_keys=tuple(node.process_inherit_fd_keys),
+                    retained_fd_keys=tuple(node.process_retain_fd_keys),
+                    rpc_max_bytes=_rt.isolated_rpc_max_bytes,
+                    rpc_max_inflight_bytes=_rt.isolated_rpc_max_inflight_bytes,
+                    rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
+                    rpc_max_workers=_rt.isolated_rpc_max_workers,
+                )
+            return self._run_code_node(node, node.code, inputs, _rt)
+        if node.type == "logic":
+            assert self.code_gen is not None
+            code = node.code
+            if code is None or not str(code).strip():
+                try:
+                    code = self._generate_logic_code(node, _rt)
+                except Exception as gen_error:
+                    raise NodeExecutionError(
+                        node_id=node_id,
+                        message=f"Code generation failed: {type(gen_error).__name__}: {gen_error}",
+                    ) from gen_error
+                if self.mutate_workflow:
+                    node.code = code
+            if node.process_isolated and isinstance(_rt, PythonExecRuntime):
+                _rt = HostProcessPythonExecRuntime(
+                    tool_registry=_rt.tool_registry,
+                    cancel_checker=_rt.cancel_checker,
+                    inherited_fd_keys=tuple(node.process_inherit_fd_keys),
+                    retained_fd_keys=tuple(node.process_retain_fd_keys),
+                    rpc_max_bytes=_rt.isolated_rpc_max_bytes,
+                    rpc_max_inflight_bytes=_rt.isolated_rpc_max_inflight_bytes,
+                    rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
+                    rpc_max_workers=_rt.isolated_rpc_max_workers,
+                )
+            return self._run_code_node(node, code, inputs, _rt)
+        if node.type in {"branch", "loop"}:
+            return {}, ""
+        if node.type == "tool":
+            return self._execute_tool_node(node, inputs, _runtime=_runtime)
+        if node.type == "llm":
+            return self._execute_llm_node(node, inputs, _runtime=_runtime)
+        if node.type == "http_request":
+            return self._execute_http_request_node(node, inputs)
+        if node.type == "subworkflow":
+            return self._execute_subworkflow_node(node, inputs, _runtime=_runtime)
+        raise NodeExecutionError(node_id=node_id, message=f"Unsupported node.type={node.type!r}")
+
+    def _execute_tool_node(
+        self,
+        node: Node,
+        inputs: Dict[str, Any],
+        *,
+        _runtime: Optional["Runtime"] = None,
+    ) -> Tuple[Dict[str, Any], str]:
+        """Execute a tool node by calling the named tool from the tool registry."""
+        assert node.tool_name, "tool node requires tool_name"
+        from .tools import ToolFacade, get_tool_registry
+
+        _rt = _runtime or self.runtime
+        reg = getattr(_rt, "tool_registry", None) or get_tool_registry()
+        cancel_checker = getattr(_rt, "cancel_checker", None)
+        cancel_scope = nullcontext()
+        with_cancel_checker = getattr(reg, "with_cancel_checker", None)
+        if callable(with_cancel_checker):
+            reg = with_cancel_checker(cancel_checker)
+        else:
+            cancel_scope = _legacy_registry_cancel_scope(reg, cancel_checker)
+        facade = ToolFacade(reg)
+        merged_args = {**(node.tool_args or {}), **inputs}
+        try:
+            with cancel_scope:
+                result = facade.run(node.tool_name, **merged_args)
+        except RunCancelledError:
+            raise
+        except Exception as e:
+            raise NodeExecutionError(
+                node_id=node.id,
+                message=f"Tool '{node.tool_name}' failed: {type(e).__name__}: {e}",
+            ) from e
+        output_k = node.output_key or "result"
+        return {output_k: result}, ""
+
+    def _execute_llm_node(
+        self,
+        node: Node,
+        inputs: Dict[str, Any],
+        *,
+        _runtime: Optional["Runtime"] = None,
+    ) -> Tuple[Dict[str, Any], str]:
+        """Execute an LLM node: render Jinja2 prompt template, call LLM."""
+        assert node.prompt, "llm node requires prompt"
+        try:
+            from jinja2.sandbox import SandboxedEnvironment
+
+            rendered = SandboxedEnvironment().from_string(node.prompt).render(**inputs)
+        except Exception as e:
+            raise NodeExecutionError(
+                node_id=node.id,
+                message=f"Prompt template render failed: {type(e).__name__}: {e}",
+            ) from e
+        from .llm import default_llm_node_max_retries, get_llm_client, llm_hook_context_from_registry
+
+        _rt = _runtime or self.runtime
+        cancel_checker = getattr(_rt, "cancel_checker", None)
+        try:
+            client = get_llm_client(
+                model=node.model,
+                cancel_checker=cancel_checker,
+                hook_context=llm_hook_context_from_registry(getattr(_rt, "tool_registry", None)),
+            )
+            # Transient provider failures (429 / 5xx / timeouts) are retried
+            # with backoff instead of failing the node on the first hit.
+            text = client.ask(rendered, max_retries=default_llm_node_max_retries())
+        except RunCancelledError:
+            raise
+        except Exception as e:
+            raise NodeExecutionError(
+                node_id=node.id,
+                message=f"LLM call failed: {type(e).__name__}: {e}",
+            ) from e
+        output_k = node.output_key or "result"
+        return {output_k: text}, ""
+
+    def _gate_engine_operation(
+        self,
+        node: Node,
+        *,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_schema: Dict[str, Any],
+        tool_category: str,
+        call_prefix: str,
+        blocked_label: str,
+        applicable_patch_keys: frozenset[str] = frozenset(),
+        runtime: Optional[Runtime] = None,
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Pass work the engine does itself through the tool-execution gate.
+
+        The engine has no policy of its own; ``tool.execute.before`` handlers
+        decide.  Returns the payload the outcome is reported against and the
+        argument patch the handlers attached to their allow, or ``None`` when
+        no handler is registered (the work proceeds unchanged).  Anything but
+        an allow stops the node: a headless run has nobody to answer a
+        confirmation.  So does a patch naming an argument outside
+        ``applicable_patch_keys``: the handlers authorised the patched call,
+        and running the unpatched one instead would run something nobody
+        authorised.
+        """
+        from aegisops.hooks.pipeline import HookPipeline, HookStage
+        from aegisops.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+
+        registry = getattr(runtime or self.runtime, "tool_registry", None)
+
+        async def _gate():
+            from aegisops.hooks.tool_gate import ToolGateVerdict, run_tool_gate
+            from aegisops.session.tool_execution import build_session_tool_execution_payload
+            from aegisops.tool import ToolContext
+
+            ctx = None
+            resolver = getattr(registry, "_tool_context", None)
+            if callable(resolver):
+                try:
+                    ctx = resolver()
+                except Exception:
+                    ctx = None
+            if ctx is None:
+                ctx = ToolContext(session_id="workflow", message_id="workflow")
+            # Which project's hooks apply: the same workspace and session the
+            # workflow's model calls name (see llm_hook_context_from_registry),
+            # on the probe and on both stage payloads alike.  Without them the
+            # pipeline falls back to the server's working directory and a
+            # project that registered its own gate would not be asked.
+            location: Dict[str, Any] = {"sessionID": ctx.session_id}
+            workspace = (ctx.extra or {}).get("workspace_dir") or os.getcwd()
+            if isinstance(workspace, str) and workspace.strip():
+                location["workspace"] = workspace
+            probe = {"tool": {"name": tool_name}, **location}
+            gates = await HookPipeline.has_stage_handlers(HookStage.TOOL_BEFORE, probe)
+            reports = await HookPipeline.has_stage_handlers(HookStage.TOOL_AFTER, probe)
+            if not gates and not reports:
+                return None
+            # Audit sinks record the attempt under the call id; give this
+            # operation one of its own like any tool invocation.
+            call_id = getattr(ctx, "call_id", None) or f"{call_prefix}-{uuid.uuid4().hex}"
+            payload = await build_session_tool_execution_payload(
+                session_id=ctx.session_id,
+                message_id=ctx.message_id,
+                agent=ctx.agent or "workflow",
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_schema=tool_schema,
+                tool_context_extra={
+                    **dict(ctx.extra or {}),
+                    "tool_call_id": call_id,
+                    "tool_source": "workflow",
+                    "tool_category": tool_category,
+                    "workflow_node_id": node.id,
+                },
+                validated_input=tool_input,
+            )
+            payload = {**payload, **location}
+            if not gates:
+                # Only observers: nothing decides, the outcome is still reported.
+                from aegisops.hooks.contracts import ToolDecision
+
+                return payload, ToolGateVerdict(decision=ToolDecision(), call_id=call_id)
+            return payload, await run_tool_gate(payload, call_id=call_id, tool_input=tool_input)
+
+        gated = _run_sync_on_shared_loop(_gate())
+        if gated is None:
+            return None
+        payload, verdict = gated
+        patch = dict(verdict.decision.validated_input_patch or {})
+        unapplicable = sorted(key for key in patch if key not in applicable_patch_keys)
+        if verdict.allowed and not unapplicable:
+            return payload, patch
+        if verdict.allowed:
+            reason = f"policy changed arguments the workflow engine cannot apply: {', '.join(unapplicable)}"
+        else:
+            reason = verdict.reason or ("tool-before hook failed" if verdict.stage_failed else "denied by policy")
+        if verdict.needs_confirmation:
+            reason = reason or "requires confirmation"
+            reason = f"requires confirmation, which a headless workflow cannot grant: {reason}"
+        # The refusal is an outcome too: whoever recorded the attempt gets told
+        # it never ran.
+        self._report_engine_operation(
+            payload,
+            status="confirm" if verdict.needs_confirmation else "deny",
+            started=time.perf_counter(),
+            error=None,
+        )
+        raise NodeExecutionError(
+            node_id=node.id,
+            message=f"{blocked_label} blocked by policy: {reason}",
+        )
+
+    def _report_engine_operation(
+        self,
+        payload: Dict[str, Any],
+        *,
+        status: str,
+        started: float,
+        error: Optional[BaseException],
+    ) -> None:
+        """Fire ``tool.execute.after`` for a gated engine operation.
+
+        Observational: a failing after-stage is logged, never allowed to
+        replace the node's own result.
+        """
+        from aegisops.hooks.contracts import ToolExecutionOutcome
+        from aegisops.hooks.pipeline import HookPipeline
+        from aegisops.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+
+        outcome = ToolExecutionOutcome(
+            status=status,
+            duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+            error_type=type(error).__name__ if error is not None else None,
+            error_message=str(error) if error is not None else None,
+        )
+        try:
+            _run_sync_on_shared_loop(
+                HookPipeline.run_tool_after({**payload, "outcome": outcome.model_dump(mode="json")})
+            )
+        except Exception as exc:
+            _logger.warning("workflow.engine.tool_after_failed status=%s error=%s", status, exc)
+
+    def _gate_http_request(
+        self, node: Node, *, url: str, method: str
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """Pass the outbound request through the tool-execution gate."""
+        return self._gate_engine_operation(
+            node,
+            tool_name="http_request",
+            tool_input={"url": url, "method": method},
+            tool_schema=_HTTP_REQUEST_TOOL_SCHEMA,
+            tool_category="network",
+            call_prefix="wf-http",
+            blocked_label="HTTP request",
+            applicable_patch_keys=frozenset({"url", "method"}),
+        )
+
+    def _generate_logic_code(self, node: Node, runtime: Runtime) -> str:
+        """Generate a logic node's code with a model call that names this run.
+
+        A shared generator would call the model under whatever context its
+        client was built with -- by default no session, the system caller --
+        whoever's run it is, and parallel branches would share one client.
+        Each generation gets a client of its own carrying the run's hook
+        context instead.  An explicit client keeps its model and settings: it
+        is copied and only the run-identifying context is replaced, so the
+        client the generator holds is never modified.
+        """
+        generator = self.code_gen
+        assert generator is not None
+        if isinstance(generator, LLMCodeGen):
+            from dataclasses import replace
+
+            from .llm import LLMClient, get_llm_client, llm_hook_context_from_registry
+
+            run_context = llm_hook_context_from_registry(getattr(runtime, "tool_registry", None))
+            client = generator.client
+            if client is None:
+                client = get_llm_client(hook_context=run_context)
+            elif isinstance(client, LLMClient):
+                client = copy.copy(client)
+                client.hook_context = {**(client.hook_context or {}), **run_context}
+            generator = replace(generator, client=client)
+        return generator.generate(node)
+
+    def _run_code_node(self, node: Node, code: str, inputs: Dict[str, Any], runtime: Runtime) -> Any:
+        """Run a python or logic node's code behind the tool-execution gate.
+
+        The code is arbitrary Python -- for a logic node possibly written by a
+        model -- so it is held to the same policy and audit as a tool that
+        would do the same thing, rather than assumed to pass through one.
+        """
+        gated = self._gate_engine_operation(
+            node,
+            tool_name=WORKFLOW_CODE_TOOL_NAME,
+            tool_input=_workflow_code_input(code, node),
+            tool_schema=_WORKFLOW_CODE_TOOL_SCHEMA,
+            tool_category="code",
+            call_prefix="wf-code",
+            blocked_label="Workflow code",
+            applicable_patch_keys=frozenset({"code"}),
+            runtime=runtime,
+        )
+        if gated is None:
+            return runtime.execute(code, inputs)
+        payload, patch = gated
+        if "code" in patch:
+            if not isinstance(patch["code"], str):
+                self._report_engine_operation(payload, status="deny", started=time.perf_counter(), error=None)
+                raise NodeExecutionError(
+                    node_id=node.id,
+                    message="Workflow code blocked by policy: the policy's replacement code is not text",
+                )
+            # Run what the handlers authorised: their patch, not the original.
+            code = patch["code"]
+            payload = _with_validated_input(payload, _workflow_code_input(code, node))
+        started = time.perf_counter()
+        status = "error"
+        error: Optional[BaseException] = None
+        try:
+            result = runtime.execute(code, inputs)
+            status = "success"
+            return result
+        except RunCancelledError as exc:
+            status, error = "cancelled", exc
+            raise
+        except BaseException as exc:
+            error = exc
+            raise
+        finally:
+            self._report_engine_operation(payload, status=status, started=started, error=error)
+
+    def _execute_http_request_node(self, node: Node, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+        """Execute an HTTP request node using httpx (synchronous)."""
+        assert node.url, "http_request node requires url"
+        assert node.method, "http_request node requires method"
+        try:
+            from jinja2.sandbox import SandboxedEnvironment
+
+            _sandbox = SandboxedEnvironment()
+            url = _sandbox.from_string(node.url).render(**inputs)
+            method = node.method.upper()
+            headers = node.headers or {}
+            body = node.body
+            if isinstance(body, str):
+                body = _sandbox.from_string(body).render(**inputs)
+        except Exception as e:
+            raise NodeExecutionError(
+                node_id=node.id,
+                message=f"HTTP request template render failed: {type(e).__name__}: {e}",
+            ) from e
+        gated = self._gate_http_request(node, url=url, method=method)
+        gate_payload, patch = gated if gated is not None else (None, {})
+        if patch:
+            patched_url, patched_method = patch.get("url", url), patch.get("method", method)
+            if not isinstance(patched_url, str) or not isinstance(patched_method, str):
+                self._report_engine_operation(gate_payload, status="deny", started=time.perf_counter(), error=None)
+                raise NodeExecutionError(
+                    node_id=node.id,
+                    message="HTTP request blocked by policy: the policy's replacement arguments are not text",
+                )
+            # Send what the handlers authorised: their patch, not the original.
+            url, method = patched_url, patched_method.upper()
+            gate_payload = _with_validated_input(gate_payload, {"url": url, "method": method})
+        started = time.perf_counter()
+        status = "error"
+        failure: Optional[BaseException] = None
+        try:
+            import httpx
+
+            with httpx.Client(timeout=30.0) as client:
+                if method in {"GET", "DELETE", "HEAD"}:
+                    resp = client.request(method, url, headers=headers)
+                elif isinstance(body, dict):
+                    resp = client.request(method, url, headers=headers, json=body)
+                else:
+                    resp = client.request(method, url, headers=headers, content=body)
+            try:
+                resp_data: Any = resp.json()
+            except Exception:
+                resp_data = resp.text
+            status = "success"
+        except Exception as e:
+            failure = e
+            raise NodeExecutionError(
+                node_id=node.id,
+                message=f"HTTP request failed: {type(e).__name__}: {e}",
+            ) from e
+        finally:
+            if gate_payload is not None:
+                self._report_engine_operation(gate_payload, status=status, started=started, error=failure)
+        response_k = node.response_key or "response"
+        return {
+            response_k: resp_data,
+            "status_code": resp.status_code,
+        }, ""
+
+    def _execute_subworkflow_node(
+        self,
+        node: Node,
+        inputs: Dict[str, Any],
+        *,
+        _runtime: Optional["Runtime"] = None,
+    ) -> Tuple[Dict[str, Any], str]:
+        """Execute a subworkflow node by loading and running a child workflow."""
+        if self._depth >= 1:
+            raise NodeExecutionError(
+                node_id=node.id,
+                message="子工作流不允许再嵌套子工作流（最大嵌套深度为 1）",
+            )
+        assert node.workflow_id, "subworkflow node requires workflow_id"
+        assert self.workflow_loader is not None
+        try:
+            sub_wf = self.workflow_loader(node.workflow_id)
+        except NodeExecutionError:
+            raise
+        except Exception as e:
+            raise NodeExecutionError(
+                node_id=node.id,
+                message=f"Failed to load sub-workflow '{node.workflow_id}': {type(e).__name__}: {e}",
+            ) from e
+        if node.inputs_mapping:
+            sub_inputs = {k: self._get_by_path(inputs, v) for k, v in node.inputs_mapping.items()}
+        else:
+            sub_inputs = dict(inputs)
+        if node.inputs_const:
+            sub_inputs.update(node.inputs_const)
+        sub_engine = WorkflowEngine(
+            workflow=sub_wf,
+            runtime=_runtime or self.runtime,
+            code_gen=self.code_gen,
+            max_steps=self.max_steps,
+            stop_on_error=self.stop_on_error,
+            use_llm=self.use_llm,
+            trace=self.trace,
+            node_timeout_s=self.node_timeout_s,
+            history_mode=self.history_mode,
+            dataflow_mode=self.dataflow_mode,
+            _depth=self._depth + 1,
+            max_parallel_workers=self.max_parallel_workers,
+            workflow_loader=self.workflow_loader,
+        )
+        result = sub_engine.run(initial_inputs=sub_inputs)
+        last_outputs = result.outputs or (result.history[-1].outputs if result.history else {})
+        output_k = node.output_key or "output"
+        return {output_k: last_outputs}, ""
+
+    def _select_edges(self, node: Any, payload: Dict[str, Any], edges: List[Edge]) -> List[Edge]:
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).select_edges(node, payload, edges)
+
+    def _select_edges_from_scopes(
+        self,
+        node: Any,
+        scopes: List[Dict[str, Any]],
+        edges: List[Edge],
+    ) -> List[Edge]:
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).select_edges_from_scopes(
+            node,
+            scopes,
+            edges,
+        )
+
+    def _build_downstream_inputs(self, upstream: Dict[str, Any], edge: Edge) -> Dict[str, Any]:
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).build_downstream_inputs(upstream, edge)
+
+    def _build_downstream_inputs_from_scopes(
+        self,
+        scopes: List[Dict[str, Any]],
+        edge: Edge,
+    ) -> Dict[str, Any]:
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).build_downstream_inputs_from_scopes(
+            scopes,
+            edge,
+        )
+
+    def _try_get_by_path_from_scopes(
+        self,
+        scopes: List[Dict[str, Any]],
+        path: str,
+    ) -> tuple[bool, Any]:
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).try_get_by_path_from_scopes(
+            scopes, path
+        )
+
+    def _try_get_by_path(self, data: Any, path: str) -> tuple[bool, Any]:
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).try_get_by_path(data, path)
+
+    def _get_by_path(self, data: Any, path: str) -> Any:
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).get_by_path(data, path)

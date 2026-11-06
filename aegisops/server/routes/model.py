@@ -1,0 +1,654 @@
+"""
+Model management routes
+
+Provides model-level operations (listing, filtering, etc.)
+Complements the provider routes with model-specific functionality.
+
+Includes V2 endpoints that return full ModelDefinition with capabilities,
+limits, pricing, and parameter rules.
+"""
+
+from typing import List, Optional, Dict, Any
+from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field, StrictBool
+
+from aegisops.config.config_writer import ConfigWriter
+from aegisops.provider.provider import ModelInfo as ProviderModelInfo, Provider
+from aegisops.provider.model_manager import get_model_manager
+from aegisops.provider.types import (
+    ModelDefinition,
+    ModelSetting,
+    ModelType,
+)
+from aegisops.server.auth import require_admin
+from aegisops.server.config_mutation import serialized_config_mutation
+from aegisops.utils.log import Log
+
+
+router = APIRouter()
+log = Log.create(service="routes.model")
+
+
+def _connected_provider_ids() -> set[str]:
+    """Return provider ids explicitly connected in aegisops.json."""
+    return set(ConfigWriter.list_provider_ids())
+
+
+async def _apply_provider_config(provider_id: Optional[str] = None) -> None:
+    """Load aegisops.json models into the provider runtime (best effort)."""
+    from aegisops.config.config import Config
+
+    Provider._ensure_initialized()
+    try:
+        config = await Config.get()
+        await Provider.apply_config(config, provider_id=provider_id)
+    except Exception:
+        pass
+
+
+def _definition_index(provider_id: str) -> Dict[str, ModelDefinition]:
+    """Catalog-enriched definitions of a provider, keyed by model id."""
+    provider = Provider.get(provider_id)
+    if provider is None:
+        return {}
+    try:
+        return {d.id: d for d in provider.get_model_definitions()}
+    except Exception:
+        return {}
+
+
+def _to_model_detail(
+    model: ProviderModelInfo,
+    provider_id: str,
+    definition: Optional[ModelDefinition] = None,
+) -> "ModelDetail":
+    """Convert a runtime ModelInfo into the V1 ModelDetail response.
+
+    Limits missing on the runtime ModelInfo (config-defined models carry none)
+    are filled from the catalog-enriched ModelDefinition when available.
+    """
+    caps = model.capabilities
+    limits = definition.limits if definition is not None else None
+    def_caps = definition.capabilities if definition is not None else None
+    pricing = model.pricing
+    if pricing is None and definition is not None and definition.pricing is not None:
+        pricing = definition.pricing.model_dump()
+    return ModelDetail(
+        id=model.id,
+        name=model.name or model.id.split("/")[-1],
+        provider=provider_id,
+        max_tokens=caps.max_tokens or (limits.max_output_tokens if limits else None),
+        context_window=caps.context_window or (limits.context_window if limits else None),
+        capabilities=ModelCapabilities(
+            streaming=caps.supports_streaming,
+            tools=caps.supports_tools,
+            vision=caps.supports_vision,
+            json_mode=bool(def_caps.supports_json_mode) if def_caps is not None else False,
+        ),
+        pricing=pricing,
+        metadata=caps.model_dump(),
+    )
+
+
+def _find_model(provider_id: str, model_id: str) -> Optional[ProviderModelInfo]:
+    """Exact-id lookup of a model inside one provider's runtime model list."""
+    try:
+        for model in Provider.list_models(provider_id):
+            if model.id == model_id:
+                return model
+    except Exception:
+        return None
+    return None
+
+
+# ==================== Response Models ====================
+
+class ModelCapabilities(BaseModel):
+    """Model capabilities"""
+    streaming: bool = Field(True, description="Supports streaming")
+    tools: bool = Field(True, description="Supports tool calling")
+    vision: bool = Field(False, description="Supports vision/images")
+    json_mode: bool = Field(False, description="Supports JSON mode")
+
+
+class ModelDetail(BaseModel):
+    """Detailed model information"""
+    id: str = Field(..., description="Model ID")
+    name: str = Field(..., description="Human-readable name")
+    provider: str = Field(..., description="Provider ID")
+    max_tokens: Optional[int] = Field(None, description="Maximum tokens")
+    context_window: Optional[int] = Field(None, description="Context window size")
+    capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
+    pricing: Optional[Dict[str, Any]] = Field(None, description="Pricing info")
+    metadata: Dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+
+
+class ModelListResponse(BaseModel):
+    """Response for model list"""
+    models: List[ModelDetail]
+    total: int
+    providers: List[str]
+
+
+class ModelFilterRequest(BaseModel):
+    """Model filtering options"""
+    provider: Optional[str] = Field(None, description="Filter by provider")
+    supports_streaming: Optional[bool] = Field(None, description="Filter by streaming support")
+    supports_tools: Optional[bool] = Field(None, description="Filter by tool support")
+    supports_vision: Optional[bool] = Field(None, description="Filter by vision support")
+    min_context_window: Optional[int] = Field(None, description="Minimum context window")
+
+
+# ==================== Routes ====================
+
+@router.get(
+    "/",
+    response_model=ModelListResponse,
+    summary="List all models",
+    description="List all available models across all providers"
+)
+async def list_models(
+    provider: Optional[str] = Query(None, description="Filter by provider ID"),
+    streaming: Optional[bool] = Query(None, description="Filter by streaming support"),
+    tools: Optional[bool] = Query(None, description="Filter by tool support"),
+) -> ModelListResponse:
+    """
+    List all models
+    
+    Returns a unified list of all models from all providers,
+    with optional filtering.
+    
+    Args:
+        provider: Optional provider filter
+        streaming: Optional streaming filter
+        tools: Optional tools filter
+        
+    Returns:
+        List of models with metadata
+    """
+    return await _collect_models(provider=provider, streaming=streaming, tools=tools)
+
+
+async def _collect_models(
+    provider: Optional[str] = None,
+    streaming: Optional[bool] = None,
+    tools: Optional[bool] = None,
+) -> ModelListResponse:
+    """Shared implementation for the V1 list/filter/summary/compatible routes.
+
+    Internal callers must use this instead of ``list_models`` so the
+    ``Query(...)`` defaults of the route signature never leak in as values.
+    """
+    try:
+        await _apply_provider_config(provider_id=provider)
+        connected_provider_ids = _connected_provider_ids()
+        if provider:
+            provider_ids = [provider] if provider in connected_provider_ids else []
+        else:
+            provider_ids = sorted(connected_provider_ids)
+        
+        all_models: List[ModelDetail] = []
+        providers_with_models: set = set()
+        
+        for provider_id in provider_ids:
+            # Apply provider filter
+            if provider and provider_id != provider:
+                continue
+            
+            try:
+                # Get models for this provider
+                models = Provider.list_models(provider_id)
+                definitions = _definition_index(provider_id)
+                
+                for model in models:
+                    # Apply capability filters
+                    if streaming is not None and model.capabilities.supports_streaming != streaming:
+                        continue
+                    if tools is not None and model.capabilities.supports_tools != tools:
+                        continue
+                    
+                    all_models.append(
+                        _to_model_detail(model, provider_id, definitions.get(model.id))
+                    )
+                    providers_with_models.add(provider_id)
+            
+            except Exception as e:
+                log.warning("Failed to list models for provider", {
+                    "provider": provider_id,
+                    "error": str(e)
+                })
+                continue
+        
+        return ModelListResponse(
+            models=all_models,
+            total=len(all_models),
+            providers=sorted(list(providers_with_models)),
+        )
+    
+    except Exception as e:
+        log.error("Failed to list models", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/filter",
+    response_model=ModelListResponse,
+    summary="Filter models",
+    description="Filter models by multiple criteria"
+)
+async def filter_models(filters: ModelFilterRequest) -> ModelListResponse:
+    """
+    Filter models by criteria
+    
+    Provides advanced filtering capabilities for models.
+    
+    Args:
+        filters: Filter criteria
+        
+    Returns:
+        Filtered model list
+    """
+    try:
+        # Get all models
+        all_models_response = await _collect_models(
+            provider=filters.provider,
+            streaming=filters.supports_streaming,
+            tools=filters.supports_tools,
+        )
+        
+        filtered_models = all_models_response.models
+        
+        # Apply additional filters
+        if filters.supports_vision is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if m.capabilities.vision == filters.supports_vision
+            ]
+        
+        if filters.min_context_window is not None:
+            filtered_models = [
+                m for m in filtered_models
+                if m.context_window and m.context_window >= filters.min_context_window
+            ]
+        
+        return ModelListResponse(
+            models=filtered_models,
+            total=len(filtered_models),
+            providers=list(set(m.provider for m in filtered_models)),
+        )
+    
+    except Exception as e:
+        log.error("Failed to filter models", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/providers/summary",
+    response_model=Dict[str, int],
+    summary="Provider model counts",
+    description="Get model count per provider"
+)
+async def provider_model_counts() -> Dict[str, int]:
+    """
+    Get model count per provider
+    
+    Returns a summary of how many models each provider has.
+    
+    Returns:
+        Dict mapping provider ID to model count
+    """
+    try:
+        all_models_response = await _collect_models()
+        
+        counts: Dict[str, int] = {}
+        for model in all_models_response.models:
+            counts[model.provider] = counts.get(model.provider, 0) + 1
+        
+        return counts
+    
+    except Exception as e:
+        log.error("Failed to get provider counts", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== V2 Endpoints (ModelDefinition-based) ====================
+
+
+class ModelDefinitionListResponse(BaseModel):
+    """Response for V2 model list"""
+    models: List[ModelDefinition]
+    total: int
+
+
+class UpdateModelSettingRequest(BaseModel):
+    """Request to update model settings"""
+    enabled: Optional[StrictBool] = Field(None, description="Enable or disable model")
+    default_parameters: Optional[Dict[str, Any]] = Field(
+        None, description="Default parameter overrides"
+    )
+
+
+@router.get(
+    "/v2/definitions",
+    response_model=ModelDefinitionListResponse,
+    summary="List model definitions (V2)",
+    description="List all models with full definitions including capabilities, limits, pricing, and parameter rules",
+)
+async def list_model_definitions(
+    provider: Optional[str] = Query(None, description="Filter by provider ID"),
+    model_type: Optional[ModelType] = Query(None, description="Filter by model type"),
+    enabled_only: bool = Query(False, description="Only return enabled models"),
+) -> ModelDefinitionListResponse:
+    """List model definitions with full metadata."""
+    try:
+        from aegisops.config.config import Config
+
+        Provider._ensure_initialized()
+        try:
+            config = await Config.get()
+            await Provider.apply_config(config, provider_id=provider)
+        except Exception:
+            pass
+
+        manager = get_model_manager()
+        definitions = manager.list_models(
+            provider_id=provider,
+            model_type=model_type,
+            enabled_only=enabled_only,
+        )
+        connected_provider_ids = _connected_provider_ids()
+        definitions = [
+            definition
+            for definition in definitions
+            if definition.provider_id in connected_provider_ids
+        ]
+        return ModelDefinitionListResponse(
+            models=definitions,
+            total=len(definitions),
+        )
+    except Exception as e:
+        log.error("Failed to list model definitions", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/v2/definitions/{provider_id}/{model_id:path}/parameter-rules",
+    summary="Get model parameter rules",
+    description="Get the parameter rules (constraints) for a model",
+)
+async def get_parameter_rules(provider_id: str, model_id: str):
+    """Get parameter rules for a model."""
+    manager = get_model_manager()
+    definition = manager.get_model(provider_id, model_id)
+    if not definition:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_id}' not found for provider '{provider_id}'",
+        )
+    return {"parameter_rules": definition.parameter_rules}
+
+
+@router.get(
+    "/v2/definitions/{provider_id}/{model_id:path}",
+    response_model=ModelDefinition,
+    summary="Get model definition (V2)",
+    description="Get full model definition with capabilities, limits, pricing, and parameter rules",
+)
+async def get_model_definition(
+    provider_id: str, model_id: str
+) -> ModelDefinition:
+    """Get a single model definition."""
+    manager = get_model_manager()
+    definition = manager.get_model(provider_id, model_id)
+    if not definition:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_id}' not found for provider '{provider_id}'",
+        )
+    return definition
+
+
+@router.get(
+    "/v2/settings/{provider_id}/{model_id:path}",
+    summary="Get model settings",
+)
+async def get_model_settings(provider_id: str, model_id: str):
+    """Get user settings for a model."""
+    manager = get_model_manager()
+    setting = manager.get_setting(provider_id, model_id)
+    if not setting:
+        # Return defaults
+        return ModelSetting(provider_id=provider_id, model_id=model_id)
+    return setting
+
+
+@router.put(
+    "/v2/settings/{provider_id}/{model_id:path}",
+    response_model=ModelSetting,
+    summary="Update model settings",
+    description="Enable/disable a model or set default parameters",
+)
+@serialized_config_mutation
+async def update_model_settings(
+    provider_id: str,
+    model_id: str,
+    body: UpdateModelSettingRequest,
+    _admin: object = Depends(require_admin),
+) -> ModelSetting:
+    """Update model settings (enable/disable, default parameters)."""
+    await _apply_provider_config(provider_id=provider_id)
+    manager = get_model_manager()
+    if manager.get_model(provider_id, model_id) is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model '{model_id}' not found for provider '{provider_id}'",
+        )
+    setting = manager.update_setting(
+        provider_id=provider_id,
+        model_id=model_id,
+        enabled=body.enabled,
+        default_parameters=body.default_parameters,
+    )
+    return setting
+
+async def _delete_model_inventory(provider_id: str, model_id: str) -> bool:
+    """Shared explicit deletion semantics for the V2 and custom model routes.
+
+    Called under the global configuration mutation lock. Rebuild only model
+    metadata: unresolved raw credential references must not reconfigure a
+    live provider while updating its inventory.
+    """
+    if not ConfigWriter.remove_model(provider_id, model_id):
+        return False
+
+    from aegisops.config.config import ProviderConfig as ProviderSettings
+    from aegisops.server.routes.model_discovery import publish_provider_updated
+    from aegisops.server.routes.provider import _ensure_provider_initialized
+
+    await _ensure_provider_initialized()
+    provider = Provider._providers.get(provider_id)
+    if provider is not None:
+        raw = ConfigWriter.get_provider_raw(provider_id) or {}
+        Provider.apply_provider_config(
+            provider,
+            ProviderSettings.model_validate({"models": raw.get("models", {}), "model_sync": "manual"}),
+        )
+        if hasattr(provider, "_custom_models"):
+            provider._custom_models = list(provider._config_models)
+        desired = {model.id: model for model in provider.get_models()}
+        for cached_id, model in list(Provider._models.items()):
+            if model.provider_id == provider_id and cached_id not in desired:
+                del Provider._models[cached_id]
+        for cached_id, model in desired.items():
+            existing = Provider._models.get(cached_id)
+            if existing is None or existing.provider_id == provider_id:
+                Provider._models[cached_id] = model
+
+    await publish_provider_updated(provider_id)
+    return True
+
+
+@router.delete(
+    "/v2/definitions/{provider_id}/{model_id:path}",
+    status_code=204,
+    summary="Delete model definition",
+    description="Delete a model from a provider (removes from aegisops.json and runtime)",
+)
+@serialized_config_mutation
+async def delete_model_definition(
+    provider_id: str,
+    model_id: str,
+    _admin: object = Depends(require_admin),
+):
+    """Delete a model from a provider.
+
+    Removes the model and its routing/settings references atomically, opts
+    the inventory into manual management, and immediately refreshes runtime.
+    """
+    try:
+        removed = await _delete_model_inventory(provider_id, model_id)
+        if not removed:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Model '{model_id}' not found for provider '{provider_id}'",
+            )
+
+        log.info("model_definition.deleted", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Failed to delete model definition", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(e)
+        })
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ==================== V1 model lookup (registered last) ====================
+#
+# ``{model_id:path}`` lets callers pass ``provider/model`` ids. These two routes
+# must be registered after every fixed path above (``/providers/summary``,
+# ``/v2/...``) so the catch-all does not shadow them.
+
+
+@router.get(
+    "/{model_id:path}/compatible",
+    response_model=List[str],
+    summary="Find compatible models",
+    description="Find models with similar capabilities"
+)
+async def find_compatible_models(
+    model_id: str,
+    limit: int = Query(5, ge=1, le=20, description="Maximum number of results")
+) -> List[str]:
+    """
+    Find compatible models
+    
+    Finds models with similar capabilities to the specified model.
+    Useful for fallback or alternative suggestions.
+    
+    Args:
+        model_id: Source model ID
+        limit: Maximum results
+        
+    Returns:
+        List of compatible model IDs
+    """
+    try:
+        # Get the source model
+        source = await get_model(model_id)
+        
+        # Get all models
+        all_models_response = await _collect_models()
+        
+        # Find similar models (same provider first, then others)
+        compatible: List[str] = []
+        
+        # Same provider models
+        for model in all_models_response.models:
+            if model.id == source.id:
+                continue
+            if model.provider == source.provider:
+                if len(compatible) < limit:
+                    compatible.append(model.id)
+        
+        # Other provider models with similar capabilities
+        for model in all_models_response.models:
+            if model.id == source.id:
+                continue
+            if model.provider == source.provider:
+                continue
+            
+            # Check capability match
+            if (model.capabilities.streaming == source.capabilities.streaming and
+                model.capabilities.tools == source.capabilities.tools):
+                if len(compatible) < limit:
+                    compatible.append(model.id)
+        
+        return compatible[:limit]
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Failed to find compatible models", {"model_id": model_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get(
+    "/{model_id:path}",
+    response_model=ModelDetail,
+    summary="Get model details",
+    description="Get detailed information about a specific model"
+)
+async def get_model(model_id: str) -> ModelDetail:
+    """
+    Get model details
+    
+    Args:
+        model_id: Model ID (format: provider/model or just model)
+        
+    Returns:
+        Model details
+    """
+    try:
+        await _apply_provider_config()
+        connected_provider_ids = _connected_provider_ids()
+
+        # Parse model ID (could be "openai/gpt-4" or just "gpt-4")
+        if "/" in model_id:
+            provider_id, actual_model_id = model_id.split("/", 1)
+        else:
+            # Search all providers
+            provider_id = None
+            actual_model_id = model_id
+        
+        # If provider specified, check it directly
+        if provider_id:
+            model = _find_model(provider_id, actual_model_id)
+            if model:
+                return _to_model_detail(
+                    model, provider_id, _definition_index(provider_id).get(model.id)
+                )
+        
+        # Search all connected providers (a model id may itself contain '/')
+        for pid in sorted(connected_provider_ids):
+            for candidate in (actual_model_id, model_id):
+                model = _find_model(pid, candidate)
+                if model:
+                    return _to_model_detail(model, pid, _definition_index(pid).get(model.id))
+        
+        # Not found
+        raise HTTPException(
+            status_code=404,
+            detail=f"Model {model_id} not found"
+        )
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("Failed to get model", {"model_id": model_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))

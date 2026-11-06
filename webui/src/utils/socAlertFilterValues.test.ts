@@ -1,0 +1,40 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  filterOptionText,
+  matchesFilterOptionSearch,
+} from '../../../.aegisops/aegisopshub/plugins/webuis/soc_ui/soc_alerts/src/filterValues';
+
+const EN_TEXT: Record<string, string> = {
+  '访问': 'Access',
+  '高危': 'High',
+  '深信服 SIP': 'Sangfor SIP',
+  '未知协议': 'Unknown protocol',
+};
+const english = (text: string) => EN_TEXT[text] || text;
+
+describe('SOC alert filter value localization', () => {
+  it('localizes fixed values and preserves dynamic threat types', () => {
+    expect(filterOptionText('threat_phase', 'access')).toBe('访问');
+    expect(filterOptionText('threat_phase', 'access', english)).toBe('Access');
+    expect(filterOptionText('threat_type', 'SQL injection')).toBe('SQL injection');
+    expect(filterOptionText('threat_type', 'SQL injection', english)).toBe('SQL injection');
+  });
+
+  it('names sources and unknown protocols without changing their stored values', () => {
+    expect(filterOptionText('_source_type', 'sangfor-sip')).toBe('深信服 SIP');
+    expect(filterOptionText('_source_type', 'sangfor-sip', english)).toBe('Sangfor SIP');
+    expect(filterOptionText('net_type', 'unknown')).toBe('未知协议');
+    expect(matchesFilterOptionSearch('_source_type', 'sangfor-sip', '深信服')).toBe(true);
+    expect(matchesFilterOptionSearch('_source_type', 'sangfor-sip', 'sangfor', english)).toBe(true);
+  });
+
+  it('matches raw, Chinese, and English option text regardless of locale', () => {
+    expect(matchesFilterOptionSearch('threat_level', 'high', 'high')).toBe(true);
+    expect(matchesFilterOptionSearch('threat_level', 'high', '高危', english)).toBe(true);
+    expect(matchesFilterOptionSearch('threat_level', 'high', 'High', english)).toBe(true);
+    expect(matchesFilterOptionSearch('threat_type', 'SQL injection', 'SQL injection', english)).toBe(true);
+    expect(matchesFilterOptionSearch('threat_type', 'SQL injection', 'SQL 注入', english)).toBe(false);
+    expect(matchesFilterOptionSearch('threat_type', 'SQL injection', 'crawler', english)).toBe(false);
+  });
+});

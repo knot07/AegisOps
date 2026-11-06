@@ -1,0 +1,796 @@
+"""Unified trigger runtime with legacy manager compatibility."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from typing import Any, Dict, List, Optional, Tuple
+
+from aegisops.hooks.execution import (
+    ExecutionStopped,
+    current_execution_context,
+    execute_with_hooks,
+    execution_stop_diagnostics,
+)
+from aegisops.hooks.pipeline import HookPipeline
+from aegisops.utils.log import Log
+from aegisops.workflow.execution_store import (
+    ExecutionStepRecorder,
+    compact_outputs_for_storage,
+    create_execution_record,
+    record_execution_result,
+    resolve_execution_outcome,
+)
+from aegisops.workflow.fs_store import overlay_managed_workflows, read_workflow_dir, workflow_scan_dirs
+from aegisops.workflow._async_runtime import register_primary_loop
+from aegisops.workflow.runner import run_workflow
+from aegisops.workflow.store import WorkflowStore
+from aegisops.workflow.ownership import abandon_execution, execution_cancelled
+from aegisops.workflow.tool_context import (
+    build_workflow_tool_context,
+    cleanup_workflow_tool_context,
+)
+
+from .compat import (
+    LEGACY_KAFKA_CONFIG_PREFIX,
+    LEGACY_POLLER_CONFIG_PREFIX,
+    LEGACY_SYSLOG_CONFIG_PREFIX,
+    kafka_trigger_to_legacy_config,
+    schedule_trigger_to_legacy_config,
+    syslog_trigger_to_legacy_config,
+    trigger_to_legacy_config,
+)
+from .custom_loader import list_trigger_plugins, load_trigger_plugin_module
+from .dispatcher import EventDispatcher, TriggerDispatchError, build_trigger_event
+from .models import (
+    TriggerDefinition,
+    TriggerEvent,
+    TriggerRuntimeStatus,
+    workflow_json_declares_triggers,
+    workflow_trigger_definitions_from_json,
+)
+
+log = Log.create(service="workflow.trigger.runtime")
+
+
+def _now_ms() -> int:
+    return int(time.time() * 1000)
+
+
+def _config_kind_from_legacy_key(key: str) -> Optional[str]:
+    if key.startswith(LEGACY_POLLER_CONFIG_PREFIX):
+        return "workflow_poller_config"
+    if key.startswith(LEGACY_SYSLOG_CONFIG_PREFIX):
+        return "workflow_syslog_config"
+    if key.startswith(LEGACY_KAFKA_CONFIG_PREFIX):
+        return "workflow_kafka_config"
+    return None
+
+
+class TriggerRuntime:
+    """Unified trigger runtime that wraps legacy managers and custom adapters."""
+
+    def __init__(self) -> None:
+        self._dispatcher = EventDispatcher()
+        self._custom_adapter_tasks: Dict[tuple[str, str], asyncio.Task[Any]] = {}
+        self._custom_adapters: Dict[tuple[str, str], Any] = {}
+        self._custom_status: Dict[tuple[str, str], Dict[str, Any]] = {}
+        self._custom_adapter_signatures: Dict[tuple[str, str], str] = {}
+        # Managed workflows whose consumers still have to be rebuilt.
+        self._managed_pending: set[str] = set()
+        # Of those, the consumers (syslog, kafka, schedule, custom_adapter)
+        # that did not start on the current definition; only they are retried.
+        self._managed_failed: Dict[str, set[str]] = {}
+
+    def _iter_workflows(self) -> List[Dict[str, Any]]:
+        merged: Dict[str, Dict[str, Any]] = {}
+        for root, source in workflow_scan_dirs():
+            if not root.is_dir():
+                continue
+            for entry in sorted(root.iterdir()):
+                if not entry.is_dir():
+                    continue
+                data = read_workflow_dir(entry, entry.name, source)
+                if data is not None:
+                    merged[entry.name] = data
+        # A managed workflow's own definition, never a local copy of it.
+        overlay_managed_workflows(merged)
+        return list(merged.values())
+
+    async def _write_disabled_legacy_configs(self, workflow_id: str) -> None:
+        now_ms = _now_ms()
+        await WorkflowStore.put_config(
+            workflow_id,
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+            kind="workflow_poller_config",
+        )
+        await WorkflowStore.put_config(
+            workflow_id,
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+            kind="workflow_syslog_config",
+        )
+        await WorkflowStore.put_config(
+            workflow_id,
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+            kind="workflow_kafka_config",
+        )
+
+    @staticmethod
+    def _trigger_signature(trigger: TriggerDefinition) -> str:
+        payload = trigger.model_dump(mode="json", exclude_none=True)
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+    async def _sync_legacy_configs_from_workflow(
+        self, workflow_id: str, workflow_json: Dict[str, Any]
+    ) -> List[TriggerDefinition]:
+        triggers = workflow_trigger_definitions_from_json(workflow_json)
+        if not triggers:
+            if workflow_json_declares_triggers(workflow_json):
+                await self._write_disabled_legacy_configs(workflow_id)
+            return []
+
+        by_type = {trigger.type: trigger for trigger in triggers}
+        for trigger in triggers:
+            key, value = trigger_to_legacy_config(workflow_id, trigger)
+            if key and value is not None:
+                kind = _config_kind_from_legacy_key(key)
+                if kind:
+                    await WorkflowStore.put_config(workflow_id, value, kind=kind)
+
+        if "schedule" not in by_type:
+            await WorkflowStore.put_config(
+                workflow_id,
+                {"workflowId": workflow_id, "enabled": False, "updatedAt": _now_ms()},
+                kind="workflow_poller_config",
+            )
+        if "syslog" not in by_type:
+            await WorkflowStore.put_config(
+                workflow_id,
+                {"workflowId": workflow_id, "enabled": False, "updatedAt": _now_ms()},
+                kind="workflow_syslog_config",
+            )
+        if "kafka" not in by_type:
+            await WorkflowStore.put_config(
+                workflow_id,
+                {"workflowId": workflow_id, "enabled": False, "updatedAt": _now_ms()},
+                kind="workflow_kafka_config",
+            )
+        return triggers
+
+    async def _on_managed_content_changed(self, changed) -> None:
+        """Rebuild the consumers of a managed workflow whose definition changed or went away.
+
+        Kafka, syslog, poller and custom-adapter consumers plan from the
+        definition they started with; without this they would keep running a
+        withdrawn or superseded version (aegisops.content.managed).  They are
+        stopped first, so a rebuild that fails leaves nothing running the old
+        plan; a failed rebuild stays pending and is retried after every
+        refresh until it succeeds.
+        """
+        changed_ids = {workflow_id for kind, workflow_id in changed if kind == "workflow"}
+        for workflow_id in changed_ids:
+            # A new definition (or none): everything is rebuilt from it.
+            self._managed_failed.pop(workflow_id, None)
+        self._managed_pending.update(changed_ids)
+        for workflow_id in sorted(self._managed_pending):
+            if await self._rebuild_managed_workflow(workflow_id):
+                self._managed_pending.discard(workflow_id)
+
+    async def _rebuild_managed_workflow(self, workflow_id: str) -> bool:
+        """Start the consumers of *workflow_id*'s current definition; whether all of them started.
+
+        The first attempt stops every consumer and restarts them all.  A
+        consumer that did not start -- an exception, or a manager answering
+        ``state: failed`` (say, a syslog worker of the old plan still
+        draining) -- keeps the workflow pending; the retries after later
+        refreshes restart only those consumers, not the ones already running.
+        """
+        from aegisops.ingest.kafka.manager import default_manager as kafka_manager
+        from aegisops.ingest.syslog.manager import default_manager as syslog_manager
+        from aegisops.workflow.fs_store import read_workflow_from_fs
+        from aegisops.workflow.poller_manager import default_manager as poller_manager
+
+        retry = self._managed_failed.get(workflow_id)
+        try:
+            data = read_workflow_from_fs(workflow_id)
+            workflow_json = (data or {}).get("workflowJson") or {}
+            if retry is None:
+                # Nothing may keep receiving new executions on the old plan --
+                # also if what follows fails.
+                for active_workflow_id, trigger_id in list(self._custom_adapter_tasks.keys()):
+                    if active_workflow_id == workflow_id:
+                        await self._stop_custom_adapter(active_workflow_id, trigger_id)
+                await syslog_manager.stop_workflow(workflow_id)
+                await kafka_manager.stop_workflow(workflow_id)
+                await poller_manager.stop_workflow(workflow_id)
+                statuses = await self.restart_workflow(workflow_id, workflow_json)
+            else:
+                managers = {"syslog": syslog_manager, "kafka": kafka_manager, "schedule": poller_manager}
+                statuses = {
+                    name: await managers[name].restart_workflow(workflow_id)
+                    for name in sorted(retry)
+                    if name in managers
+                }
+                if "custom_adapter" in retry:
+                    # A failed adapter's task is still registered: clear it,
+                    # or starting would take it for one already running.
+                    for key, adapter_task in list(self._custom_adapter_tasks.items()):
+                        if key[0] == workflow_id and self._adapter_gave_up(key, adapter_task):
+                            await self._stop_custom_adapter(*key)
+                    await self._start_custom_adapters_for_workflow(workflow_id, workflow_json)
+        except Exception as exc:
+            log.warning("trigger.managed_restart.failed", {"workflow_id": workflow_id, "error": str(exc)})
+            return False
+        failed = self._consumers_not_started(workflow_id, workflow_json, statuses)
+        if failed:
+            self._managed_failed[workflow_id] = failed
+            log.warning("trigger.managed_restart.incomplete", {"workflow_id": workflow_id, "failed": sorted(failed)})
+            return False
+        self._managed_failed.pop(workflow_id, None)
+        return True
+
+    def _consumers_not_started(
+        self, workflow_id: str, workflow_json: Dict[str, Any], statuses: Optional[Dict[str, Any]],
+    ) -> set[str]:
+        failed = {
+            name
+            for name, status in (statuses or {}).items()
+            if isinstance(status, dict) and status.get("state") == "failed"
+        }
+        for trigger in workflow_trigger_definitions_from_json(workflow_json):
+            if trigger.type != "custom_adapter" or not trigger.enabled:
+                continue
+            key = (workflow_id, trigger.id or "")
+            adapter_task = self._custom_adapter_tasks.get(key)
+            if adapter_task is None or self._adapter_gave_up(key, adapter_task):
+                failed.add("custom_adapter")
+        return failed
+
+    def _adapter_gave_up(self, key: tuple[str, str], adapter_task: "asyncio.Task[Any]") -> bool:
+        # An adapter whose start() returns (it registered callbacks) is done
+        # and still running; one whose start() raised is done and failed.
+        return adapter_task.done() and (self._custom_status.get(key) or {}).get("state") == "failed"
+
+    def _adapter_failed_to_start(self, workflow_id: str) -> None:
+        """A managed workflow's adapter gave up after starting: rebuild it on the next refresh."""
+        from aegisops.content.managed import managed_ids
+
+        if workflow_id in managed_ids("workflow"):
+            self._managed_pending.add(workflow_id)
+            self._managed_failed.setdefault(workflow_id, set()).add("custom_adapter")
+
+    async def start_all(self) -> None:
+        from aegisops.content.managed import ManagedContent
+
+        ManagedContent.add_change_listener(self._on_managed_content_changed)
+        for workflow in self._iter_workflows():
+            try:
+                await self._sync_legacy_configs_from_workflow(workflow["id"], workflow.get("workflowJson") or {})
+            except Exception as exc:
+                log.warning("trigger.sync_legacy.failed", {"workflow_id": workflow.get("id"), "error": str(exc)})
+
+        from aegisops.ingest.syslog.manager import default_manager as syslog_manager
+        from aegisops.ingest.kafka.manager import default_manager as kafka_manager
+        from aegisops.workflow.poller_manager import default_manager as poller_manager
+
+        await syslog_manager.start_all()
+        await kafka_manager.start_all()
+        await poller_manager.start_all()
+
+        for workflow in self._iter_workflows():
+            await self._start_custom_adapters_for_workflow(workflow["id"], workflow.get("workflowJson") or {})
+
+    async def stop_all(self) -> None:
+        from aegisops.content.managed import ManagedContent
+
+        ManagedContent.remove_change_listener(self._on_managed_content_changed)
+        from aegisops.ingest.syslog.manager import default_manager as syslog_manager
+        from aegisops.ingest.kafka.manager import default_manager as kafka_manager
+        from aegisops.workflow.poller_manager import default_manager as poller_manager
+
+        for workflow_id, trigger_id in list(self._custom_adapter_tasks.keys()):
+            await self._stop_custom_adapter(workflow_id, trigger_id)
+
+        await syslog_manager.stop_all()
+        await kafka_manager.stop_all()
+        await poller_manager.stop_all()
+
+    async def restart_workflow(
+        self,
+        workflow_id: str,
+        workflow_json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        if workflow_json is None:
+            workflow = next((item for item in self._iter_workflows() if item.get("id") == workflow_id), None)
+            workflow_json = (workflow or {}).get("workflowJson") or {}
+        triggers = await self._sync_legacy_configs_from_workflow(workflow_id, workflow_json or {})
+
+        from aegisops.ingest.syslog.manager import default_manager as syslog_manager
+        from aegisops.ingest.kafka.manager import default_manager as kafka_manager
+        from aegisops.workflow.poller_manager import default_manager as poller_manager
+
+        statuses: Dict[str, Any] = {}
+        by_type = {trigger.type: trigger for trigger in triggers}
+
+        if "syslog" in by_type:
+            statuses["syslog"] = await syslog_manager.restart_workflow(workflow_id)
+        else:
+            await syslog_manager.stop_workflow(workflow_id)
+            statuses["syslog"] = {"state": "stopped", "error": None}
+        if "kafka" in by_type:
+            statuses["kafka"] = await kafka_manager.restart_workflow(workflow_id)
+        else:
+            await kafka_manager.stop_workflow(workflow_id)
+            statuses["kafka"] = {"state": "stopped", "error": None}
+        if "schedule" in by_type:
+            statuses["schedule"] = await poller_manager.restart_workflow(workflow_id)
+        else:
+            await poller_manager.stop_workflow(workflow_id)
+            statuses["schedule"] = {"state": "stopped", "error": None}
+
+        await self._start_custom_adapters_for_workflow(workflow_id, workflow_json or {})
+        return statuses
+
+    async def _execute_workflow(
+        self,
+        *,
+        workflow_id: str,
+        workflow_json: Dict[str, Any],
+        trigger: TriggerDefinition,
+        mapped_inputs: Dict[str, Any],
+        verified_auth: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        auth_scheme = str(getattr(trigger.auth, "type", "") or "").strip().lower() or "trigger"
+        action_payload: Dict[str, Any] = {
+            "operation": "workflow.trigger.execute",
+            "transport": "headless",
+            "workflow_id": workflow_id,
+            "trigger": trigger,
+            "inputs": mapped_inputs,
+            # The delivery was already authenticated by this runtime (trigger
+            # api_key/hmac, or an operator-issued test call). Ingress policies
+            # treat it as the explicit legacy compatibility carrier instead of
+            # demanding a managed API-key identity it cannot present.
+            "legacy_compat": True,
+            "evidence": {
+                "auth_scheme": auth_scheme,
+                "trigger_id": trigger.id,
+                "trigger_type": trigger.type,
+            },
+            "metadata": {"legacy_compat": True, "trigger_type": trigger.type},
+        }
+        if verified_auth:
+            # Only the webhook route sets this, after it checked the caller
+            # against the trigger's own API key or HMAC secret; nothing here
+            # comes from the request body.  Such a run carries the same
+            # compatibility marker as the syslog / Kafka adapters, plus what
+            # was verified, instead of being refused for lacking an identity.
+            action_payload["legacy_compat"] = True
+            action_payload["evidence"] = {**action_payload["evidence"], **verified_auth}
+        started = False
+
+        async def effect() -> Dict[str, Any]:
+            nonlocal started
+            started = True
+            return await self._execute_workflow_effect(
+                workflow_id=workflow_id,
+                workflow_json=workflow_json,
+                trigger=trigger,
+                mapped_inputs=mapped_inputs,
+            )
+
+        try:
+            return await execute_with_hooks(
+                action_payload,
+                effect,
+                before=HookPipeline.run_ingress_before,
+                after=HookPipeline.run_ingress_after,
+            )
+        except ExecutionStopped as exc:
+            # A stop after the run (from an after-hook) is not a refusal: the
+            # run already has its own record.
+            if not started:
+                await self._record_refused_run(
+                    workflow_id=workflow_id,
+                    trigger=trigger,
+                    mapped_inputs=mapped_inputs,
+                    error=exc,
+                )
+            raise
+
+    async def _record_refused_run(
+        self,
+        *,
+        workflow_id: str,
+        trigger: TriggerDefinition,
+        mapped_inputs: Dict[str, Any],
+        error: ExecutionStopped,
+    ) -> None:
+        """Leave a failed run in the workflow history when an extension refuses it.
+
+        The caller already gets the refusal in the response; without a record
+        the workflow page showed nothing at all for the delivery.
+        """
+        trigger_meta = mapped_inputs.get("_aegisops", {}).get("trigger", {})
+        # Only the neutral stop facts: an extension's detail is free text that
+        # may carry payload values, and is never persisted.
+        facts = execution_stop_diagnostics(error)
+        where = ", ".join(
+            f"{label}={facts[key]}"
+            for key, label in (("stop_source", "hook"), ("stop_stage", "stage"))
+            if facts.get(key)
+        )
+        try:
+            exec_data = await create_execution_record(workflow_id, input_params=mapped_inputs)
+            exec_data.update(
+                {
+                    "status": "error",
+                    "finishedAt": _now_ms(),
+                    "duration": 0.0,
+                    "errorMessage": "Run refused by extension" + (f" ({where})" if where else ""),
+                    "executionLog": [],
+                    "stepCount": 0,
+                    "currentPhase": "error",
+                    "currentStepIndex": 0,
+                    "triggerId": trigger.id,
+                    "triggerType": trigger.type,
+                    "deliveryId": trigger_meta.get("deliveryId"),
+                    "attempt": trigger_meta.get("attempt"),
+                    "triggerSource": trigger_meta.get("source"),
+                }
+            )
+            await record_execution_result(workflow_id, exec_data["id"], exec_data, steps=[])
+        except Exception as exc:
+            log.warning("trigger.refused_run.record_failed", {
+                "workflow_id": workflow_id,
+                "trigger_id": trigger.id,
+                "error": str(exc),
+            })
+
+    async def _execute_workflow_effect(
+        self,
+        *,
+        workflow_id: str,
+        workflow_json: Dict[str, Any],
+        trigger: TriggerDefinition,
+        mapped_inputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        exec_data = await create_execution_record(
+            workflow_id,
+            input_params=mapped_inputs,
+        )
+        exec_id = exec_data["id"]
+        # Every way out of here ends the run: one whose end was not recorded (a
+        # cancel while its context is cleaned up, say) is let go, not left live.
+        try:
+            step_recorder = ExecutionStepRecorder()
+            started_at = time.time()
+            tool_context = None
+            try:
+                context_kwargs: dict[str, Any] = {}
+                execution_context = current_execution_context()
+                if execution_context:
+                    context_kwargs["execution_context"] = execution_context
+                tool_context = await build_workflow_tool_context(
+                    workflow_id=workflow_id,
+                    action_name=f"trigger:{trigger.type}",
+                    **context_kwargs,
+                )
+                register_primary_loop()
+                result = await asyncio.to_thread(
+                    run_workflow,
+                    workflow=workflow_json,
+                    inputs=mapped_inputs,
+                    run_id=exec_id,
+                    trace=False,
+                    execution_profile="high_frequency",
+                    cancel=lambda: execution_cancelled(exec_id),
+                    on_step_complete=step_recorder.on_step_complete,
+                    tool_context=tool_context,
+                )
+                status_value, error_message = resolve_execution_outcome(result)
+                step_count = step_recorder.step_count or result.steps
+                exec_data.update(step_recorder.summary)
+                exec_data.update(
+                    {
+                        "status": status_value,
+                        "outputResults": compact_outputs_for_storage(result.outputs),
+                        "finishedAt": _now_ms(),
+                        "duration": time.time() - started_at,
+                        "errorMessage": error_message,
+                        "executionLog": [],
+                        "stepCount": step_count,
+                        "currentNodeId": result.last_node_id,
+                        "currentPhase": status_value,
+                        "currentStepIndex": step_count,
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": mapped_inputs.get("_aegisops", {}).get("trigger", {}).get("deliveryId"),
+                        "attempt": mapped_inputs.get("_aegisops", {}).get("trigger", {}).get("attempt"),
+                        "triggerSource": mapped_inputs.get("_aegisops", {}).get("trigger", {}).get("source"),
+                    }
+                )
+            except asyncio.CancelledError:
+                await abandon_execution(exec_id)
+                raise
+            except Exception as exc:
+                step_count = step_recorder.step_count
+                exec_data.update(step_recorder.summary)
+                exec_data.update(
+                    {
+                        "status": "error",
+                        "finishedAt": _now_ms(),
+                        "duration": time.time() - started_at,
+                        "errorMessage": str(exc),
+                        "executionLog": [],
+                        "stepCount": step_count,
+                        "currentPhase": "error",
+                        "currentStepIndex": step_count,
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "deliveryId": mapped_inputs.get("_aegisops", {}).get("trigger", {}).get("deliveryId"),
+                        "attempt": mapped_inputs.get("_aegisops", {}).get("trigger", {}).get("attempt"),
+                        "triggerSource": mapped_inputs.get("_aegisops", {}).get("trigger", {}).get("source"),
+                    }
+                )
+            finally:
+                await cleanup_workflow_tool_context(tool_context)
+            await record_execution_result(
+                workflow_id,
+                exec_id,
+                exec_data,
+                steps=step_recorder.take_steps(),
+            )
+            return exec_data
+        finally:
+            await abandon_execution(exec_id)
+
+    async def dispatch_event(
+        self,
+        *,
+        workflow_id: str,
+        workflow_json: Dict[str, Any],
+        trigger: TriggerDefinition,
+        event: TriggerEvent,
+        verified_auth: Optional[Dict[str, str]] = None,
+    ) -> Dict[str, Any]:
+        async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
+            return await self._execute_workflow(
+                workflow_id=workflow_id,
+                workflow_json=workflow_json,
+                trigger=trigger,
+                mapped_inputs=mapped_inputs,
+                verified_auth=verified_auth,
+            )
+
+        return await self._dispatcher.dispatch(trigger=trigger, event=event, executor=_executor)
+
+    async def _stop_custom_adapter(self, workflow_id: str, trigger_id: str) -> None:
+        key = (workflow_id, trigger_id)
+        adapter = self._custom_adapters.pop(key, None)
+        task = self._custom_adapter_tasks.pop(key, None)
+        if adapter is not None and hasattr(adapter, "stop"):
+            try:
+                result = adapter.stop()
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                pass
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                # Awaiting the adapter task we just cancelled re-raises its
+                # CancelledError here; only propagate when *this* task is the
+                # one being cancelled, otherwise the request handler dies with
+                # "No response returned".
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            except Exception:
+                pass
+        self._custom_adapter_signatures.pop(key, None)
+        self._custom_status[key] = {
+            "workflowId": workflow_id,
+            "triggerId": trigger_id,
+            "triggerType": "custom_adapter",
+            "state": "stopped",
+            "error": None,
+        }
+
+    async def _start_custom_adapters_for_workflow(self, workflow_id: str, workflow_json: Dict[str, Any]) -> None:
+        triggers = workflow_trigger_definitions_from_json(workflow_json)
+        desired_signatures = {
+            (workflow_id, trigger.id or ""): self._trigger_signature(trigger)
+            for trigger in triggers
+            if trigger.type == "custom_adapter" and trigger.enabled
+        }
+        for active_workflow_id, active_trigger_id in list(self._custom_adapter_tasks.keys()):
+            key = (active_workflow_id, active_trigger_id)
+            if active_workflow_id != workflow_id:
+                continue
+            if key not in desired_signatures:
+                await self._stop_custom_adapter(active_workflow_id, active_trigger_id)
+                continue
+            if self._custom_adapter_signatures.get(key) != desired_signatures[key]:
+                await self._stop_custom_adapter(active_workflow_id, active_trigger_id)
+
+        for trigger in triggers:
+            if trigger.type != "custom_adapter" or not trigger.enabled:
+                continue
+            key = (workflow_id, trigger.id or "")
+            trigger_signature = desired_signatures[key]
+            if key in self._custom_adapter_tasks and self._custom_adapter_signatures.get(key) == trigger_signature:
+                continue
+            plugin_id = str(
+                (trigger.source or {}).get("adapterId") or (trigger.source or {}).get("pluginId") or ""
+            ).strip()
+            plugin_spec = next((item for item in list_trigger_plugins() if item.get("id") == plugin_id), None)
+            if plugin_spec is None:
+                self._custom_status[key] = {
+                    "workflowId": workflow_id,
+                    "triggerId": trigger.id,
+                    "triggerType": trigger.type,
+                    "state": "failed",
+                    "error": f"custom trigger plugin not found: {plugin_id}",
+                }
+                continue
+            module = load_trigger_plugin_module(plugin_spec)
+            if module is None:
+                self._custom_status[key] = {
+                    "workflowId": workflow_id,
+                    "triggerId": trigger.id,
+                    "triggerType": trigger.type,
+                    "state": "failed",
+                    "error": "failed to load custom trigger plugin module",
+                }
+                continue
+            try:
+                adapter = None
+                if hasattr(module, "create_trigger_adapter"):
+                    adapter = module.create_trigger_adapter(trigger.model_dump(mode="json"))
+                elif hasattr(module, "TriggerAdapter"):
+                    adapter = module.TriggerAdapter(trigger.model_dump(mode="json"))
+                if adapter is None:
+                    raise RuntimeError("plugin must expose create_trigger_adapter() or TriggerAdapter")
+            except Exception as exc:
+                self._custom_status[key] = {
+                    "workflowId": workflow_id,
+                    "triggerId": trigger.id,
+                    "triggerType": trigger.type,
+                    "state": "failed",
+                    "error": str(exc),
+                }
+                continue
+
+            async def _emit(payload: Any, *, _trigger: TriggerDefinition = trigger) -> Dict[str, Any]:
+                event = (
+                    payload
+                    if isinstance(payload, TriggerEvent)
+                    else build_trigger_event(
+                        workflow_id=workflow_id,
+                        trigger=_trigger,
+                        body=payload,
+                        raw=payload,
+                    )
+                )
+                try:
+                    result = await self.dispatch_event(
+                        workflow_id=workflow_id,
+                        workflow_json=workflow_json,
+                        trigger=_trigger,
+                        event=event,
+                    )
+                    self._custom_status[key] = {
+                        "workflowId": workflow_id,
+                        "triggerId": _trigger.id,
+                        "triggerType": _trigger.type,
+                        "state": "running",
+                        "error": None,
+                        "lastDeliveryId": event.source.deliveryId,
+                        "lastMatched": result.get("matched"),
+                    }
+                    return result
+                except TriggerDispatchError as exc:
+                    self._custom_status[key] = {
+                        "workflowId": workflow_id,
+                        "triggerId": _trigger.id,
+                        "triggerType": _trigger.type,
+                        "state": "failed",
+                        "error": str(exc),
+                    }
+                    raise
+
+            async def _runner() -> None:
+                self._custom_status[key] = {
+                    "workflowId": workflow_id,
+                    "triggerId": trigger.id,
+                    "triggerType": trigger.type,
+                    "state": "running",
+                    "error": None,
+                    "pluginId": plugin_id,
+                }
+                try:
+                    result = adapter.start(trigger.model_dump(mode="json"), _emit)
+                    if asyncio.iscoroutine(result):
+                        await result
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    self._custom_status[key] = {
+                        "workflowId": workflow_id,
+                        "triggerId": trigger.id,
+                        "triggerType": trigger.type,
+                        "state": "failed",
+                        "error": str(exc),
+                        "pluginId": plugin_id,
+                    }
+                    self._adapter_failed_to_start(workflow_id)
+
+            self._custom_adapters[key] = adapter
+            self._custom_adapter_signatures[key] = trigger_signature
+            self._custom_adapter_tasks[key] = asyncio.create_task(
+                _runner(),
+                name=f"trigger-custom-{workflow_id}-{trigger.id}",
+            )
+
+    async def get_trigger_status(self, workflow_id: str, trigger: TriggerDefinition) -> Dict[str, Any]:
+        if trigger.type == "syslog":
+            from aegisops.ingest.syslog.manager import default_manager as syslog_manager
+
+            status = syslog_manager.get_listener_status(workflow_id)
+            return {"workflowId": workflow_id, "triggerId": trigger.id, "triggerType": trigger.type, **status}
+        if trigger.type == "kafka":
+            from aegisops.ingest.kafka.manager import default_manager as kafka_manager
+
+            status = kafka_manager.get_consumer_status(workflow_id)
+            return {"workflowId": workflow_id, "triggerId": trigger.id, "triggerType": trigger.type, **status}
+        if trigger.type == "schedule":
+            from aegisops.workflow.poller_manager import default_manager as poller_manager
+
+            status = poller_manager.get_status(workflow_id)
+            return {"workflowId": workflow_id, "triggerId": trigger.id, "triggerType": trigger.type, **status}
+        if trigger.type in {"webhook", "custom_webhook"}:
+            return {
+                "workflowId": workflow_id,
+                "triggerId": trigger.id,
+                "triggerType": trigger.type,
+                "state": "ready" if trigger.enabled else "stopped",
+                "error": None,
+                "path": (trigger.source or {}).get("path"),
+                "method": (trigger.source or {}).get("method", "POST"),
+            }
+        if trigger.type == "custom_adapter":
+            return self._custom_status.get(
+                (workflow_id, trigger.id or ""),
+                {
+                    "workflowId": workflow_id,
+                    "triggerId": trigger.id,
+                    "triggerType": trigger.type,
+                    "state": "stopped",
+                    "error": None,
+                },
+            )
+        return {
+            "workflowId": workflow_id,
+            "triggerId": trigger.id,
+            "triggerType": trigger.type,
+            "state": "ready" if trigger.enabled else "stopped",
+            "error": None,
+        }
+
+    async def get_workflow_trigger_statuses(
+        self,
+        workflow_id: str,
+        workflow_json: Dict[str, Any],
+    ) -> List[Dict[str, Any]]:
+        triggers = workflow_trigger_definitions_from_json(workflow_json)
+        return [await self.get_trigger_status(workflow_id, trigger) for trigger in triggers]
+
+    def list_plugin_specs(self) -> List[Dict[str, Any]]:
+        return list_trigger_plugins()
+
+
+default_runtime = TriggerRuntime()

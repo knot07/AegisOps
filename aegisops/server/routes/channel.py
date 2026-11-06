@@ -1,0 +1,717 @@
+"""
+Channel HTTP routes: webhook callbacks, health/status, and outbound send APIs.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel
+
+from aegisops.channel.gateway.manager import default_manager
+from aegisops.channel.registry import default_registry
+from aegisops.hooks.execution import ExecutionStopped, execute_with_hooks
+from aegisops.server.config_mutation import serialized_config_mutation
+from aegisops.utils.log import Log
+
+router = APIRouter()
+log = Log.create(service="channel.routes")
+
+
+class SendMessageRequest(BaseModel):
+    channel_id: str
+    to: str
+    text: str
+    account_id: Optional[str] = None
+    media_url: Optional[str] = None
+    reply_to_id: Optional[str] = None
+    session_id: Optional[str] = None
+
+
+class SessionSendRequest(BaseModel):
+    session_id: str
+    text: str
+    channel_type: Optional[str] = None
+    media_url: Optional[str] = None
+    account_id: Optional[str] = None
+    chat_id: Optional[str] = None
+
+
+def _require_message_content(text: str, media_url: Optional[str]) -> None:
+    # An empty message used to be "delivered" as zero chunks and answered ok.
+    if not (text or "").strip() and not media_url:
+        raise HTTPException(status_code=422, detail="text or media_url is required")
+
+
+@router.post("/send")
+async def channel_send(req: SendMessageRequest):
+    """向指定渠道的指定目标（chat_id / user_id）主动发送消息。"""
+    from aegisops.channel.base import OutboundContext
+    from aegisops.channel.outbound.deliver import OutboundDelivery
+
+    _require_message_content(req.text, req.media_url)
+    out_ctx = OutboundContext(
+        channel_id=req.channel_id,
+        account_id=req.account_id,
+        to=req.to,
+        text=req.text,
+        media_url=req.media_url,
+        reply_to_id=req.reply_to_id,
+    )
+    results = await OutboundDelivery.deliver(out_ctx, session_id=req.session_id)
+    failed = [r for r in results if not r.success]
+    if failed:
+        raise HTTPException(status_code=502, detail=failed[0].error)
+    return {
+        "ok": True,
+        "message_ids": [r.message_id for r in results if r.message_id],
+    }
+
+
+async def _assert_session_send_allowed(request: Request, session_id: str) -> None:
+    """A browser user may only relay into sessions they can read.
+
+    The service identity (Bearer server_api_token, used by the channel_message
+    tool and out-of-process bridges) keeps its cross-session reach; the check
+    only closes the gap for logged-in users addressing someone else's session.
+    """
+    from aegisops.auth.context import API_TOKEN_SERVICE_USER_ID
+    from aegisops.server.auth import get_optional_user
+    from aegisops.session.policy import SessionPolicy
+    from aegisops.session.session import Session
+
+    user = get_optional_user(request)
+    if user is None or getattr(user, "id", None) == API_TOKEN_SERVICE_USER_ID:
+        # No HTTP identity (internal/in-process caller) or the service token:
+        # nothing to scope against.
+        return
+    session = await Session.get_by_id_unfiltered(session_id)
+    if session is None:
+        # No such session: fall through to the binding lookup, which answers 404.
+        return
+    if not SessionPolicy.can_read(session, user):
+        raise HTTPException(status_code=403, detail=f"No access to session '{session_id}'")
+
+
+@router.post("/session-send")
+async def channel_session_send(req: SessionSendRequest, request: Request):
+    """通过 session_id 查找绑定的渠道，向该渠道发送消息。"""
+    from aegisops.channel.base import OutboundContext
+    from aegisops.channel.inbound.session_binding import SessionBindingService
+    from aegisops.channel.outbound.deliver import OutboundDelivery
+
+    _require_message_content(req.text, req.media_url)
+    await _assert_session_send_allowed(request, req.session_id)
+    svc = SessionBindingService()
+    all_bindings = await svc.list_bindings()
+    matched = [b for b in all_bindings if b.session_id == req.session_id]
+    resolved_session_id = req.session_id
+
+    if not matched and req.channel_type:
+        latest = await svc.latest_active_user_binding(
+            channel_id=req.channel_type,
+            account_id=req.account_id,
+            chat_id=req.chat_id,
+        )
+        if latest:
+            matched = [latest]
+            resolved_session_id = latest.session_id
+
+    if not matched:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"未找到 session '{req.session_id}' 的渠道绑定；"
+                "请使用 im_send_message(resolve_only=true) 重新解析当前 IM 目标，"
+                "或让用户确认目标 IM 会话。"
+            ),
+        )
+
+    if req.channel_type:
+        matched = [b for b in matched if b.channel_id == req.channel_type]
+        if not matched:
+            raise HTTPException(
+                status_code=404,
+                detail=f"session '{req.session_id}' 未绑定渠道 '{req.channel_type}'",
+            )
+
+    if req.account_id:
+        matched = [b for b in matched if b.account_id == req.account_id]
+    if req.chat_id:
+        matched = [b for b in matched if b.chat_id == req.chat_id]
+    if (req.account_id or req.chat_id) and not matched:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"session '{req.session_id}' 未绑定 account_id='{req.account_id}' "
+                f"chat_id='{req.chat_id}'"
+            ),
+        )
+
+    all_results = []
+    errors = []
+    for binding in matched:
+        out_ctx = OutboundContext(
+            channel_id=binding.channel_id,
+            account_id=binding.account_id,
+            to=binding.chat_id,
+            text=req.text,
+            media_url=req.media_url,
+        )
+        results = await OutboundDelivery.deliver(
+            out_ctx,
+            session_id=resolved_session_id,
+        )
+        all_results.extend(results)
+        for r in results:
+            if not r.success:
+                errors.append(f"[{binding.channel_id}] {r.error}")
+
+    if errors:
+        raise HTTPException(status_code=502, detail="; ".join(errors))
+
+    return {
+        "ok": True,
+        "session_id": resolved_session_id,
+        "message_ids": [r.message_id for r in all_results if r.message_id],
+        "channels": list({b.channel_id for b in matched}),
+    }
+
+
+@router.post("/{channel_id}/webhook")
+async def channel_webhook(channel_id: str, request: Request):
+    """
+    Receive a platform webhook callback.
+
+    Platforms (Feishu, WeCom, …) POST events to this endpoint in
+    webhook mode.  The plugin is responsible for URL verification,
+    signature validation, and event parsing.
+    """
+    plugin = default_registry.get(channel_id)
+    if not plugin:
+        raise HTTPException(status_code=404, detail=f"Channel '{channel_id}' not found")
+
+    body = await request.body()
+    headers = dict(request.headers)
+    evidence_provider = getattr(plugin, "webhook_authentication_evidence", None)
+    authentication = {"plugin_authenticated": False}
+    if callable(evidence_provider):
+        supplied = await evidence_provider(body, headers)
+        if isinstance(supplied, dict):
+            authentication = dict(supplied)
+
+    payload = {
+        "operation": "channel.webhook.receive",
+        "entry": "channel_webhook",
+        "channel_id": channel_id,
+        "authentication": authentication,
+        "body_sha256": hashlib.sha256(body).hexdigest(),
+    }
+    try:
+        result = await execute_with_hooks(
+            payload,
+            lambda: plugin.handle_webhook(body, headers),
+        )
+    except ExecutionStopped as exc:
+        raise HTTPException(status_code=403, detail="Channel webhook stopped by extension") from exc
+    except NotImplementedError as exc:
+        # Stream / long-poll plugins have no webhook surface; this is a public
+        # path, so say so instead of leaking a 500.
+        raise HTTPException(
+            status_code=404, detail=f"Channel '{channel_id}' does not support webhook mode"
+        ) from exc
+    if isinstance(result, dict) and isinstance(result.get("status_code"), int):
+        status_code = int(result["status_code"])
+        payload = {k: v for k, v in result.items() if k != "status_code"}
+        return JSONResponse(status_code=status_code, content=payload)
+    return result if result else {"ok": True}
+
+
+@router.get("/status")
+async def channel_status():
+    """Return health status of all running channels."""
+    statuses = default_manager.get_status()
+    return {
+        channel_id: status.to_dict()
+        for channel_id, status in statuses.items()
+    }
+
+
+@router.get("/{channel_id}/status")
+async def single_channel_status(channel_id: str):
+    """Return health status of a single channel."""
+    statuses = default_manager.get_status()
+    status = statuses.get(channel_id)
+    if not status:
+        raise HTTPException(status_code=404, detail=f"Channel '{channel_id}' not running")
+    return {"channel_id": channel_id, **status.to_dict()}
+
+
+@router.get("/list")
+async def list_channels():
+    """List all registered channel plugins."""
+    default_registry.init()
+    channels = default_registry.list_channels()
+    return [
+        {
+            "id": ch.meta().id,
+            "label": ch.meta().label,
+            "aliases": ch.meta().aliases,
+            "capabilities": {
+                "chat_types": [ct.value for ct in ch.capabilities().chat_types],
+                "media": ch.capabilities().media,
+                "threads": ch.capabilities().threads,
+                "reactions": ch.capabilities().reactions,
+                "edit": ch.capabilities().edit,
+                "rich_text": ch.capabilities().rich_text,
+            },
+            "running": default_manager.is_channel_running(ch.meta().id),
+        }
+        for ch in channels
+    ]
+
+
+@router.get("/slack/manifest")
+async def slack_manifest():
+    """Return a Slack app manifest for creating the AegisOps Slack app."""
+    from aegisops.channel.builtin.slack.manifest import build_slack_app_manifest
+
+    return build_slack_app_manifest()
+
+
+@router.get("/slack/manifest/download")
+async def slack_manifest_download():
+    """Download a Slack app manifest for creating the AegisOps Slack app."""
+    from aegisops.channel.builtin.slack.manifest import build_slack_app_manifest
+
+    payload = json.dumps(build_slack_app_manifest(), indent=2, ensure_ascii=False)
+    return Response(
+        content=payload + "\n",
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="aegisops-slack-manifest.json"'},
+    )
+
+
+@router.post("/{channel_id}/record-inbound")
+async def record_inbound(channel_id: str):
+    """Notify the gateway that a message was received on this channel.
+
+    Used by out-of-process bridges (e.g. DingTalk's runner.ts) that bypass the
+    InboundDispatcher so that last_message_at is updated on the plugin status.
+    """
+    if not default_registry.get(channel_id):
+        raise HTTPException(status_code=404, detail=f"Channel '{channel_id}' not found")
+    default_manager.record_message(channel_id)
+    return {"ok": True}
+
+
+class BindSessionRequest(BaseModel):
+    """Body for ``POST /api/channel/{channel_id}/bind``."""
+    session_id: str
+    chat_id: str
+    chat_type: str = "direct"  # "direct" | "group"
+    account_id: Optional[str] = "default"
+    thread_id: Optional[str] = None
+    agent_id: Optional[str] = None
+
+
+@router.post("/{channel_id}/bind")
+async def bind_session(channel_id: str, req: BindSessionRequest):
+    """Register a (channel, conversation) → session mapping in ``channel_bindings``.
+
+    For Feishu/WeCom/Telegram this row is written automatically inside
+    ``InboundDispatcher`` → ``SessionBindingService.resolve_or_create``.  Out-
+    of-process bridges (e.g. DingTalk's ``runner.ts``) create their AegisOps
+    session on their own and must call this endpoint after each session
+    creation so that ``channel_message`` / ``POST /session-send`` can route
+    outbound replies back.
+
+    Idempotent — re-binding the same conversation key replaces the prior row.
+    """
+    from aegisops.channel.base import ChatType
+    from aegisops.channel.inbound.session_binding import SessionBindingService
+
+    default_registry.init()
+    if not default_registry.get(channel_id):
+        raise HTTPException(status_code=404, detail=f"Channel '{channel_id}' not found")
+
+    # Conversation-level bindings only — CHANNEL-broadcast style targets
+    # (e.g. Telegram channels) are not addressable by a single chat reply
+    # and would never be a legitimate ``channel_message`` destination.
+    if req.chat_type not in ("direct", "group"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid chat_type '{req.chat_type}', expected 'direct' or 'group'",
+        )
+    chat_type = ChatType(req.chat_type)
+
+    # Defense-in-depth: some out-of-process bridges build composite
+    # session-isolation keys like ``<conversationId>:<senderId>`` for
+    # per-sender group sessions (e.g. DingTalk's ``groupSessionScope=
+    # group_sender``).  Such keys are NOT valid outbound targets — they
+    # would be fed as ``openConversationId`` to the platform API and fail
+    # to deliver.  Reject them here so the bug can never regress silently
+    # into the bindings table.
+    if chat_type is ChatType.GROUP and ":" in req.chat_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid group chat_id '{req.chat_id}': contains ':', which "
+                "looks like a session-isolation composite (e.g. "
+                "'<conversationId>:<senderId>').  Pass the bare platform "
+                "conversation id (e.g. DingTalk openConversationId)."
+            ),
+        )
+
+    svc = SessionBindingService()
+    try:
+        binding = await svc.bind_session(
+            session_id=req.session_id,
+            channel_id=channel_id,
+            account_id=req.account_id or "default",
+            chat_id=req.chat_id,
+            chat_type=chat_type,
+            thread_id=req.thread_id,
+            agent_id=req.agent_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    return {
+        "ok": True,
+        "channel_id": binding.channel_id,
+        "session_id": binding.session_id,
+        "chat_id": binding.chat_id,
+        "chat_type": binding.chat_type.value,
+    }
+
+
+@router.post("/{channel_id}/restart")
+async def restart_channel(channel_id: str):
+    """Restart a single channel connection with the latest config.
+
+    Fires the restart in the background and returns immediately so that
+    long WebSocket disconnect sequences do not block the HTTP response.
+    Stops the current long-connection (if any) and re-connects using the
+    freshly saved configuration.
+    """
+    import asyncio
+
+    plugin = default_registry.get(channel_id)
+    if not plugin:
+        raise HTTPException(
+            status_code=404, detail=f"Channel '{channel_id}' not found"
+        )
+
+    async def _restart() -> None:
+        try:
+            await default_manager.restart_channel(channel_id)
+        except Exception as exc:
+            # The caller already got 200; without this the failure only shows
+            # up as "Task exception was never retrieved" on stderr.
+            log.error("channel.restart_failed", {"channel": channel_id, "error": str(exc)})
+
+    asyncio.create_task(_restart())
+    return {"ok": True, "channel_id": channel_id}
+
+
+@router.post("/restart-all")
+async def restart_all_channels():
+    """Restart all enabled channel connections (background, returns immediately)."""
+    import asyncio
+
+    async def _do():
+        try:
+            await default_manager.stop_all()
+            await default_manager.start_all()
+        except Exception as exc:
+            log.error("channel.restart_all_failed", {"error": str(exc)})
+
+    asyncio.create_task(_do())
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Weixin QR login
+# ---------------------------------------------------------------------------
+
+class WeixinQrStartRequest(BaseModel):
+    baseUrl: Optional[str] = None
+
+
+def _resolve_ilink_base_url(raw: Optional[str]) -> str:
+    """Accept only a public https iLink endpoint.
+
+    The value is fetched server-side; an arbitrary URL would turn this route
+    into a probe of the internal network.
+    """
+    from aegisops.channel.builtin.weixin.config import ILINK_BASE_URL
+
+    base_url = (raw or "").strip()
+    if not base_url:
+        return ILINK_BASE_URL
+    parsed = urlparse(base_url)
+    host = (parsed.hostname or "").strip().lower()
+    if parsed.scheme != "https" or not host:
+        raise HTTPException(status_code=422, detail="baseUrl must be an https URL")
+    if host == "localhost" or host.endswith(".localhost"):
+        raise HTTPException(status_code=422, detail="baseUrl must not point at a local address")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None
+    if ip is not None and (
+        ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+        or ip.is_reserved or ip.is_unspecified
+    ):
+        raise HTTPException(status_code=422, detail="baseUrl must not point at a private address")
+    return base_url.rstrip("/")
+
+
+@router.post("/weixin/qr-login/start")
+async def weixin_qr_login_start(req: WeixinQrStartRequest):
+    """Request a fresh iLink Bot QR code for WeChat account login.
+
+    No credentials needed — this is the pre-authentication step.
+    Returns ``{qrcode_value, qrcode_url}`` for the frontend to render.
+    """
+    from aegisops.channel.builtin.weixin.qr_login import start_qr_login
+
+    base_url = _resolve_ilink_base_url(req.baseUrl)
+    try:
+        result = await start_qr_login(base_url=base_url)
+        return {"ok": True, **result}
+    except Exception as exc:
+        log.error("weixin.qr_login.start_failed", {"error": str(exc)})
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/weixin/qr-login/status")
+async def weixin_qr_login_status(qrcode: str, baseUrl: Optional[str] = None):
+    """Poll the QR code scan status once.
+
+    Returns ``{status}`` where status ∈ waiting | scaned | expired | confirmed.
+    On ``confirmed`` also returns ``{account_id, token}``.
+    """
+    from aegisops.channel.builtin.weixin.qr_login import poll_qr_status
+
+    base_url = _resolve_ilink_base_url(baseUrl)
+    try:
+        result = await poll_qr_status(qrcode_value=qrcode, base_url=base_url)
+        return {"ok": True, **result}
+    except Exception as exc:
+        log.error("weixin.qr_login.poll_failed", {"error": str(exc)})
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp QR pairing
+# ---------------------------------------------------------------------------
+
+class WhatsAppPairStartRequest(BaseModel):
+    sessionPath: Optional[str] = None
+    bridgeDir: Optional[str] = None
+    resetSession: bool = False
+
+
+def _whatsapp_allowed_roots() -> list[Path]:
+    from aegisops.channel.builtin.whatsapp.config import default_state_dir
+    from aegisops.config.config import _get_aegisops_root
+
+    roots = [_get_aegisops_root(), Path.home() / ".aegisops", default_state_dir()]
+    resolved: list[Path] = []
+    for root in roots:
+        try:
+            candidate = root.expanduser().resolve()
+        except Exception:
+            continue
+        if candidate not in resolved:
+            resolved.append(candidate)
+    return resolved
+
+
+def _resolve_whatsapp_path(raw: Optional[str], *, field: str) -> Optional[Path]:
+    """Expand ``~`` and require the path to live under the AegisOps data directory.
+
+    These paths are read (creds.json existence) or executed (bridge.js) by the
+    server, so an unrestricted value lets any signed-in user probe the
+    filesystem or run their own script.
+    """
+    if raw is None or not str(raw).strip():
+        return None
+    path = Path(str(raw).strip()).expanduser()
+    if not path.is_absolute():
+        raise HTTPException(status_code=400, detail=f"{field} must be an absolute path")
+    resolved = path.resolve()
+    if not any(resolved == root or resolved.is_relative_to(root) for root in _whatsapp_allowed_roots()):
+        raise HTTPException(
+            status_code=400,
+            detail=f"{field} must be inside the AegisOps data directory",
+        )
+    return resolved
+
+
+@router.post("/whatsapp/pair/start")
+async def whatsapp_pair_start(req: WhatsAppPairStartRequest):
+    """Start a WhatsApp Web QR pairing process.
+
+    The helper starts the bundled Node bridge in pair-only mode and returns a
+    pairing_id. The frontend polls /whatsapp/pair/{pairing_id}/status until a
+    QR code is available or pairing completes.
+    """
+    from aegisops.channel.builtin.whatsapp.pairing import start_pairing
+
+    session_path = _resolve_whatsapp_path(req.sessionPath, field="sessionPath")
+    bridge_dir = _resolve_whatsapp_path(req.bridgeDir, field="bridgeDir")
+    try:
+        pairing = await start_pairing(
+            session_path=str(session_path) if session_path else None,
+            bridge_dir=str(bridge_dir) if bridge_dir else None,
+            reset_session=req.resetSession,
+        )
+        return {
+            "ok": True,
+            "pairing_id": pairing.id,
+            "status": pairing.status,
+            "session_path": str(pairing.session_path),
+        }
+    except Exception as exc:
+        log.error("whatsapp.pair.start_failed", {"error": str(exc)})
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+@router.get("/whatsapp/session-status")
+async def whatsapp_session_status(sessionPath: Optional[str] = None):
+    """Return whether the configured WhatsApp session contains credentials."""
+    from aegisops.channel.builtin.whatsapp.config import default_session_path
+
+    path = _resolve_whatsapp_path(sessionPath, field="sessionPath") or default_session_path()
+    return {
+        "session_path": str(path),
+        "paired": (path / "creds.json").exists(),
+    }
+
+
+@router.get("/whatsapp/pair/{pairing_id}/status")
+async def whatsapp_pair_status(pairing_id: str):
+    from aegisops.channel.builtin.whatsapp.pairing import get_pairing
+
+    pairing = get_pairing(pairing_id)
+    if pairing is None:
+        raise HTTPException(status_code=404, detail="WhatsApp pairing session not found")
+    return {
+        "ok": True,
+        "pairing_id": pairing.id,
+        "status": pairing.status,
+        "qr": pairing.qr,
+        "error": pairing.error,
+        "user": pairing.user,
+        "session_path": str(pairing.session_path),
+    }
+
+
+@router.post("/whatsapp/pair/{pairing_id}/cancel")
+async def whatsapp_pair_cancel(pairing_id: str):
+    from aegisops.channel.builtin.whatsapp.pairing import cancel_pairing
+
+    cancelled = await cancel_pairing(pairing_id)
+    if not cancelled:
+        raise HTTPException(status_code=404, detail="WhatsApp pairing session not found")
+    return {"ok": True, "pairing_id": pairing_id}
+
+
+# ---------------------------------------------------------------------------
+# Telegram pairing
+# ---------------------------------------------------------------------------
+
+class TelegramPairRequest(BaseModel):
+    code: str
+
+
+def _append_telegram_allow_from(user_id: str) -> None:
+    """Atomically add *user_id* to channels.telegram.allowFrom in aegisops.json.
+
+    Creates the key (as an empty list) if it is absent, then appends the ID
+    (deduplicated).  Uses ConfigWriter so the write is atomic and the cache is
+    cleared automatically.
+    """
+    from aegisops.config.config_writer import ConfigWriter  # local import — avoids circular deps
+
+    data = ConfigWriter._read_raw()
+    channels = data.setdefault("channels", {})
+    telegram = channels.setdefault("telegram", {})
+
+    allow_from: list = telegram.get("allowFrom", [])
+    str_id = str(user_id)
+    if str_id not in [str(x) for x in allow_from]:
+        allow_from = list(allow_from) + [str_id]
+    telegram["allowFrom"] = allow_from
+
+    ConfigWriter._write_raw(data)
+    log.info("telegram.pairing.config_saved", {"user_id": str_id})
+
+
+@router.post("/telegram/pair")
+@serialized_config_mutation
+async def telegram_pair(req: TelegramPairRequest):
+    """
+    Verify a Telegram pairing code.
+
+    On success, the user_id is immediately persisted to channels.telegram.allowFrom
+    in aegisops.json, so no manual save is required in the UI.
+    """
+    plugin = default_registry.get("telegram")
+    if not plugin:
+        raise HTTPException(status_code=404, detail="Telegram channel plugin not loaded")
+
+    # Duck-type access to pairing store (avoids importing the plugin module here)
+    get_store = getattr(plugin, "get_pairing_store", None)
+    if get_store is None:
+        raise HTTPException(status_code=501, detail="Telegram plugin does not support pairing")
+
+    store = get_store()
+    entry = store.consume(req.code.strip().upper())
+    if entry is None:
+        raise HTTPException(status_code=400, detail="配对码无效或已过期")
+
+    user_id = entry["user_id"]
+
+    # Persist user_id to aegisops.json immediately
+    config_saved = False
+    try:
+        import asyncio
+        await asyncio.get_event_loop().run_in_executor(None, _append_telegram_allow_from, user_id)
+        config_saved = True
+    except Exception as exc:
+        log.warning("telegram.pairing.config_save_failed", {"error": str(exc)})
+
+    # Send a confirmation message back to the Telegram user (best-effort, before restart)
+    confirm = getattr(plugin, "confirm_pairing", None)
+    if confirm is not None:
+        import asyncio
+        asyncio.create_task(confirm(entry))
+
+    # Restart the channel so the new allowFrom takes effect immediately.
+    # Schedule after a short delay so the confirmation message is sent first.
+    if config_saved:
+        import asyncio
+
+        async def _delayed_restart() -> None:
+            await asyncio.sleep(2)
+            await default_manager.restart_channel("telegram")
+
+        asyncio.create_task(_delayed_restart())
+        log.info("telegram.pairing.channel_restart_scheduled", {"user_id": user_id})
+
+    return {
+        "ok": True,
+        "user_id": user_id,
+        "username": entry.get("username"),
+    }

@@ -1,0 +1,8 @@
+{
+  "id": "vuln-ops",
+  "title": "漏洞运营",
+  "route": "/contracts/webui/vuln-ops",
+  "icon": "ScanSearch",
+  "enabled": true,
+  "entry": "src/index.tsx"
+}

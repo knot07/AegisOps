@@ -1,0 +1,320 @@
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from aegisops.server.routes.session import (
+    CommandRequest,
+    _resolve_compaction_context,
+    _run_session_compaction,
+    send_session_command,
+)
+from aegisops.session.lifecycle.compaction.compaction import SessionCompaction
+from aegisops.session.message import CompactionPart, MessageRole
+
+
+@pytest.mark.asyncio
+async def test_run_session_compaction_uses_latest_user_and_publishes_status():
+    session = SimpleNamespace(id="ses_test", directory="/tmp")
+    messages = [
+        SimpleNamespace(
+            id="msg_user",
+            role=MessageRole.USER,
+            agent="rex",
+            model={"providerID": "anthropic", "modelID": "claude-test"},
+        ),
+        SimpleNamespace(id="msg_asst", role=MessageRole.ASSISTANT),
+    ]
+    events: list[tuple[str, dict]] = []
+
+    async def publish_event(event_name: str, payload: dict) -> None:
+        events.append((event_name, payload))
+
+    async def publish_context_usage_update(
+        event_publish_callback,
+        session_id: str,
+        **kwargs,
+    ) -> None:  # noqa: ARG001
+        await event_publish_callback(
+            "context.usage.updated",
+            {"sessionID": session_id, "sections": []},
+        )
+
+    with patch(
+        "aegisops.server.routes.session.Session.get_by_id",
+        new=AsyncMock(return_value=session),
+    ), patch(
+        "aegisops.server.routes.session._resolve_compaction_context",
+        new=AsyncMock(return_value=("rex", "anthropic", "claude-test")),
+    ), patch(
+        "aegisops.session.lifecycle.revert.SessionRevert.cleanup",
+        new=AsyncMock(),
+    ), patch(
+        "aegisops.session.message.Message.list",
+        new=AsyncMock(return_value=messages),
+    ), patch(
+        "aegisops.provider.provider.Provider.resolve_model_info",
+        return_value=(200_000, 8_192, None),
+    ), patch(
+        "aegisops.session.lifecycle.compaction.compaction.SessionCompaction.process",
+        new=AsyncMock(return_value="continue"),
+    ) as process_mock, patch(
+        "aegisops.server.routes.session._publish_context_usage_update",
+        new=publish_context_usage_update,
+    ):
+        result = await _run_session_compaction(
+            "ses_test",
+            event_publish_callback=publish_event,
+        )
+
+    assert result == ("rex", "anthropic", "claude-test")
+    process_mock.assert_awaited_once()
+    assert process_mock.await_args.kwargs["parent_id"] == "msg_user"
+    assert events[0] == (
+        "session.status",
+        {
+            "sessionID": "ses_test",
+            "status": {"type": "compacting", "message": "Compacting context…"},
+        },
+    )
+    idle_event = (
+        "session.status",
+        {"sessionID": "ses_test", "status": {"type": "idle"}},
+    )
+    usage_event = (
+        "context.usage.updated",
+        {"sessionID": "ses_test", "sections": []},
+    )
+    assert idle_event in events
+    assert usage_event in events
+    assert events.index(idle_event) < events.index(usage_event)
+
+
+@pytest.mark.asyncio
+async def test_run_session_compaction_publishes_usage_when_compaction_stops():
+    session = SimpleNamespace(id="ses_test", directory="/tmp")
+    messages = [
+        SimpleNamespace(
+            id="msg_user",
+            role=MessageRole.USER,
+            agent="rex",
+            model={"providerID": "anthropic", "modelID": "claude-test"},
+        ),
+    ]
+    events: list[tuple[str, dict]] = []
+
+    async def publish_event(event_name: str, payload: dict) -> None:
+        events.append((event_name, payload))
+
+    async def publish_context_usage_update(
+        event_publish_callback,
+        session_id: str,
+        **kwargs,
+    ) -> None:  # noqa: ARG001
+        await event_publish_callback(
+            "context.usage.updated",
+            {"sessionID": session_id, "usedTokens": 321, "segments": []},
+        )
+
+    with patch(
+        "aegisops.server.routes.session.Session.get_by_id",
+        new=AsyncMock(return_value=session),
+    ), patch(
+        "aegisops.server.routes.session._resolve_compaction_context",
+        new=AsyncMock(return_value=("rex", "anthropic", "claude-test")),
+    ), patch(
+        "aegisops.session.lifecycle.revert.SessionRevert.cleanup",
+        new=AsyncMock(),
+    ), patch(
+        "aegisops.session.message.Message.list",
+        new=AsyncMock(return_value=messages),
+    ), patch(
+        "aegisops.provider.provider.Provider.resolve_model_info",
+        return_value=(200_000, 8_192, None),
+    ), patch(
+        "aegisops.session.lifecycle.compaction.compaction.SessionCompaction.process",
+        new=AsyncMock(return_value="stop"),
+    ), patch(
+        "aegisops.session.lifecycle.compaction.compaction.pop_last_compaction_error",
+        return_value="provider unavailable",
+    ), patch(
+        "aegisops.server.routes.session._publish_context_usage_update",
+        new=publish_context_usage_update,
+    ):
+        with pytest.raises(RuntimeError, match="provider unavailable"):
+            await _run_session_compaction(
+                "ses_test",
+                event_publish_callback=publish_event,
+            )
+
+    idle_event = (
+        "session.status",
+        {"sessionID": "ses_test", "status": {"type": "idle"}},
+    )
+    usage_event = (
+        "context.usage.updated",
+        {"sessionID": "ses_test", "usedTokens": 321, "segments": []},
+    )
+    assert idle_event in events
+    assert usage_event in events
+    assert events.index(idle_event) < events.index(usage_event)
+
+
+@pytest.mark.asyncio
+async def test_session_compaction_create_adds_compaction_part():
+    created_message = SimpleNamespace(id="msg_compact")
+
+    with patch(
+        "aegisops.session.message.Message.create",
+        new=AsyncMock(return_value=created_message),
+    ) as create_mock, patch(
+        "aegisops.session.message.Message.add_part",
+        new=AsyncMock(),
+    ) as add_part_mock:
+        await SessionCompaction.create(
+            session_id="ses_test",
+            agent="rex",
+            model_provider_id="anthropic",
+            model_id="claude-test",
+            auto=False,
+        )
+
+    create_mock.assert_awaited_once()
+    add_part_mock.assert_awaited_once()
+    created_part = add_part_mock.await_args.args[2]
+    assert isinstance(created_part, CompactionPart)
+    assert created_part.sessionID == "ses_test"
+    assert created_part.messageID == "msg_compact"
+    assert created_part.auto is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_compaction_context_prefers_requested_agent_override():
+    messages = [
+        SimpleNamespace(
+            id="msg_user",
+            role=MessageRole.USER,
+            agent="rex",
+            model={"providerID": "history-provider", "modelID": "history-model"},
+        ),
+    ]
+    override_model = {"providerID": "override-provider", "modelID": "override-model"}
+    requested_agent = SimpleNamespace(model={"providerID": "agent-provider", "modelID": "agent-model"})
+
+    with patch(
+        "aegisops.session.message.Message.list",
+        new=AsyncMock(return_value=messages),
+    ), patch(
+        "aegisops.storage.storage.Storage.read",
+        new=AsyncMock(return_value={"security": override_model}),
+    ), patch(
+        "aegisops.agent.registry.Agent.get",
+        new=AsyncMock(side_effect=[requested_agent]),
+    ), patch(
+        "aegisops.config.config.Config.resolve_default_llm",
+        new=AsyncMock(return_value={"provider_id": "config-provider", "model_id": "config-model"}),
+    ):
+        resolved = await _resolve_compaction_context(
+            "ses_test",
+            requested_agent="security",
+        )
+
+    assert resolved == ("security", "override-provider", "override-model")
+
+
+@pytest.mark.asyncio
+async def test_compact_command_uses_resolved_compaction_context_for_message_metadata(tmp_path):
+    from aegisops.server.routes import session as session_routes
+    from aegisops.session.session import Session
+
+    # A real durable session must exist for the lifecycle write guard.
+    session = await Session.create(project_id="default", directory=str(tmp_path))
+
+    async def provide_side_effect(*, directory, init, fn):
+        return await fn()
+
+    with patch(
+        "aegisops.server.routes.session._resolve_compaction_context",
+        new=AsyncMock(return_value=("security", "threatbook-cn-llm", "minimax-m2.7")),
+    ), patch(
+        "aegisops.session.message.Message.create",
+        new=AsyncMock(),
+    ) as create_message_mock, patch(
+        "aegisops.server.routes.event.publish_event",
+        new=AsyncMock(),
+    ), patch(
+        "aegisops.project.instance.Instance.provide",
+        new=AsyncMock(side_effect=provide_side_effect),
+    ), patch(
+        "aegisops.server.routes.session._run_session_compaction",
+        new=AsyncMock(),
+    ) as run_compaction_mock:
+        response = await send_session_command(
+            session.id,
+            CommandRequest(command="compact", arguments=""),
+        )
+        pending = list(session_routes.pending_background_tasks())
+        assert pending
+        await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
+
+    assert response["status"] == "accepted"
+    create_message_mock.assert_awaited()
+    assert create_message_mock.await_args.kwargs["agent"] == "security"
+    assert create_message_mock.await_args.kwargs["model"] == {
+        "providerID": "threatbook-cn-llm",
+        "modelID": "minimax-m2.7",
+    }
+    run_compaction_mock.assert_awaited_once()
+    assert run_compaction_mock.await_args.kwargs["explicit_provider_id"] == "threatbook-cn-llm"
+    assert run_compaction_mock.await_args.kwargs["explicit_model_id"] == "minimax-m2.7"
+
+
+@pytest.mark.asyncio
+async def test_a_manual_compaction_holds_the_sessions_execution_lease():
+    # Like a runner: no runner, and no data retention, in any process can take the
+    # session while it is being compacted; and it waits for a runner holding it.
+    from aegisops.session.ownership import SessionExecutionLease, current_lease
+
+    session = SimpleNamespace(id="ses_compact_lease", directory="/tmp")
+    messages = [SimpleNamespace(id="msg_user", role=MessageRole.USER, agent="rex", model=None)]
+    seen = {}
+
+    async def process(**kwargs):
+        seen["current"] = current_lease("ses_compact_lease") is not None
+        seen["other"] = await SessionExecutionLease.acquire("ses_compact_lease")
+        return "continue"
+
+    with patch(
+        "aegisops.server.routes.session.Session.get_by_id",
+        new=AsyncMock(return_value=session),
+    ), patch(
+        "aegisops.server.routes.session._resolve_compaction_context",
+        new=AsyncMock(return_value=("rex", "anthropic", "claude-test")),
+    ), patch(
+        "aegisops.session.lifecycle.revert.SessionRevert.cleanup",
+        new=AsyncMock(),
+    ), patch(
+        "aegisops.session.message.Message.list",
+        new=AsyncMock(return_value=messages),
+    ), patch(
+        "aegisops.provider.provider.Provider.resolve_model_info",
+        return_value=(200_000, 8_192, None),
+    ), patch(
+        "aegisops.session.lifecycle.compaction.compaction.SessionCompaction.process",
+        new=process,
+    ), patch(
+        "aegisops.server.routes.session._publish_context_usage_update",
+        new=AsyncMock(),
+    ):
+        await _run_session_compaction("ses_compact_lease")
+        assert seen == {"current": True, "other": None}
+
+        runner = await SessionExecutionLease.acquire("ses_compact_lease")
+        try:
+            with pytest.raises(ValueError, match="is running"):
+                await _run_session_compaction("ses_compact_lease")
+        finally:
+            await runner.release()

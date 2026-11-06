@@ -1,0 +1,387 @@
+"""Tests for querying one session's runtime status."""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Callable, Iterator
+from types import SimpleNamespace
+
+import pytest
+from fastapi import status
+from aegisops.auth.context import AuthUser
+from aegisops.project.instance import Instance
+from aegisops.server.routes import session as session_routes
+from aegisops.session.core.status import (
+    SessionStatus,
+    SessionStatusBusy,
+    SessionStatusRetry,
+)
+
+
+async def _set_status_for_directory(directory: str, update: Callable[[], None]) -> None:
+    await Instance.provide(directory=directory, fn=update)
+
+
+@pytest.fixture(autouse=True)
+def _reset_runtime_status() -> Iterator[None]:
+    SessionStatus._state.clear()
+    active_sessions = getattr(session_routes.router, "_prompt_queue_active_sessions", set())
+    active_sessions.clear()
+    yield
+    SessionStatus._state.clear()
+    active_sessions = getattr(session_routes.router, "_prompt_queue_active_sessions", set())
+    active_sessions.clear()
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_returns_explicit_idle(client, session_id: str) -> None:
+    response = await client.get(f"/api/session/{session_id}/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.headers["cache-control"] == "no-store"
+    payload = response.json()
+    assert payload["sessionID"] == session_id
+    assert payload["webUrl"] == f"/sessions/{session_id}"
+    assert payload["lifecycleStatus"] == "active"
+    assert payload["status"] == {"type": "idle"}
+    assert payload["isProcessing"] is False
+    assert payload["pendingPromptCount"] == 0
+    assert isinstance(payload["observedAt"], int)
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_returns_busy(client, session_id: str) -> None:
+    session = await session_routes._get_session_by_id_unfiltered(session_id)
+    assert session is not None
+    await _set_status_for_directory(
+        session.directory,
+        lambda: SessionStatus.set(session_id, SessionStatusBusy()),
+    )
+
+    response = await client.get(f"/api/session/{session_id}/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == {"type": "busy"}
+    assert response.json()["isProcessing"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_preserves_retry_details(client, session_id: str) -> None:
+    session = await session_routes._get_session_by_id_unfiltered(session_id)
+    assert session is not None
+    await _set_status_for_directory(
+        session.directory,
+        lambda: SessionStatus.set(
+            session_id,
+            SessionStatusRetry(
+                attempt=2,
+                message="Rate limited",
+                next=123456789,
+                maxAttempts=5,
+                rateLimited=True,
+                providerID="prov",
+                modelID="m",
+            ),
+        ),
+    )
+
+    response = await client.get(f"/api/session/{session_id}/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    # The poll carries the same fields the session.status SSE event does, so a
+    # client that refreshes mid-backoff keeps the 429 classification and the
+    # retry budget instead of falling back to a generic failure notice.
+    assert response.json()["status"] == {
+        "type": "retry",
+        "attempt": 2,
+        "message": "Rate limited",
+        "next": 123456789,
+        "maxAttempts": 5,
+        "rateLimited": True,
+        "providerID": "prov",
+        "modelID": "m",
+    }
+    assert response.json()["isProcessing"] is True
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_reports_prompt_chain_as_queued(client, session_id: str) -> None:
+    session_routes._set_prompt_chain_active(session_id, True)
+
+    response = await client.get(f"/api/session/{session_id}/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == {"type": "queued"}
+    assert response.json()["isProcessing"] is True
+
+
+@pytest.mark.asyncio
+async def test_prompt_async_is_observable_as_queued_before_background_loop(
+    client,
+    session_id: str,
+    monkeypatch,
+) -> None:
+    def _hold_background_work(coro, **_kwargs) -> None:
+        coro.close()
+
+    monkeypatch.setattr(session_routes, "_schedule_background_coro", _hold_background_work)
+
+    accepted = await client.post(
+        f"/api/session/{session_id}/prompt_async",
+        json={"parts": [{"type": "text", "text": "hello"}]},
+    )
+    status_response = await client.get(f"/api/session/{session_id}/status")
+
+    assert accepted.status_code == status.HTTP_202_ACCEPTED
+    assert accepted.json()["status"] == "accepted"
+    assert status_response.status_code == status.HTTP_200_OK
+    assert status_response.json()["status"] == {"type": "queued"}
+    assert status_response.json()["isProcessing"] is True
+
+
+@pytest.mark.asyncio
+async def test_shell_is_busy_while_active_and_idle_after_completion(
+    client,
+    session_id: str,
+    monkeypatch,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def _hold_shell(**_kwargs):
+        started.set()
+        await release.wait()
+        return {"info": {"id": "msg_shell"}, "parts": []}
+
+    monkeypatch.setattr(
+        "aegisops.session.runner.SessionRunner.shell",
+        _hold_shell,
+    )
+
+    shell_request = asyncio.create_task(
+        client.post(
+            f"/api/session/{session_id}/shell",
+            json={"agent": "rex", "command": "printf done"},
+        )
+    )
+    await asyncio.wait_for(started.wait(), timeout=1)
+
+    try:
+        running_response = await client.get(f"/api/session/{session_id}/status")
+    finally:
+        release.set()
+
+    shell_response = await asyncio.wait_for(shell_request, timeout=1)
+    completed_response = await client.get(f"/api/session/{session_id}/status")
+
+    assert running_response.status_code == status.HTTP_200_OK
+    assert running_response.json()["status"] == {"type": "busy"}
+    assert running_response.json()["isProcessing"] is True
+    assert running_response.json()["pendingPromptCount"] == 0
+    assert shell_response.status_code == status.HTTP_200_OK
+    assert completed_response.status_code == status.HTTP_200_OK
+    assert completed_response.json()["status"] == {"type": "idle"}
+    assert completed_response.json()["isProcessing"] is False
+    assert completed_response.json()["pendingPromptCount"] == 0
+    assert not session_routes.Session.has_active_operations(session_id)
+
+
+@pytest.mark.asyncio
+async def test_shell_response_is_available_after_message_cache_reload(
+    client,
+    session_id: str,
+    monkeypatch,
+) -> None:
+    from aegisops.session.message import Message
+
+    process = SimpleNamespace(
+        communicate=lambda: asyncio.sleep(
+            0,
+            result=(b"PR741_SHELL_PERSISTENCE_OK", b""),
+        ),
+        returncode=0,
+    )
+
+    async def _create_subprocess(*_args, **_kwargs):
+        return process
+
+    async def _run_lifecycle(_payload, effect, **_kwargs):
+        return await effect()
+
+    monkeypatch.setattr(
+        "aegisops.session.runner.asyncio.create_subprocess_shell",
+        _create_subprocess,
+    )
+    monkeypatch.setattr(
+        "aegisops.session.tool_execution.run_tool_execution_lifecycle",
+        _run_lifecycle,
+    )
+
+    shell_response = await client.post(
+        f"/api/session/{session_id}/shell",
+        json={"agent": "rex", "command": "printf PR741_SHELL_PERSISTENCE_OK"},
+    )
+    assert shell_response.status_code == status.HTTP_200_OK
+    assistant_id = shell_response.json()["info"]["id"]
+
+    Message.invalidate_cache(session_id)
+    history_response = await client.get(f"/api/session/{session_id}/message")
+
+    assert history_response.status_code == status.HTTP_200_OK
+    assistant = next(
+        item
+        for item in history_response.json()
+        if item["info"]["id"] == assistant_id
+    )
+    assert assistant["info"]["finish"] == "stop"
+    tool_part = next(part for part in assistant["parts"] if part["type"] == "tool")
+    assert tool_part["tool"] == "bash"
+    assert tool_part["state"]["status"] == "completed"
+    assert tool_part["state"]["input"]["command"] == (
+        "printf PR741_SHELL_PERSISTENCE_OK"
+    )
+    assert tool_part["state"]["output"] == "PR741_SHELL_PERSISTENCE_OK"
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_prefers_busy_and_counts_queued_prompts(client, session_id: str) -> None:
+    from aegisops.session.interaction_queue import InteractionQueue
+
+    session = await session_routes._get_session_by_id_unfiltered(session_id)
+    assert session is not None
+    await _set_status_for_directory(
+        session.directory,
+        lambda: SessionStatus.set(session_id, SessionStatusBusy()),
+    )
+    await InteractionQueue.enqueue(
+        session_id,
+        parts=[{"type": "text", "text": "next"}],
+    )
+
+    try:
+        response = await client.get(f"/api/session/{session_id}/status")
+    finally:
+        await InteractionQueue.clear(session_id)
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == {"type": "busy"}
+    assert response.json()["pendingPromptCount"] == 1
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_resolves_the_session_directory(client, tmp_path) -> None:
+    directory = str(tmp_path.resolve())
+    create_response = await client.post(
+        "/api/session",
+        json={"title": "other directory"},
+        headers={"X-AegisOps-Directory": directory},
+    )
+    assert create_response.status_code == status.HTTP_200_OK
+    session_id = create_response.json()["id"]
+    await _set_status_for_directory(
+        directory,
+        lambda: SessionStatus.set(session_id, SessionStatusBusy()),
+    )
+
+    response = await client.get(f"/api/session/{session_id}/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["status"] == {"type": "busy"}
+
+
+@pytest.mark.asyncio
+async def test_status_list_includes_sessions_running_outside_the_request_instance(
+    client, tmp_path,
+) -> None:
+    # The task manager runs task sessions with no instance context, and other
+    # loops may run under another directory; a refreshed chat restores its
+    # running state (and stop button) from this list.
+    task_loop = (await client.post("/api/session", json={"title": "task loop"})).json()["id"]
+    other_dir = (await client.post("/api/session", json={"title": "other dir"})).json()["id"]
+    SessionStatus.set(task_loop, SessionStatusBusy())
+    await _set_status_for_directory(
+        str(tmp_path.resolve()),
+        lambda: SessionStatus.set(
+            other_dir,
+            SessionStatusRetry(attempt=1, message="rate limited", next=0),
+        ),
+    )
+
+    response = await client.get("/api/session/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    payload = response.json()
+    assert payload[task_loop]["type"] == "busy"
+    assert payload[other_dir]["type"] == "retry"
+
+
+@pytest.mark.asyncio
+async def test_status_list_leaves_out_sessions_the_caller_cannot_read(
+    client, session_id: str, tmp_path, monkeypatch,
+) -> None:
+    await _set_status_for_directory(
+        str(tmp_path.resolve()),
+        lambda: SessionStatus.set(session_id, SessionStatusBusy()),
+    )
+    SessionStatus.set("ses_never_stored", SessionStatusBusy())
+    viewer = AuthUser(id="usr_other", username="other", role="user", status="active")
+    monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+
+    response = await client.get("/api/session/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json() == {}
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_returns_archived_lifecycle(client, session_id: str) -> None:
+    archive_response = await client.post(f"/api/session/{session_id}/archive")
+    assert archive_response.status_code == status.HTTP_200_OK
+
+    response = await client.get(f"/api/session/{session_id}/status")
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["lifecycleStatus"] == "archived"
+    assert response.json()["status"] == {"type": "idle"}
+    assert response.json()["isProcessing"] is False
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_returns_not_found(client) -> None:
+    response = await client.get("/api/session/session_missing/status")
+
+    assert response.status_code == status.HTTP_404_NOT_FOUND
+
+
+@pytest.mark.asyncio
+async def test_status_by_id_enforces_read_access(client, session_id: str, monkeypatch) -> None:
+    viewer = AuthUser(
+        id="usr_other",
+        username="other",
+        role="user",
+        status="active",
+    )
+    monkeypatch.setattr(session_routes, "require_user", lambda _request: viewer)
+
+    response = await client.get(f"/api/session/{session_id}/status")
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_detail_has_stable_url_without_changing_archive_access(client, session_id: str) -> None:
+    detail = await client.get(f"/api/session/{session_id}")
+    assert detail.status_code == 200
+    assert detail.json()["webUrl"] == f"/sessions/{session_id}"
+    await client.patch(f"/api/session/{session_id}", json={"title": "Renamed"})
+    renamed = await client.get(f"/api/session/{session_id}")
+    assert renamed.json()["webUrl"] == detail.json()["webUrl"]
+    archived = await client.post(f"/api/session/{session_id}/archive")
+    assert archived.status_code == 200
+    assert (await client.get(f"/api/session/{session_id}")).status_code == 404
+    state = await client.get(f"/api/session/{session_id}/status")
+    assert state.json()["webUrl"] == detail.json()["webUrl"]
+
+
+def test_session_web_url_encodes_one_path_segment() -> None:
+    assert session_routes._session_web_url("ses/a?b#c") == "/sessions/ses%2Fa%3Fb%23c"
