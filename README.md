@@ -17,6 +17,8 @@ AI 驱动的安全运营工作台，集成智能对话、任务与工作流、�
 推荐部署：
 
 ```sh
+git clone https://github.com/knot07/AegisOps.git
+cd AegisOps
 docker compose up -d --build
 ```
 

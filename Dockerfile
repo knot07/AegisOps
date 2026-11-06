@@ -6,7 +6,7 @@ RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm && l
 RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates fonts-noto-cjk libgl1 libglib2.0-0 && rm -rf /var/lib/apt/lists/*
 WORKDIR /opt/aegisops
 COPY . .
-RUN python -m pip install --no-cache-dir -r requirements.lock && python -m pip install --no-cache-dir --no-deps -e . -e defaults/plugins/aegis-scenes-runtime && cd webui && npm ci --include=dev
+RUN python -m pip install --no-cache-dir -r requirements.lock && python -m pip install --no-cache-dir --no-deps -e . -e defaults/plugins/aegis-scenes-runtime && cd webui && npm ci --include=dev && npm run build
 RUN useradd --uid 10001 --create-home --shell /bin/bash aegisops && mkdir -p /var/lib/aegisops && chown -R aegisops:aegisops /opt/aegisops /var/lib/aegisops
 USER aegisops
 ENV AEGISOPS_ROOT=/var/lib/aegisops PYTHONUNBUFFERED=1
