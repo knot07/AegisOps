@@ -1,0 +1,9 @@
+{
+  "hash": "d9913c0fa0dd4229",
+  "builtAt": 1793856764711,
+  "status": "ready",
+  "error": null,
+  "runtime": "webui_page",
+  "runtimeVersion": 1,
+  "sdkImport": "@aegisops/webui-contract-sdk"
+}

@@ -1,6 +1,6 @@
 [project]
 name = "aegisops"
-version = "2026.11.6"
+version = "2026.11.08"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "AegisOps Team", email = "team@example.com"}
@@ -12,7 +12,7 @@ keywords = ["ai", "security", "secops", "assistant", "llm", "agent"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: Apache Software License",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
 ]

@@ -1,0 +1,42 @@
+{
+  "status": "ready",
+  "loadedAt": 1793855193524,
+  "error": null,
+  "routes": [
+    {
+      "method": "GET",
+      "path": "/health",
+      "handler": "handlers.health"
+    },
+    {
+      "method": "GET",
+      "path": "/dashboard",
+      "handler": "handlers.dashboard"
+    },
+    {
+      "method": "POST",
+      "path": "/judgement/prepare",
+      "handler": "handlers.judgement_prepare"
+    },
+    {
+      "method": "POST",
+      "path": "/judgement/register",
+      "handler": "handlers.judgement_register"
+    },
+    {
+      "method": "GET",
+      "path": "/judgement/status",
+      "handler": "handlers.judgement_status"
+    },
+    {
+      "method": "POST",
+      "path": "/judgement/complete",
+      "handler": "handlers.judgement_complete"
+    },
+    {
+      "method": "POST",
+      "path": "/judgement/fail",
+      "handler": "handlers.judgement_fail"
+    }
+  ]
+}

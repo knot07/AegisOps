@@ -194,6 +194,16 @@ const EMAIL_SECURITY_BY_PORT: Record<EmailProtocol, Record<number, EmailSecurity
   smtp: { 465: 'ssl', 587: 'starttls', 25: 'insecure' },
 };
 
+const CHANNEL_PALETTES:Record<string,[string,string]>={
+ feishu:['#3478da','#edf4ff'],lark:['#3478da','#edf4ff'],wecom:['#2d85c5','#edf7fd'],
+ telegram:['#258fbd','#edf8fc'],whatsapp:['#399a63','#edf8f0'],dingtalk:['#3878d4','#eef4ff'],
+ weixin:['#4caa59','#f0f9ef'],slack:['#80517e','#f8f0f7'],email:['#5287b9','#eff5fb'],
+};
+function channelTheme(id?:string|null):React.CSSProperties{
+ const [accent,soft]=CHANNEL_PALETTES[id || ''] || ['#79964f','#f2f7e9'];
+ return {'--channel-accent':accent,'--channel-soft':soft} as React.CSSProperties;
+}
+
 const LAST_SELECTED_CHANNEL_STORAGE_KEY = 'aegisops:last-selected-channel';
 
 const EMAIL_HOST_PRESETS = [
@@ -959,11 +969,12 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="mb-4 border border-gray-200 rounded-lg overflow-hidden">
+    <div className="aegis-channel-section mb-4 border border-gray-200 rounded-lg overflow-hidden">
       <button
         type="button"
         onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
+        aria-expanded={open}
+        className="aegis-channel-section-heading w-full flex items-center justify-between px-4 py-3 bg-gray-50 hover:bg-gray-100 transition-colors text-left"
       >
         <div>
           <span className="text-sm font-semibold text-gray-800">{title}</span>
@@ -986,12 +997,12 @@ function Section({
 // Channel Card (left panel)
 // ============================================================================
 
-const FEISHU_GUIDE_URL = '/manual.html';
-const FEISHU_GUIDE_FILENAME = 'AegisOps-manual.html';
-const WECOM_GUIDE_URL = '/manual.html';
-const WECOM_GUIDE_FILENAME = 'AegisOps-manual.html';
-const DINGTALK_GUIDE_URL = '/manual.html';
-const DINGTALK_GUIDE_FILENAME = 'AegisOps-manual.html';
+const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
+const FEISHU_GUIDE_PDF_FILENAME = 'feishu-bot-guide.pdf';
+const WECOM_GUIDE_PDF_URL = '/wecom-bot-guide.pdf';
+const WECOM_GUIDE_PDF_FILENAME = 'wecom-bot-guide.pdf';
+const DINGTALK_GUIDE_PDF_URL = '/dingtalk-channel-guide.pdf';
+const DINGTALK_GUIDE_PDF_FILENAME = 'dingtalk-channel-guide.pdf';
 const SLACK_APPS_URL = 'https://api.slack.com/apps';
 
 function GuideDownloadButton({
@@ -1238,7 +1249,8 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
     <button
       type="button"
       onClick={onClick}
-      className={`w-full text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-all max-md:w-44 max-md:shrink-0 ${
+      data-channel-card={meta.id} aria-pressed={isSelected} style={channelTheme(meta.id)}
+      className={`aegis-channel-card w-full text-left flex items-center gap-3 px-3 py-3 rounded-lg border transition-all max-md:w-44 max-md:shrink-0 ${
         isSelected
           ? 'border-red-200 bg-red-50 shadow-sm'
           : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
@@ -1313,8 +1325,8 @@ function FeishuPanel({ config, agentOptions, onChange }: FeishuPanelProps) {
     <>
       <Section title={t('feishu.credentials')} description={t('feishu.credentialsDesc')}>
         <GuideDownloadButton
-          href={FEISHU_GUIDE_URL}
-          download={FEISHU_GUIDE_FILENAME}
+          href={FEISHU_GUIDE_PDF_URL}
+          download={FEISHU_GUIDE_PDF_FILENAME}
           label={t('feishu.downloadGuide')}
         />
         <FieldRow label="App ID" required hint={t('feishu.appIdHint')}>
@@ -1578,8 +1590,8 @@ function WeComPanel({ config, agentOptions, onChange }: WeComPanelProps) {
     <>
       <Section title={t('wecom.credentials')} description={t('wecom.credentialsDesc')}>
         <GuideDownloadButton
-          href={WECOM_GUIDE_URL}
-          download={WECOM_GUIDE_FILENAME}
+          href={WECOM_GUIDE_PDF_URL}
+          download={WECOM_GUIDE_PDF_FILENAME}
           label={t('wecom.downloadGuide')}
         />
         <FieldRow label="Bot ID" required hint={t('wecom.botIdHint')}>
@@ -1675,8 +1687,8 @@ function DingTalkPanel({ config, agentOptions, onChange }: DingTalkPanelProps) {
     <>
       <Section title={t('dingtalk.credentials')} description={t('dingtalk.credentialsDesc')}>
         <GuideDownloadButton
-          href={DINGTALK_GUIDE_URL}
-          download={DINGTALK_GUIDE_FILENAME}
+          href={DINGTALK_GUIDE_PDF_URL}
+          download={DINGTALK_GUIDE_PDF_FILENAME}
           label={t('dingtalk.downloadGuide')}
         />
         <FieldRow label="Client ID" required hint={t('dingtalk.clientIdHint')}>
@@ -3693,7 +3705,7 @@ export default function ChannelPage() {
           </div>
 
           {/* Right: Detail Panel */}
-          <div className="flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0">
+          <div data-channel-panel={selectedId} style={channelTheme(selectedId)} className="aegis-channel-panel flex-1 bg-white rounded-lg shadow-sm border border-gray-200 overflow-hidden flex flex-col min-h-0">
             {selectedMeta && selectedConfig ? (
               <>
                 <DetailHeader

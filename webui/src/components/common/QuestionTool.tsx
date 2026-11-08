@@ -278,16 +278,17 @@ function ChoiceInput({
                     : toggle(label)
                 )}
                 disabled={disabled}
-                className={`w-full text-left rounded-lg border px-3 py-2 text-sm transition-all flex items-start gap-2.5 ${
+                aria-pressed={selected}
+                className={`aegis-question-option w-full text-left rounded-lg border px-3 py-2 text-sm transition-all flex items-start gap-2.5 ${
                   selected
-                    ? 'border-emerald-300 bg-emerald-50 text-emerald-900'
+                    ? 'border-[#b6cf99] bg-[#f0f6e8] text-[#45652e]'
                     : 'border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50'
                 }`}
               >
                 {multiple ? (
                   <span
                     className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded border-2 flex items-center justify-center ${
-                      selected ? 'border-emerald-500 bg-emerald-500' : 'border-zinc-300 bg-transparent'
+                      selected ? 'border-[#8aac64] bg-[#8aac64]' : 'border-zinc-300 bg-transparent'
                     }`}
                   >
                     {selected && <Check className="w-2.5 h-2.5 text-white" strokeWidth={3} />}
@@ -295,16 +296,16 @@ function ChoiceInput({
                 ) : (
                   <span
                     className={`mt-0.5 flex-shrink-0 w-4 h-4 rounded-full border-2 flex items-center justify-center ${
-                      selected ? 'border-emerald-500' : 'border-zinc-300'
+                      selected ? 'border-[#8aac64]' : 'border-zinc-300'
                     }`}
                   >
-                    {selected && <span className="w-2 h-2 rounded-full bg-emerald-500 block" />}
+                    {selected && <span className="w-2 h-2 rounded-full bg-[#8aac64] block" />}
                   </span>
                 )}
                 <span>
                   <span className={`font-medium ${compact ? 'text-xs' : 'text-sm'}`}>{label}</span>
                   {desc && (
-                    <span className={`block mt-0.5 ${compact ? 'text-[11px]' : 'text-xs'} ${selected ? 'text-emerald-700/80' : 'text-zinc-400'}`}>
+                    <span className={`block mt-0.5 ${compact ? 'text-[11px]' : 'text-xs'} ${selected ? 'text-[#748864]' : 'text-zinc-400'}`}>
                       {desc}
                     </span>
                   )}
@@ -348,7 +349,7 @@ function TextInput({
   compact: boolean;
 }) {
   const { t } = useTranslation('common');
-  const cls = `w-full border border-zinc-300 rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100`;
+  const cls = `w-full border border-zinc-300 rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-[#a2c67b] focus:ring-2 focus:ring-[#e7f0dc]`;
   if (q.multiline) {
     return (
       <textarea
@@ -397,7 +398,7 @@ function NumberInput({
       max={q.max_value}
       step={q.step}
       disabled={disabled}
-      className={`w-full border border-zinc-300 rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100`}
+      className={`w-full border border-zinc-300 rounded-lg px-3 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-[#a2c67b] focus:ring-2 focus:ring-[#e7f0dc]`}
     />
   );
 }
@@ -425,7 +426,7 @@ function PasswordInput({
         onChange={e => onChange([e.target.value])}
         placeholder={q.placeholder || t('question.passwordPlaceholder')}
         disabled={disabled}
-        className={`w-full border border-zinc-300 rounded-lg px-3 pr-10 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-100`}
+        className={`w-full border border-zinc-300 rounded-lg px-3 pr-10 py-2 ${compact ? 'text-xs' : 'text-sm'} text-zinc-900 placeholder-zinc-400 outline-none focus:border-[#a2c67b] focus:ring-2 focus:ring-[#e7f0dc]`}
       />
       <button
         type="button"
@@ -487,8 +488,8 @@ function FileInput({
         disabled={disabled}
         className={`flex items-center gap-2 px-4 py-2.5 border-2 border-dashed rounded-lg ${compact ? 'text-xs' : 'text-sm'} transition-all ${
           filename
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
-            : 'border-zinc-300 text-zinc-500 hover:border-emerald-300 hover:bg-emerald-50 hover:text-emerald-700'
+            ? 'border-[#b6cf99] bg-[#f0f6e8] text-[#597b3e]'
+            : 'border-zinc-300 text-zinc-500 hover:border-[#b6cf99] hover:bg-[#f0f6e8] hover:text-[#597b3e]'
         }`}
       >
         <Upload className="w-4 h-4 flex-shrink-0" />
@@ -497,7 +498,7 @@ function FileInput({
         </span>
       </button>
       {filename && (
-        <p className={`mt-1 ${compact ? 'text-[11px]' : 'text-xs'} text-emerald-600`}>
+        <p className={`mt-1 ${compact ? 'text-[11px]' : 'text-xs'} text-[#597b3e]`}>
           {t('question.fileSelected', { filename })}
         </p>
       )}
@@ -525,7 +526,7 @@ function ConfirmInput({
         disabled={disabled}
         className={`flex-1 py-2 rounded-lg border ${compact ? 'text-xs' : 'text-sm'} font-medium transition-all ${
           selected === 'yes'
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+            ? 'border-[#b6cf99] bg-[#f0f6e8] text-[#597b3e]'
             : 'border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50'
         }`}
       >
@@ -536,7 +537,7 @@ function ConfirmInput({
         disabled={disabled}
         className={`flex-1 py-2 rounded-lg border ${compact ? 'text-xs' : 'text-sm'} font-medium transition-all ${
           selected === 'no'
-            ? 'border-emerald-300 bg-emerald-50 text-emerald-700'
+            ? 'border-[#b6cf99] bg-[#f0f6e8] text-[#597b3e]'
             : 'border-zinc-200 bg-white text-zinc-700 hover:border-zinc-300 hover:bg-zinc-50'
         }`}
       >
@@ -586,15 +587,15 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
   const textSm = compact ? 'text-xs' : 'text-sm';
 
   return (
-    <div className="overflow-hidden rounded-lg border border-zinc-200 bg-white">
+    <div className={`aegis-question ${compact ? 'is-compact' : ''} overflow-hidden rounded-2xl border border-[#dfe8d4] bg-white`}>
       {/* Header */}
-      <div className={`${px} flex items-center gap-2 border-b border-zinc-100 bg-white py-2`}>
-        <CircleHelp className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} flex-shrink-0 text-emerald-500`} />
+      <div className="aegis-question-heading">
+        <CircleHelp className={`${compact ? 'h-3.5 w-3.5' : 'h-4 w-4'} flex-shrink-0 text-[#789c56]`} />
         <span className={`${textSm} font-medium text-zinc-700`}>{t('question.needsAnswer')}</span>
       </div>
 
       {/* Questions */}
-      <div className={`${px} ${py} space-y-4`}>
+      <div className={`aegis-question-body ${px} ${py} space-y-4`}>
         {questions.map((q, qIdx) => {
           if (isInlineTextFollowUp(questions[qIdx - 1], q)) return null;
 
@@ -609,13 +610,13 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
           const inlineFollowUpAnswer = inlineFollowUp ? (answers[inlineFollowUpIdx] ?? []) : [];
 
           return (
-            <div key={qIdx}>
+            <div key={qIdx} className="aegis-question-section">
               {q.header && (
-                <div className={`${compact ? 'text-[11px]' : 'text-xs'} mb-0.5 font-medium text-zinc-500`}>
+                <div className="aegis-question-label">
                   {q.header}
                 </div>
               )}
-              <div className={`${textSm} mb-2 font-medium text-zinc-800`}>{q.question}</div>
+              <div className="aegis-question-copy">{q.question}</div>
 
               {type === 'choice'   && <ChoiceInput   {...inputProps} />}
               {inlineFollowUp && (
@@ -647,11 +648,11 @@ export function QuestionTool({ questions, onAnswer, onReject, compact = false }:
         })}
 
         {/* Action buttons */}
-        <div className="flex gap-2 pt-1">
+        <div className="aegis-question-footer flex gap-2 pt-1">
           <button
             onClick={handleSubmit}
             disabled={submitting || !canSubmit}
-            className={`flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-emerald-600 py-2 ${textSm} font-medium text-white transition-colors hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-40`}
+            className={`aegis-question-submit flex items-center justify-center gap-1.5 rounded-xl bg-[#a2c67b] px-6 py-2 ${textSm} font-semibold text-[#293b20] transition-colors hover:bg-[#94b96f] disabled:cursor-not-allowed disabled:opacity-40`}
           >
             {submitting
               ? <Loader2 className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} />

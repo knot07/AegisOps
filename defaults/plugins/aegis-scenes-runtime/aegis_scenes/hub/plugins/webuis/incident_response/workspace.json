@@ -1,0 +1,23 @@
+{
+  "id": "incident_response",
+  "version": "1.0.0",
+  "title": "应急响应",
+  "icon": "ShieldAlert",
+  "order": 30,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "incident",
+  "sections": [
+    {
+      "id": "overview",
+      "label": "响应工作台",
+      "pageIds": [
+        "incident"
+      ],
+      "defaultPageId": "incident",
+      "contentPadding": "none",
+      "flat": true,
+      "icon": "ShieldAlert"
+    }
+  ]
+}

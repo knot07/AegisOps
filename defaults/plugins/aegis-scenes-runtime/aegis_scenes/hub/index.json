@@ -76,6 +76,44 @@
       "trust": "community",
       "riskLevel": "medium",
       "manifestPath": "plugins/components/vuln-ops-scene/manifest.json"
+    },
+    {
+      "id": "incident_response",
+      "type": "webui",
+      "name": "应急响应",
+      "nameCn": "应急响应",
+      "description": "告警下发、日志关联、远程调查、样本分析与证据报告",
+      "descriptionCn": "告警下发、日志关联、远程调查、样本分析与证据报告",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "incident-response"
+      ],
+      "trust": "community",
+      "riskLevel": "high",
+      "manifestPath": "plugins/webuis/incident_response/manifest.json"
+    },
+    {
+      "id": "incident-response-scene",
+      "type": "component",
+      "name": "应急响应",
+      "nameCn": "应急响应",
+      "description": "告警下发、日志关联、远程调查、样本分析与证据报告",
+      "descriptionCn": "告警下发、日志关联、远程调查、样本分析与证据报告",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "incident-response"
+      ],
+      "trust": "community",
+      "riskLevel": "high",
+      "manifestPath": "plugins/components/incident-response-scene/manifest.json"
     }
   ]
 }

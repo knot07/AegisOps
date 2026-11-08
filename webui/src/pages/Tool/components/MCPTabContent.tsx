@@ -1,3 +1,4 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -550,12 +551,12 @@ export default function MCPTabContent({
               <div
                 key={id}
                 {...groupDrag.dragProps(id)}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ' max-md:min-w-[48rem]'}`}
-                style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
+                className={`aegis-resource-surface grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ' max-md:min-w-[48rem]'}`}
+                style={{...resourceStyle('mcp',server.name || id), gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)'}}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${isActive ? 'bg-green-50' : isError ? 'bg-red-50' : 'bg-gray-50'}`}>
-                  <Server className={`w-4 h-4 ${isActive ? 'text-green-600' : isError ? 'text-red-500' : 'text-gray-400'}`} />
+                  <ResourceIdentity kind="mcp" name={server.name || id} compact />
                 </div>
 
                 {/* Name + description.
@@ -760,11 +761,11 @@ export default function MCPTabContent({
               <MCPToolDetailPanel tool={selectedToolFromMCP} onClose={() => setSelectedToolFromMCP(null)} />
             )}
 
-            <div data-yushu-drawer className="fixed right-0 top-0 bottom-0 z-50 flex flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+            <div data-yushu-drawer data-resource-config={selectedServer} className="aegis-resource-config aegis-resource-detail aegis-service-detail fixed right-0 top-0 bottom-0 z-50 flex flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH, ...resourceStyle('mcp',selectedServer || '',displayName) }} onClick={(e) => e.stopPropagation()}>
               <div className="flex-shrink-0 border-b border-gray-200">
                 <div className="flex items-center gap-3 px-6 py-4">
                   <div className={`w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 ${drawerServer.status === 'connected' ? 'bg-green-50' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'bg-red-50' : 'bg-gray-50'}`}>
-                    <Database className={`w-5 h-5 ${drawerServer.status === 'connected' ? 'text-green-600' : drawerServer.status === 'error' || drawerServer.status === 'failed' ? 'text-red-600' : 'text-gray-400'}`} />
+                    <ResourceIdentity kind="mcp" name={selectedServer} label={displayName} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>

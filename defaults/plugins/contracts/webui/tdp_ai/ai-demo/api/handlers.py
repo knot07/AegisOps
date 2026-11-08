@@ -556,6 +556,7 @@ async def dashboard(ctx, request):
         for index, row in enumerate(all_rows):
             row["last_time"] = end_time - max(1, int(span * (((index * 7) % 41) + 1) / 43))
             row["first_time"] = max(start_time, row["last_time"] - max(1, span // 60))
+        store.replace_summary("incident-preview", all_rows)
         _seed_demo_results(store, all_rows, start_time, end_time)
         total = len(all_rows)
         start = (page - 1) * page_size

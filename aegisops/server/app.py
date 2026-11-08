@@ -1438,6 +1438,7 @@ from aegisops.server.routes.knowledgebase import create_router as create_knowled
 from aegisops.server.routes.workspace import router as workspace_router
 # Update (self-upgrade)
 from aegisops.server.routes.update import router as update_router
+from aegisops.server.release_updates import router as release_updates_router
 # Log viewing
 from aegisops.server.routes.logs import router as logs_router
 from aegisops.server.routes.monitoring import router as monitoring_router
@@ -1452,6 +1453,7 @@ from aegisops.server.routes.webui import router as webui_pages_router
 from aegisops.server.routes.contracts import router as contracts_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
+app.include_router(release_updates_router)
 app.include_router(public_health_router, tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
 app.include_router(provider_router, prefix="/api/provider", tags=["Provider"])

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "hub.component.v1",
+  "id": "incident-response-scene",
+  "name": "应急响应",
+  "components": [
+    {
+      "type": "webui",
+      "id": "incident_response"
+    }
+  ]
+}

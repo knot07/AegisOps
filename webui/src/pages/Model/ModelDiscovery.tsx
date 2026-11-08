@@ -1,3 +1,4 @@
+import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
@@ -457,7 +458,7 @@ export default function ModelDiscovery({
     setDirty(true);
   };
   return (
-    <section aria-label={t('compact.modelList')} className="space-y-3">
+    <section aria-label={t('compact.modelList')} className="aegis-model-discovery space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 className="text-sm font-semibold text-gray-900">
           {t('compact.modelList')}{' '}
@@ -551,7 +552,8 @@ export default function ModelDiscovery({
             className="max-h-96 divide-y divide-gray-100 overflow-y-auto rounded-lg border border-gray-200"
           >
             {visible.map((row) => (
-              <li key={row.id} className="flex items-center gap-2 px-3 py-3">
+              <li key={row.id} style={brandStyle(`${row.id} ${row.name}`)} className="aegis-discovery-row flex items-center gap-2 px-3 py-3">
+                <ModelBrandIcon value={`${row.id} ${row.name}`} />
                 <span className="min-w-0 flex-1 break-all text-sm text-gray-800">
                   {row.name || row.id}
                 </span>

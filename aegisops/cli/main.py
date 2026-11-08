@@ -72,7 +72,7 @@ startup_env.load()
 
 app = typer.Typer(
     name="aegisops",
-    help="AegisOps - AI-Native SecOps tool",
+    help="AegisOps - AI-Native Security Operations",
     add_completion=True,
     no_args_is_help=True,
 )
@@ -272,9 +272,9 @@ def main_callback(
     log_level: str = typer.Option(LogLevel.INFO, "--log-level", help="Log level (DEBUG, INFO, WARN, ERROR)"),
 ):
     """
-    AegisOps - AI-powered development tool
+    AegisOps - AI-powered security operations
 
-    AegisOps Python implementation
+    AegisOps command-line interface
     """
     normalized_level = (log_level or "").strip().upper()
     if normalized_level not in _LOG_LEVELS:

@@ -1,3 +1,4 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
@@ -84,13 +85,13 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
 
   return (
     <div data-yushu-create-overlay className="fixed inset-0 bg-gray-600 bg-opacity-75 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] min-h-0 flex flex-col" onClick={(e) => e.stopPropagation()}>
+      <div data-resource-config={tool.name} style={resourceStyle('tool',tool.name,tool.source_name || '')} className="aegis-resource-config bg-white rounded-xl shadow-2xl max-w-2xl w-full mx-4 max-h-[85vh] min-h-0 flex flex-col" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="px-6 py-4 border-b border-gray-200 flex-shrink-0">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-3">
               <div className="w-10 h-10 bg-gray-50 rounded-lg flex items-center justify-center">
-                <Wrench className="w-5 h-5 text-gray-600" />
+                <ResourceIdentity kind="tool" name={tool.name} label={tool.source_name || ''} />
               </div>
               <div>
                 <h2 className="text-lg font-semibold text-gray-900 font-mono">{tool.name}</h2>
@@ -109,7 +110,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
           </div>
           <div className="flex space-x-4 mt-4">
             <button
-              onClick={() => setSection('info')}
+              onClick={() => setSection('info')} data-resource-config-tab aria-selected={section==='info'}
               className={`flex items-center text-sm font-medium pb-2 border-b-2 transition-colors ${
                 section === 'info' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
@@ -117,7 +118,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
               <Info className="w-4 h-4 mr-1.5" />{t('toolDetail.tabInfo')}
             </button>
             <button
-              onClick={() => setSection('test')}
+              onClick={() => setSection('test')} data-resource-config-tab aria-selected={(section as string)==='test'}
               className={`flex items-center text-sm font-medium pb-2 border-b-2 transition-colors ${
                 section === 'test' ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'
               }`}
@@ -314,7 +315,7 @@ export default function ToolDetailModal({ tool, initialSection, deviceId, onClos
           </button>
           {section === 'info' && (
             <button
-              onClick={() => setSection('test')}
+              onClick={() => setSection('test')} data-resource-config-tab aria-selected={(section as string)==='test'}
               className="px-4 py-2 bg-red-600 rounded-lg text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center"
               disabled={!canDirectTest}
               title={canDirectTest ? undefined : t('toolDetail.sessionTestOnly')}

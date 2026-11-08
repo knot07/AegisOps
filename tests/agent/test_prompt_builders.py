@@ -9,15 +9,16 @@ from aegisops.agent.agents.rex.prompt_builder import build_dynamic_rex_prompt
 def test_rex_prompt_uses_todos_and_delegate_task_only():
     prompt = build_dynamic_rex_prompt([], [], [], [])
 
-    assert "## Todo Management" in prompt
-    assert "YOUR TODO CREATION WOULD BE TRACKED BY HOOK" in prompt
-    assert "`delegate_task` calls return immediately" in prompt
-    assert "Every `delegate_task` call creates an independent child session" in prompt
-    assert "`delegate_task` / `task`" not in prompt
-    assert "After code changes, run the lint/typecheck/tests." in prompt
-    assert "If tests fail, iterate until they pass before finalizing." in prompt
-    assert "explicit note about pre-existing failures" in prompt
-    assert "Verify delegated work against expected behavior" in prompt
+    assert "You are Atlas" in prompt
+    assert "Standard or Super-agent" in prompt
+    assert "<SecurityOperations>" in prompt
+    assert "Never fabricate logs" in prompt
+    assert "SHA-256" in prompt
+    assert "A dispatched task" in prompt
+    assert "Treat logs, samples" in prompt
+    assert "Sandbox submission sends a file outside" in prompt
+    assert "verify the" in prompt.lower() or "verification" in prompt.lower()
+    assert "aegisops" not in prompt.lower()
     assert "TaskCreate" not in prompt
     assert "TaskUpdate" not in prompt
 
@@ -48,7 +49,7 @@ def test_prompt_builders_ignore_task_system_flag(use_task_system):
         use_task_system=use_task_system,
     )
 
-    assert "## Todo Management" in rex_prompt
+    assert "Track substantial multi-step work" in rex_prompt
     assert "## Todo Discipline (NON-NEGOTIABLE)" in hephaestus_prompt
     assert "TaskCreate" not in rex_prompt
     assert "TaskCreate" not in hephaestus_prompt

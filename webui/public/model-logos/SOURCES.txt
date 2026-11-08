@@ -1,0 +1,3 @@
+Model brand SVGs: @lobehub/icons-static-svg, https://github.com/lobehub/lobe-icons (MIT).
+ThreatBook: official website header artwork, https://assets.threatbook.cn/prod/_next/static/media/logo_small.a636fb23.svg
+Brand marks belong to their respective owners.

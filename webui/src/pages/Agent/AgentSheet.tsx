@@ -1,3 +1,9 @@
+import ResourceDetailSummary from '@/components/common/ResourceDetailSummary';
+import AgentModelPicker from '@/components/common/AgentModelPicker';
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
+import SchedulingModePicker, {type SchedulingMode} from '@/components/common/SchedulingModePicker';
+import {getAgentDisplayName} from '@/utils/agentDisplay';
+import {AgentIdentity} from '@/components/common/VisualIdentity';
 /**
  * AgentSheet — 统一的 Agent 创建/编辑侧边面板
  *
@@ -60,6 +66,9 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   const { t } = useTranslation(['agent', 'common']);
   const isEdit = !!agent;
   const isNative = !!agent?.native;
+  const isAtlas = /^(rex|atlas)$/i.test(agent?.name || '');
+  const [schedulingMode,setSchedulingMode] = useState<SchedulingMode>('legacy');
+  useEffect(()=>{if(isAtlas) client.get('/api/agent/atlas/scheduling').then(r=>setSchedulingMode(r.data.mode)).catch(()=>{});},[isAtlas]);
 
   const [formData, setFormData] = useState<AgentFormData>({
     name: agent?.name ?? '',
@@ -88,7 +97,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
   const editGuideGroups = useMemo(() => {
     const guideActionKey = isNative ? 'edit.nativeGuideActions' : 'edit.guideActions';
     const caseActionKey = isNative ? 'edit.nativeCaseActions' : 'edit.caseActions';
-    const name = formData.name || agent?.name || 'Agent';
+    const name = getAgentDisplayName({name:formData.name || agent?.name || 'Agent'});
 
     return buildGuidedCreateGroups([
       {
@@ -162,15 +171,9 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
     }).catch(() => {}).finally(() => setSkillsLoading(false));
   }, []);
 
-  useEffect(() => {
-    if (!modelsLoaded || !formData.modelKey) return;
-    const selectedStillAvailable = availableModels.some(
-      (model) => `${model.providerID}::${model.modelID}` === formData.modelKey,
-    );
-    if (!selectedStillAvailable) {
-      setFormData((prev) => ({ ...prev, modelKey: '' }));
-    }
-  }, [availableModels, formData.modelKey, modelsLoaded]);
+  // Preserve existing model overrides when a provider is temporarily unavailable.
+  // Opening or saving the editor must never silently clear an operator's model.
+
 
   const submitDisabled = false;
 
@@ -205,6 +208,7 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
           skills: formData.skills,
         });
       }
+      if(isAtlas) await client.put('/api/agent/atlas/scheduling', {mode:schedulingMode});
       onSaved();
       onClose();
     } catch (err: any) {
@@ -328,18 +332,21 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
       open
       mode={isEdit ? 'edit' : 'create'}
       entityType="Agent"
-      entityName={agent?.name}
-      icon={<Bot className="w-5 h-5" />}
+      entityName={getAgentDisplayName(agent)}
+      resizable={false}
+      surfaceClassName="aegis-agent-editor aegis-resource-detail"
+      surfaceStyle={resourceStyle('agent',agent?.name || 'custom-agent',agent?.nameCn || '')}
+      icon={<AgentIdentity name={agent?.name || 'custom-agent'} label={agent?.nameCn || ''} />}
       rexSystemContext={buildRexContext(formData, isEdit, isNative)}
-      rexWelcomeMessage={buildRexWelcome(isEdit, agent?.name, isNative)}
+      rexWelcomeMessage={buildRexWelcome(isEdit, getAgentDisplayName(agent), isNative)}
       rexGuideGroups={guideGroups}
       rexGuidePanelTitle={isEdit ? t('edit.guidePanelTitle') : t('create.guidePanelTitle')}
       rexGuidePanelDesc={isEdit
-        ? t(isNative ? 'edit.nativeGuidePanelDesc' : 'edit.guidePanelDesc', { name: agent?.name ?? formData.name })
+        ? t(isNative ? 'edit.nativeGuidePanelDesc' : 'edit.guidePanelDesc', { name: getAgentDisplayName(agent) || formData.name })
         : t('create.guidePanelDesc')}
       rexGuideEmptyTitle={isEdit ? t('edit.emptyStateTitle') : t('create.emptyStateTitle')}
       rexGuideIcon={<Bot className="h-5 w-5" />}
-      initialTab={isEdit ? 'rex' : undefined}
+      initialTab={isEdit ? 'form' : undefined}
       rexSessionStorageKey={isEdit && agent?.name ? `agent-edit:${agent.name}` : undefined}
       {...rexComposerControls}
       submitDisabled={submitDisabled}
@@ -362,6 +369,8 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
         toolsLoading={toolsLoading}
         skillsLoading={skillsLoading}
         isPrimary={isPrimary}
+        schedulingMode={isAtlas ? schedulingMode : undefined}
+        onSchedulingChange={setSchedulingMode}
       />
     </EntitySheet>
   );
@@ -370,6 +379,8 @@ export default function AgentSheet({ agent, onClose, onSaved }: AgentSheetProps)
 // ─── AgentFormContent ─────────────────────────────────────────────────────────
 
 interface AgentFormContentProps {
+  schedulingMode?: SchedulingMode;
+  onSchedulingChange?: (value:SchedulingMode)=>void;
   formData: AgentFormData;
   onChange: (data: AgentFormData) => void;
   nameEditable: boolean;
@@ -385,6 +396,7 @@ interface AgentFormContentProps {
 }
 
 function AgentFormContent({
+  schedulingMode,onSchedulingChange,
   formData,
   onChange,
   nameEditable,
@@ -400,16 +412,6 @@ function AgentFormContent({
   const { t } = useTranslation('agent');
   const { openRex } = useEntitySheet();
   const update = (fields: Partial<AgentFormData>) => onChange({ ...formData, ...fields });
-
-  const modelsByProvider = availableModels.reduce<Record<string, AvailableModel[]>>((acc, m) => {
-    if (!acc[m.providerID]) acc[m.providerID] = [];
-    acc[m.providerID].push(m);
-    return acc;
-  }, {});
-  const providerLabelById = availableModels.reduce<Record<string, string>>((acc, m) => {
-    acc[m.providerID] = m.providerName;
-    return acc;
-  }, {});
 
   const defaultModelLabel = defaultModel
     ? `${defaultModel.modelID} (${defaultModel.providerID})`
@@ -437,17 +439,21 @@ function AgentFormContent({
   };
 
   return (
-    <div className="space-y-4">
+    <div className="aegis-agent-form aegis-detail-form space-y-5">
+      <ResourceDetailSummary kind="agent" name={formData.name} title={getAgentDisplayName({name:formData.name,nameCn:formData.nameCn}) || '新智能体'}
+        badges={[nativeReadOnly ? '系统内置' : '自定义智能体',schedulingMode==='superagent' ? 'Router · Super-agent' : isPrimary ? '主智能体' : '执行智能体']}
+        metrics={[{label:'已选工具',value:formData.tools.length},{label:'已选技能',value:formData.skills.length},{label:'模型',value:formData.modelKey.split('::')[1] || '系统默认'}]}/>
+
       {/* Native read-only banner */}
       {nativeReadOnly && (
         <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
           <Lock className="w-3.5 h-3.5 shrink-0" />
-          {t('form.nativeReadOnlyMessage')}
+          {schedulingMode ? 'Atlas 的系统指令由平台维护，可调整模型、温度和新会话默认调度。' : t('form.nativeReadOnlyMessage')}
         </div>
       )}
 
       {/* Name */}
-      <div>
+      <div data-detail-section="identity">
         <label className="block text-sm font-medium text-gray-700 mb-1">
           {t('form.name')} {nameEditable && <span className="text-slate-500">*</span>}
         </label>
@@ -461,13 +467,13 @@ function AgentFormContent({
           />
         ) : (
           <div className="px-4 py-2 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700 font-mono">
-            {formData.name}
+            {getAgentDisplayName({name:formData.name})}
           </div>
         )}
       </div>
 
       {/* Chinese display name */}
-      <div>
+      <div data-detail-section="identity">
         <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
           {t('form.nameCn')}
         </label>
@@ -486,7 +492,7 @@ function AgentFormContent({
       </div>
 
       {/* Description (English) + Chinese UI */}
-      <div>
+      <div data-detail-section="description">
         <label className={`block text-sm font-medium mb-1 ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>{t('form.description')}</label>
         <p className="text-xs text-gray-500 mb-1">{t('form.descriptionHint')}</p>
         <input
@@ -519,7 +525,7 @@ function AgentFormContent({
       </div>
 
       {/* System Prompt with Atlas assist */}
-      <div>
+      <div data-detail-section="prompt">
         <div className="flex items-center justify-between mb-1">
           <label className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
             System Prompt {!nativeReadOnly && <span className="text-slate-500">*</span>}
@@ -548,16 +554,21 @@ function AgentFormContent({
         />
       </div>
 
-      {/* Mode (create only) + Model + Temperature */}
+      {schedulingMode && <section className="aegis-agent-scheduling">
+        <div><h3>调度模式</h3><p>新会话默认使用此模式，也可在对话框中单独切换。</p></div>
+        <SchedulingModePicker scope="default" value={schedulingMode} onChange={onSchedulingChange!}/>
+        <p>标准调度适合日常任务；Super-agent 为实验模式，由 Atlas 分派独立 Worker。</p>
+      </section>}
+      {/* Agent role is independent of scheduling. */}
       <div className="space-y-2.5">
         {/* Mode: 创建时固定为 subagent，编辑时显示当前模式（只读） */}
         {!nameEditable && (
           <div className="flex items-center gap-3">
-            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.mode')}</span>
+            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">角色</span>
             <PillGroup
               options={[
-                { value: 'primary', label: t('form.primaryModeLabel'), activeClass: 'bg-sky-600 text-white border-sky-600' },
-                { value: 'subagent', label: t('form.subagentModeLabel'), activeClass: 'bg-purple-600 text-white border-purple-600' },
+                { value: 'primary', label: schedulingMode==='superagent' ? 'Router（调度）' : t('form.primaryModeLabel'), activeClass: 'bg-[#edf4e5] text-[#526b36] border-[#cddcbe]' },
+                { value: 'subagent', label: schedulingMode==='superagent' ? 'Worker（执行）' : t('form.subagentModeLabel'), activeClass: 'bg-[#edf4e5] text-[#526b36] border-[#cddcbe]' },
               ]}
               value={formData.mode}
               onChange={() => {}}
@@ -568,22 +579,8 @@ function AgentFormContent({
 
         <div className="flex items-center gap-3">
           <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.model')}</span>
-          <select
-            value={formData.modelKey}
-            onChange={(e) => update({ modelKey: e.target.value })}
-            className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-slate-400"
-          >
-            <option value="">— {defaultModelLabel} —</option>
-            {Object.entries(modelsByProvider).map(([pID, pModels]) => (
-              <optgroup key={pID} label={providerLabelById[pID] || pID}>
-                {pModels.map((m) => (
-                  <option key={`${m.providerID}::${m.modelID}`} value={`${m.providerID}::${m.modelID}`}>
-                    {m.label}
-                  </option>
-                ))}
-              </optgroup>
-            ))}
-          </select>
+          <AgentModelPicker value={formData.modelKey} onChange={key=>update({modelKey:key})} models={availableModels} defaultLabel={defaultModelLabel} defaultModelID={defaultModel?.modelID}/>
+
         </div>
 
         <div className="flex items-center gap-3">
@@ -594,15 +591,17 @@ function AgentFormContent({
             max="2"
             step="0.1"
             value={formData.temperature}
-            onChange={(e) => update({ temperature: parseFloat(e.target.value) })}
+            onChange={(e) => {const value=e.target.valueAsNumber;if(Number.isFinite(value))update({temperature:Math.max(0,Math.min(2,value))});}}
+            aria-label="模型温度"
             className="w-28 px-3 py-1.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
           />
         </div>
-
+        <p className="aegis-temperature-help">温度控制回答的随机性：较低更稳定，较高更多样。标准调度与 Super-agent 均适用；此处设置仅作用于 Atlas（Router），Worker 使用各自智能体的模型参数。模型不支持温度或启用限制采样的推理模式时，将自动忽略。</p>
+        {schedulingMode==='superagent' && <p className="aegis-role-help">Atlas 固定为 Router，负责分派任务和汇总证据；Worker 在独立会话中执行。切换调度不会把 Atlas 改成执行节点。</p>}
       </div>
 
       {/* Tools */}
-      <div>
+      <div data-detail-section="tools">
         <div className="flex items-center justify-between mb-2">
           <label className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-700'}`}>
             Tools
@@ -653,7 +652,9 @@ function AgentFormContent({
                   return (
                     <label
                       key={tool.name}
-                      className={`flex items-start gap-3 px-3 py-2 ${
+                      data-agent-resource="tool" data-checked={checked}
+                      style={resourceStyle('tool',tool.name,tool.source_name || tool.category)}
+                      className={`aegis-agent-resource-card flex items-start gap-3 px-3 py-2 ${
                         nativeReadOnly
                           ? 'cursor-not-allowed bg-gray-100'
                           : `cursor-pointer hover:bg-gray-50 transition-colors ${checked ? 'bg-sky-50/60' : ''}`
@@ -666,6 +667,7 @@ function AgentFormContent({
                         onChange={() => toggleTool(tool.name)}
                         className="mt-0.5 h-4 w-4 rounded border-gray-300 text-slate-600 focus:ring-slate-400 shrink-0"
                       />
+                      <ResourceIdentity kind="tool" name={tool.name} label={tool.source_name || tool.category} />
                       <div className="min-w-0">
                         <span className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-800'}`}>{tool.name}</span>
                         {tool.description && (
@@ -731,7 +733,9 @@ function AgentFormContent({
                 return (
                   <label
                     key={skill.name}
-                    className={`flex items-start gap-3 px-3 py-2 ${
+                    data-agent-resource="skill" data-checked={checked}
+                    style={resourceStyle('skill',skill.name,skill.description)}
+                    className={`aegis-agent-resource-card flex items-start gap-3 px-3 py-2 ${
                       nativeReadOnly
                         ? 'cursor-not-allowed bg-gray-100'
                         : `cursor-pointer hover:bg-gray-50 transition-colors ${checked ? 'bg-purple-50/50' : ''}`
@@ -744,6 +748,7 @@ function AgentFormContent({
                       onChange={() => toggleSkill(skill.name)}
                       className="mt-0.5 h-4 w-4 rounded border-gray-300 text-purple-600 focus:ring-purple-500 shrink-0"
                     />
+                    <ResourceIdentity kind="skill" name={skill.name} label={skill.description} />
                     <div className="min-w-0">
                       <span className={`text-sm font-medium ${nativeReadOnly ? 'text-gray-500' : 'text-gray-800'}`}>{skill.name}</span>
                       {skill.description && (

@@ -1,3 +1,4 @@
+import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronDown, Cpu, Info, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -542,7 +543,7 @@ export function ChatModelPicker({
       >
         {autoOption?.selected
           ? <Sparkles className="h-3 w-3 shrink-0" />
-          : <Cpu className="h-3 w-3 shrink-0" />}
+          : <ModelBrandIcon value={selectedModelOption?.modelID || ''} className="is-composer" />}
         <span className="truncate font-medium">
           {autoOption?.selected
             ? t('modelPicker.auto')
@@ -612,6 +613,8 @@ export function ChatModelPicker({
                       {group.models.map((option) => (
                         <button
                           key={option.key}
+                                style={brandStyle(option.modelID)}
+                                data-chat-model-choice={option.modelID}
                           type="button"
                           onClick={() => {
                             onSelectModel(option);
@@ -624,7 +627,7 @@ export function ChatModelPicker({
                           }`}
                         >
                           <div className="flex min-w-0 items-center gap-2">
-                            <Cpu className={`h-3 w-3 shrink-0 ${!autoOption?.selected && selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                            <ModelBrandIcon value={option.modelID} className="is-composer-choice" />
                             <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
                             {option.supportsVision === true && (
                               <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">

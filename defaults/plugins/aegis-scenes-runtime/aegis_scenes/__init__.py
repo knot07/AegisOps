@@ -109,6 +109,10 @@ def register():
     router.add_api_route('/api/scenes/vulnops/{path:path}',forward,methods=['GET','POST','PUT','PATCH','DELETE'])
     from .alert_import import register_import_routes
     register_import_routes(router,native,scene_user,identity,require_user)
+    from .incident import register as register_incident
+    register_incident(router)
+    from .scene_assist import register as register_scene_assist
+    register_scene_assist(router)
     from aegisops.session.superagent_dispatch import install
     install()
     register_route_provider(router,name='aegis-vuln-ops-scene')

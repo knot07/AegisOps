@@ -1,0 +1,64 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "incident_response",
+  "type": "webui",
+  "name": "应急响应",
+  "nameCn": "应急响应",
+  "description": "设备日志关联、SSH/WinRM 远程调查、样本取证、微步沙箱与证据报告。",
+  "descriptionCn": "设备日志关联、SSH/WinRM 远程调查、样本取证、微步沙箱与证据报告。",
+  "version": "1.0.0",
+  "author": "AegisOps",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem",
+    "ndr",
+    "integration"
+  ],
+  "useCases": [
+    "alert-triage",
+    "log-analysis",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow"
+  ],
+  "trust": "community",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/webuis/incident_response"
+  },
+  "compatibility": {
+    "aegisops": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": []
+  },
+  "entrypoints": [
+    "workspace.json"
+  ],
+  "components": [],
+  "checksums": {}
+}

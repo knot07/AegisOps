@@ -657,3 +657,26 @@ def _apply_max_tokens_from_config(
             "max_tokens": options["max_tokens"],
             "configured_max_tokens": configured,
         })
+
+
+def apply_agent_temperature(options: Dict[str, Any], agent: Any, provider_id: str, model_id: str) -> Dict[str, Any]:
+    """Apply per-agent sampling to the actual request, preserving Router/Worker settings.
+
+    Never mutate shared dictionaries. Capability declarations and reasoning APIs
+    that prohibit sampling take priority over an agent's stored preference.
+    """
+    import math
+    result = dict(options)
+    value = getattr(agent, "temperature", None)
+    model = _lookup_raw_model_metadata(provider_id, model_id)
+    capabilities = getattr(model, "capabilities", None)
+    supports = (capabilities.get("supports_temperature", True) if isinstance(capabilities, dict)
+                else getattr(capabilities, "supports_temperature", True))
+    normalized = model_id.lower().split("/")[-1]
+    fixed_sampling = normalized.startswith(("o1", "o3", "o4", "gpt-5"))
+    if not supports or fixed_sampling or result.get("thinking"):
+        result.pop("temperature", None)
+        return result
+    if value is not None and isinstance(value, (int, float)) and not isinstance(value,bool) and math.isfinite(value) and 0 <= value <= 2:
+        result["temperature"] = float(value)
+    return result

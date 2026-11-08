@@ -1,4 +1,4 @@
-import type { HTMLAttributes, MouseEvent, ReactNode } from 'react';
+import type { HTMLAttributes, MouseEvent, ReactNode, CSSProperties } from 'react';
 import { Pencil, Trash2 } from 'lucide-react';
 
 /**
@@ -12,6 +12,9 @@ export const PLUGIN_CARD_GRID_CLASS = 'grid gap-3 grid-cols-[repeat(auto-fill,mi
 
 export interface PluginCardProps {
   icon: ReactNode;
+  style?: CSSProperties;
+  className?: string;
+  iconClassName?: string;
   title: string;
   tags?: ReactNode;
   /** Read-only state badge, shown in the top-right corner. */
@@ -53,7 +56,7 @@ export function PluginSourceTag({ builtin, label }: { builtin: boolean; label: s
 const iconButtonClass = 'inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:text-gray-300 disabled:hover:bg-transparent dark:disabled:text-zinc-600';
 
 export default function PluginCard({
-  icon, title, tags, status, statusControl, description, emptyDescription, meta, layout = 'cards', selected = false, muted = false,
+  icon, style, className = '', iconClassName = '', title, tags, status, statusControl, description, emptyDescription, meta, layout = 'cards', selected = false, muted = false,
   onOpen, deleteLabel, onDelete, deleteDisabledReason, groupButton, extraActions, editLabel, editDisabledReason, dragProps, testId,
 }: PluginCardProps) {
   const list = layout === 'list';
@@ -65,14 +68,15 @@ export default function PluginCard({
     <article
       {...dragProps}
       data-testid={testId}
+      style={{...dragProps?.style,...style}}
       onClick={canOpen ? onOpen : undefined}
-      className={`yushu-plugin-card group relative flex h-full min-w-0 ${canOpen ? 'cursor-pointer' : ''} flex-col rounded-xl border bg-white transition-all duration-150 ${list ? 'lg:flex-row lg:items-center' : ''} ${
+      className={`yushu-plugin-card ${className} group relative flex h-full min-w-0 ${canOpen ? 'cursor-pointer' : ''} flex-col rounded-xl border bg-white transition-all duration-150 ${list ? 'lg:flex-row lg:items-center' : ''} ${
         selected ? 'border-slate-400 shadow-md ring-2 ring-slate-200' : 'border-gray-200 hover:border-gray-300 hover:shadow-md'
       } ${muted ? 'opacity-75' : ''}`}
     >
       <div className={`flex min-w-0 flex-1 flex-col gap-2 px-4 pb-2 pt-3 ${list ? 'lg:flex-row lg:items-center lg:gap-4 lg:py-3' : ''}`}>
         <div className={`flex min-w-0 items-start gap-2.5 ${list ? 'lg:w-64 lg:shrink-0' : ''}`}>
-          <span className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500">
+          <span className={`mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-gray-100 text-gray-500 ${iconClassName}`}>
             {icon}
           </span>
           <div className="min-w-0 flex-1">

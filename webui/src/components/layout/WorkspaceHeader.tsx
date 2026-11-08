@@ -1,3 +1,4 @@
+import SystemUpdateButton from "./SystemUpdateButton";
 import { useContext } from 'react';
 import { ThemeContext, type ThemeMode } from '@/contexts/ThemeContext';
 import { useNavigate } from 'react-router-dom';
@@ -106,6 +107,8 @@ export default function WorkspaceHeader({
             </>
           )}
         </HeaderMenu>
+
+        <SystemUpdateButton className={ICON_BUTTON_CLASS}/>
 
         <HeaderMenu
           placement="above"

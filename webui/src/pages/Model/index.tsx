@@ -1,3 +1,4 @@
+import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
 import { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
@@ -843,10 +844,10 @@ function DashboardStrip({
   return (
     <div className="aegis-model-overview grid shrink-0 grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
       {/* Default Model Card */}
-      <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
+      <div style={brandStyle(defaultModel?.model_id || '')} className="aegis-default-model-brand rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
           <div className="flex items-center gap-2">
-            <Star className="w-5 h-5" />
+            <ModelBrandIcon value={defaultModel?.model_id || ''} className="is-small" />
             <span className="text-xs font-medium">{t('dashboard.defaultModel')}</span>
           </div>
           {onEditDefault && (
@@ -952,12 +953,14 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
     <div
       onClick={onClick}
       aria-selected={isSelected}
+      style={brandStyle(`${provider.id} ${provider.name}`)}
       className={`aegis-provider-card px-3 py-2.5 rounded-lg cursor-pointer transition-all flex items-center gap-2 ${
         isSelected
           ? 'bg-gray-50 border-2 border-gray-400'
           : 'bg-white border border-gray-200 hover:border-gray-300 hover:shadow-sm'
       }`}
     >
+      <ModelBrandIcon value={`${provider.id} ${provider.name}`} />
       <div className={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${dotColor}`} title={
         connStatus === 'connected' ? t('status.connected') : connStatus === 'failed' ? t('status.connectionFailed') : t('status.notTested')
       } />
@@ -1219,12 +1222,13 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
   const pricing = model.pricing;
 
   return (
-    <div className={`aegis-model-row rounded border px-2.5 py-1.5 transition-colors ${
+    <div style={brandStyle(`${model.id} ${model.name}`)} className={`aegis-model-row aegis-model-branded rounded border px-2.5 py-1.5 transition-colors ${
       !enabled
         ? 'bg-gray-100 border-gray-200 opacity-60'
         : 'bg-gray-50 border-gray-200 hover:border-gray-300'
     }`}>
       <div className="flex items-center gap-2 min-w-0">
+        <ModelBrandIcon value={`${model.id} ${model.name}`} />
         <div
           className="flex-1 min-w-0 flex items-center gap-2 flex-wrap cursor-pointer"
           onClick={(e) => { if (onOpenDetail && !(e.target as HTMLElement).closest('button')) onOpenDetail(); }}
@@ -1660,7 +1664,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
 我可以帮你找到 API Key 的获取方式，以及配置建议。`;
 
   return (
-    <EntitySheet
+    <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet"
       open
       mode="create"
       entityType={step === 'add-model' ? t('form.model') : t('configuration.provider')}
@@ -2188,15 +2192,16 @@ Provider: ${provider.name} (${provider.id})
 - 设置正确的价格`;
 
   return (
-    <EntitySheet
+    <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet"
       open
+      surfaceStyle={brandStyle(`${provider.id} ${provider.name}`)}
       mode="create"
       entityType={t('form.model')}
       width={720}
       minWidth={360}
       maxWidth={960}
       entityName={provider.name}
-      icon={<Plus className="w-5 h-5" />}
+      icon={<ModelBrandIcon value={`${provider.id} ${provider.name}`} />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={loading || testing || (method === 'automatic' ? !discoveryReady : !form.isValid)}
@@ -2208,7 +2213,7 @@ Provider: ${provider.name} (${provider.id})
       hideTest={method === 'automatic'}
       initialTab="form"
     >
-      <div className="space-y-4">
+      <div className="aegis-model-create-body space-y-4">
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
           <input
@@ -2366,7 +2371,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
     }
     finally { lock.current = false; setSaving(false); }
   };
-  return <EntitySheet open mode="edit" entityType={t('configuration.provider')} entityName={provider.name} width={720} minWidth={360} maxWidth={960} icon={<Brain className="h-5 w-5" />} rexSystemContext="" rexWelcomeMessage="" hideRex hideTest initialTab="form" submitLabel={t('compact.save')} submitLoading={saving} submitDisabled={saving || !ready || loadingModels} onSubmit={save} onClose={onClose} footerLeft={<button type="button" disabled={saving} onClick={onDelete} className="flex items-center gap-1.5 text-xs text-red-600"><Trash2 className="h-3.5 w-3.5" />{t('form.removeProvider')}</button>}>
+  return <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet" open mode="edit" entityType={t('configuration.provider')} entityName={provider.name} width={720} minWidth={360} maxWidth={960} icon={<Brain className="h-5 w-5" />} rexSystemContext="" rexWelcomeMessage="" hideRex hideTest initialTab="form" submitLabel={t('compact.save')} submitLoading={saving} submitDisabled={saving || !ready || loadingModels} onSubmit={save} onClose={onClose} footerLeft={<button type="button" disabled={saving} onClick={onDelete} className="flex items-center gap-1.5 text-xs text-red-600"><Trash2 className="h-3.5 w-3.5" />{t('form.removeProvider')}</button>}>
     <div className="space-y-6">
       <div className="space-y-4">
         {custom && <label className="block space-y-1.5 text-sm font-medium text-gray-700">{t('configuration.providerName')}<input value={name} disabled={saving} onChange={e => setName(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-normal" /></label>}
@@ -2521,7 +2526,7 @@ function ModelDetailSheet({
   };
 
   return (
-    <EntitySheet
+    <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet"
       open
       mode="edit"
       entityType={t('form.model')}

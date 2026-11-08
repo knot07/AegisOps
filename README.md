@@ -1,197 +1,324 @@
 <div align="center">
 
-<img src="webui/public/favicon.svg" width="76" alt="AegisOps Logo" />
+<img src="webui/public/favicon.svg" width="76" alt="AegisOps" />
 
 # 御枢 · AegisOps
 
-### 让研判有依据，让处置有流程，让整改有跟踪。
+### 从告警研判，到应急取证，再到漏洞整改。
 
-以 AI 对话连接智能体、工具、知识与工作流的安全运营工作台。
+把模型、智能体、工具和业务场景连接起来的 AI 安全运营工作台。
 
-[![License](https://img.shields.io/badge/License-Apache--2.0-568154)](LICENSE.txt)
+[![Release](https://img.shields.io/github/v/release/knot07/AegisOps?color=6f984d)](https://github.com/knot07/AegisOps/releases/latest)
+[![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE.txt)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB)](pyproject.toml)
-[![Node.js](https://img.shields.io/badge/Node.js-22-5FA04E)](webui/package.json)
-[![Release](https://img.shields.io/github/v/release/knot07/AegisOps?color=568154)](https://github.com/knot07/AegisOps/releases/latest)
 
-[功能介绍](#功能一览) · [界面预览](#界面预览) · [快速部署](#快速部署) · [操作手册](DEPLOY.md) · [下载发行版](https://github.com/knot07/AegisOps/releases/latest)
+[下载部署包](https://github.com/knot07/AegisOps/releases/latest) · [部署与操作](DEPLOY.md) · [Windows 指南](WINDOWS.md) · [在线更新](docs/ONLINE-UPDATE.md) · [全部页面预览](#全部页面预览)
 
 </div>
 
-![御枢工作台：任务趋势、执行状态与能力资源](docs/images/overview.png)
+![AegisOps 运营首页](docs/images/pages/home.png)
 
-## 项目介绍
+## 为什么做这个工作台
 
-安全运营中的一次告警，往往需要在设备平台、分析工具、知识文档和漏洞台账之间反复切换。AegisOps 将这些工作放进同一个工作台：从对话发起任务，通过智能体与工作流完成分析，再把确认的问题带入漏洞运营，继续跟进资产、整改和复测。
+日常安全运营常常需要在告警设备、日志查询、主机排查、威胁情报和漏洞台账之间切换。AegisOps 将这些入口放入一套统一界面：Atlas 负责对话与能力调度，工作流约束重复步骤，业务场景承接实际处置与记录。
 
-项目内置 **TDP AI 研判** 与 **漏洞运营** 两个业务场景，同时提供任务中心、插件广场、模型管理和统一用户权限。可以先使用对话与现有工作流，再按实际业务接入模型、设备和工具。
-
-### 一条完整的运营路径
+内置三个可切换工作空间：**告警研判、漏洞运营、应急响应**。可从演示平台熟悉界面，再配置自己的模型、设备与主机连接。新部署不携带任何预置账号或业务数据。
 
 ```mermaid
 flowchart LR
-    A[接入告警与设备] --> B[AI 研判与工作流分析]
-    B --> C[人工确认攻击成功]
-    C --> D[点击操作，由 AI 提取并写入漏洞运营]
-    D --> E[关联资产与整改跟踪]
-    E --> F[复测、关闭与操作留痕]
+ A[设备接入与日志] --> B[告警研判]
+ B --> C[人工确认]
+ C --> D[应急响应与证据]
+ C --> E[转入漏洞库]
+ D --> F[报告与复核]
+ E --> G[分派、整改与复测]
+ H[Atlas / 模型 / 工具 / 知识 / 工作流] -.-> B
+ H -.-> D
+ H -.-> E
 ```
 
-研判和写入需要配置可用模型及设备连接。AI 生成内容可在漏洞运营中核对、补充，最终业务判断仍由操作人员确认。
+## 下载哪个版本
 
-## 功能一览
+Release 仅提供三个文件，按部署方式选择：
 
-| 模块 | 主要功能 | 解决的问题 |
+| 下载 | 适用环境 | 启动方式 |
 | --- | --- | --- |
-| 智能对话 | Atlas 对话入口、模型与 Agent 选择、历史会话、上下文管理 | 从自然语言任务进入分析与执行 |
-| Agent 调度 | 普通调度与实验性 Super-agent 调度，在输入区切换 | 根据任务需要选择调度方式 |
-| 任务与工作流 | 任务查看、工作流创建与预览、内置研判流程 | 将重复的分析步骤组织为可复用流程 |
-| TDP AI 研判 | 告警查看、AI 辅助研判、独立演示页面、人工确认后写入漏洞运营 | 衔接告警分析与后续处置 |
-| 漏洞运营 | 运营总览、漏洞台账、整改工作台、资产目录、操作审计 | 持续跟踪漏洞整改与复测 |
-| 资产目录 | 搜索、新增、编辑、删除；关联漏洞时提供删除保护 | 维护漏洞与资产之间的关系 |
-| 知识与记忆 | 工作目录、知识库、记忆 | 为任务提供文件与知识上下文 |
-| 插件与场景 | 插件搜索与筛选、资源安装、两个场景切换 | 按业务需要扩展能力与界面 |
-| 模型与连接 | 模型配置与用量、设备接入、消息通道配置 | 统一管理外部能力连接 |
-| 账号与权限 | 创建用户、主系统登录、系统角色、漏洞运营访问与业务角色 | 在主系统统一维护成员权限 |
+| [Windows x64](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.08-Windows-x64.zip) | Windows 10/11 x64，附 Python、Node、Git 运行环境 | 解压后双击 `start.cmd` |
+| [Linux](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.08-Linux.zip) | Linux 原生安装或 Docker Compose | `bash install.sh` 或 `docker compose up -d --build` |
+| [Source](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.08-Source.zip) | 二次开发、源码审阅与自定义构建 | 参见部署手册 |
 
-**Super-agent 当前为实验性能力。** 普通调度继续保留，建议先用范围明确的小任务评估效果，再决定如何使用。
+Linux 包和源码包使用同一份完整代码及已构建前端，Linux 包突出部署入口；Windows 包另外附带本机运行环境。首次登录在页面自行设置管理员账号和密码，**没有默认口令**。模型 API Key、设备凭据、业务记录均需自行配置。
 
-## 界面预览
+## 能力与使用边界
 
-以下截图来自独立的干净演示环境。主系统与漏洞运营使用空业务数据；告警研判截图来自标明“演示环境”的页面。实际统计随任务执行和业务录入变化。
+| 能力 | 当前实现 |
+| --- | --- |
+| AI 对话与调度 | 保留普通调度及实验性 Super-agent；后者采用 Router / Worker 职责，建议以小范围任务评估 |
+| 接入设备 | 厂商模板、手动配置、Atlas 辅助梳理；非 TDP 设备需按真实 API、日志样本和字段映射调整流程 |
+| 告警闭环 | 正式与演示平台分开；人工确认后触发漏洞入库或应急事件 |
+| 漏洞运营 | 台账、整改、资产、审计，统一成员权限 |
+| 应急响应 | 受控流程 + AI 分析，SSH / WinRM 只读采集、证据管理、样本摘要、微步沙箱与报告 |
+| 在线更新 | 管理员手动检查，SHA256 校验、数据及代码备份、重启检查、失败回滚 |
 
-### 对话工作台
+AI 功能需要可用模型；设备和沙箱功能需要实际接口权限。沙箱报告属于外部分析依据，不能直接等同攻击者身份归因。当前不包含 EDR 远程响应，也不承诺无人工确认的自动处置。远程主机和微步集成需要在自己的授权环境完成连接验证。
 
-历史会话、模型选择、执行模式和调度入口集成在对话界面，减少任务执行时的页面跳转。截图环境未配置模型，实际使用前需在模型清单完成配置。
+## 快速开始
 
-![对话工作台：历史会话、任务入口与调度模式选择](docs/images/conversation.png)
+Windows：完整解压后运行 `start.cmd`，访问启动窗口显示的地址（默认 `http://127.0.0.1:5200`）。可先运行 `start.cmd --check` 检查运行环境。
 
-### 工作流编排
+Linux 原生：准备 Python 3.12、Node.js 22+ 与 npm，然后执行：
 
-在同一入口管理工作流、查看流程详情并创建新流程。发行版包含 `datang-tdp-fixed-review` 研判工作流；设备凭据与模型参数由部署者重新配置。
-
-![工作流：已安装流程与创建入口](docs/images/workflows.png)
-
-### 告警研判
-
-通过业务场景查看告警、研判结果与关联信息。人工确认攻击成功后，可触发 AI 提取告警中的漏洞信息并写入漏洞运营，继续跟踪后续整改。不局限于Tdp，可接入其他态势感知设备，将对应的设备接入方式交给对话中的ai让他帮你配置，改造即可。
-
-![TDP AI 研判：独立演示环境](docs/images/alert-review.png)
-
-### 漏洞运营
-
-以运营总览为入口，通过顶部标签切换漏洞台账、整改工作台、资产目录和操作审计。成员与权限在主系统统一维护。
-
-![漏洞运营：运营指标、趋势与顶部业务导航](docs/images/vulnerability-operations.png)
-
-### 插件广场
-
-按资源类型浏览，结合搜索、使用场景、技术标签和安装状态筛选插件。智能体、技能、工具、工作流及场景资源在统一目录中管理。
-
-![插件广场：资源分类、搜索与组合筛选](docs/images/plugins.png)
-
-<details>
-<summary><strong>查看场景管理截图</strong></summary>
-
-两个业务场景可从场景管理进入，也可以通过工作空间入口切换。
-
-![场景管理：TDP AI 研判与漏洞运营](docs/images/scenes.png)
-
-</details>
-
-## 快速部署
-
-只需按用途选择一个包，手册和校验清单已包含在包内：
-
-| 用途 | 下载 | 开始使用 |
-| --- | --- | --- |
-| Linux 部署 | [Linux.zip](https://github.com/knot07/AegisOps/releases/download/v2026.11.06/AegisOps-2026.11.06-Linux.zip) | 解压后阅读 `README.md`，执行 `bash install.sh` |
-| Windows 使用 | [Windows-x64.zip](https://github.com/knot07/AegisOps/releases/download/v2026.11.06/AegisOps-2026.11.06-Windows-x64.zip) | 完整解压后双击 `start.cmd` |
-| 二次开发 | [Source.zip](https://github.com/knot07/AegisOps/releases/download/v2026.11.06/AegisOps-2026.11.06-Source.zip) | 完整源码，需要安装依赖并构建 |
-
-### Windows 便携版
-
-Windows 10 / 11 x64 用户选择上表的 **Windows-x64.zip**，完整解压后双击 `start.cmd`。包内提供 Python、Node、Git for Windows、依赖和前端，启动基础服务无需额外安装 Docker、WSL 或开发环境。
-
-如果电脑缺少 Microsoft Visual C++ x64 运行库，按提示运行包内的微软官方安装程序。首次打开系统后自行设置管理员，再配置自己的模型和设备连接。完整说明见 [Windows 部署手册](WINDOWS.md)，实际测试范围见包内验证记录。
-
-### 方式一：Docker Compose
-
-准备 Docker Engine 与 Compose v2；Windows 可使用 Docker Desktop 的 Linux 容器模式。
-
-```sh
-git clone https://github.com/knot07/AegisOps.git
-cd AegisOps
-docker compose up -d --build
-```
-
-浏览器访问 **http://127.0.0.1:5200**，首次进入时自行设置管理员账号和密码，系统没有预置账号。
-
-默认只向本机开放。局域网访问、端口调整、数据卷及备份方式见 [部署与操作手册](DEPLOY.md)。
-
-### 方式二：Linux / WSL 原生部署
-
-准备 Python **3.12**、Node.js **22**、npm、Git 及 Python venv。
-
-```sh
-git clone https://github.com/knot07/AegisOps.git
-cd AegisOps
+```bash
 bash install.sh
 .venv/bin/python run.py --host 127.0.0.1 --port 5200
 ```
 
-可通过 `--data-dir /your/data/path` 指定持久化数据目录。WSL 建议将项目放在 Linux 文件系统内。
+Docker：
 
-### 方式三：下载部署包
-
-到 [Releases](https://github.com/knot07/AegisOps/releases/latest) 下载干净部署包并解压，按随附手册部署。部署包包含已构建的主界面；从源码构建时会生成前端资源。
-
-Linux 安装与源码构建需要联网下载依赖或基础镜像。Windows 便携包已提供运行时及依赖；外部模型和设备功能仍需要相应连接。
-
-## 首次使用
-
-1. **创建管理员**：打开系统，设置自己的账号和密码。
-2. **配置模型**：在模型清单填写接口、模型标识和密钥，测试连接并设置默认模型。
-3. **接入设备**：配置实际设备地址与认证信息，再运行相关研判流程。
-4. **确认场景**：打开场景管理，检查告警研判与漏洞运营是否可进入。
-5. **创建成员**：在账号管理新增用户，并分配系统角色和漏洞运营权限。
-6. **验证流程**：用测试告警验证研判与写入，在漏洞运营中核对结果，再验证整改操作和数据持久化。
-
-## 数据与部署说明
-
-- **干净交付**：不含现有用户、密码、聊天记录、漏洞、资产、模型密钥或设备凭据。
-- **持久化**：Docker 使用命名数据卷；原生启动默认使用项目内 `runtime/`，也可指定独立目录。
-- **备份**：停止服务后完整备份数据根目录，包含配置、数据库、工作文件、插件和隐藏文件。不要只复制数据库。
-- **外部依赖**：AI、设备接口及消息渠道需要部署者提供有效连接和凭据。
-- **操作手册**：部署、使用、备份、迁移与常见问题均在 [DEPLOY.md](DEPLOY.md)。
-
-## 项目结构
-
-```text
-AegisOps/
-├── aegisops/             # 后端服务、Agent、调度与业务接口
-├── webui/               # Web 前端源码与公共资源
-├── defaults/
-│   ├── plugins/         # 内置插件、工作流与场景运行时
-│   └── hub/             # 插件广场本地资源目录
-├── tests/               # 后端测试
-├── docs/images/         # 项目界面截图
-├── run.py               # 服务启动与数据目录初始化
-├── install.sh           # Linux / WSL 原生安装
-├── Dockerfile
-├── compose.yaml
-└── DEPLOY.md            # 部署与操作手册
+```bash
+docker compose up -d --build
 ```
 
-## 验证状态
+创建管理员 → 配置模型 → 按需接入设备 → 切换业务场景。详细配置、数据路径与升级方式见 [部署与操作手册](DEPLOY.md)。
 
-已完成前端生产构建、独立空数据目录启动、首次管理员初始化与登录、权限接口检查、两个场景页面构建和研判工作流加载；账号初始化及调度相关后端测试 **20 项通过**。
+## 全部页面预览
 
-原生验证复用了已有依赖。完整在线依赖安装及 Docker 镜像构建尚未实测，部署后请按手册中的验收流程检查。AI 研判效果取决于模型能力、连接配置与输入数据。
+以下截图来自本次发行版的独立安装环境。域名、IP、资产、漏洞和应急事件均为演示数据；应急截图没有执行真实主机调查。部署包不包含这些演示业务记录。空状态截图展示首次配置时的真实页面。
 
-## 反馈与贡献
+### 1. 运营首页
 
-欢迎通过 [Issues](https://github.com/knot07/AegisOps/issues) 反馈问题或提出功能建议，通过 Pull Request 提交改进。反馈时请附复现步骤、版本和脱敏日志，不要提交真实密钥、设备凭据或业务数据。
+查看任务趋势、执行概况与能力资源，通过趋势图掌握工作台的运行情况。
 
-## 许可证
+![运营首页](docs/images/pages/home.png)
 
-项目使用 [Apache License 2.0](LICENSE.txt)。随附插件、技能及第三方资源的许可要求以各自目录中的声明为准。
+
+### 2. Atlas 对话
+
+通过自然语言提出任务，选择模型、智能体、技能和工作流；历史会话集成在同一工作台。普通调度与实验性 Super-agent 调度均保留。
+
+![Atlas 对话](docs/images/pages/chat.png)
+
+
+### 3. 任务中心
+
+集中查看任务状态和执行记录，定位任务、了解进度并追踪输出。
+
+![任务中心](docs/images/pages/tasks.png)
+
+
+### 4. 智能体
+
+为不同分析职责维护独立角色、模型、系统提示词及工具权限。Atlas 使用专属品牌图标，其他智能体采用各自的图标和主题色。
+
+![智能体](docs/images/pages/agents.png)
+
+
+### 5. 技能库
+
+管理可复用的分析方法与操作指导；厂商相关技能展示对应标识，详情和编辑界面采用统一的浅色主题。
+
+![技能库](docs/images/pages/skills.png)
+
+
+### 6. 工作流
+
+管理、创建和预览可复用流程。内置研判流程需按实际设备接口和字段样本配置，不能直接假定适配所有厂商。
+
+![工作流](docs/images/pages/workflows.png)
+
+
+### 7. 工作目录
+
+查看任务文件和工作产物，与记忆、知识通过顶部标签切换。
+
+![工作目录](docs/images/pages/workspace.png)
+
+
+### 8. 知识库
+
+维护知识文件与数据集，为模型提供业务背景、设备手册和分析参考。检索及嵌入能力需要相应模型配置。
+
+![知识库](docs/images/pages/knowledge.png)
+
+
+### 9. 记忆
+
+查看和维护长期上下文，减少重复说明，支持按实际任务整理有价值的信息。
+
+![记忆](docs/images/pages/memory.png)
+
+
+### 10. 工具清单
+
+统一浏览工具能力及详情，管理 MCP、API 等连接；知名厂商能力使用对应品牌标识。工具执行仍取决于实际凭据及权限。
+
+![工具清单](docs/images/pages/tools.png)
+
+
+### 11. 设备接入
+
+按厂商展示接入模板和品牌配色，支持已知参数的手工接入，也可通过 Atlas 根据配置手册辅助梳理接口与字段。
+
+![设备接入](docs/images/pages/devices.png)
+
+
+### 12. 模型清单
+
+管理模型提供商、接口与模型用量。发行包不预置 API Key，首次部署需自行配置可用模型。
+
+![模型清单](docs/images/pages/models.png)
+
+
+### 13. 通道配置
+
+维护消息平台等外部通道的配置，配置页跟随各平台的主题配色。
+
+![通道配置](docs/images/pages/channels.png)
+
+
+### 14. 插件广场
+
+按资源类型、场景和标签筛选插件，统一管理智能体、技能、工具、工作流与场景扩展。
+
+![插件广场](docs/images/pages/hub.png)
+
+
+### 15. 告警研判：演示平台
+
+固定样例展示告警趋势、攻击分布及研判结果。页面明确标注演示，不连接生产设备。
+
+![告警研判：演示平台](docs/images/pages/review.png)
+
+
+### 16. 告警研判：正式平台
+
+正式入口与演示入口同时保留。接入设备和模型后开展研判；人工确认后可转入漏洞库，或下发应急响应。截图为未接入真实设备的初始状态。
+
+![告警研判：正式平台](docs/images/pages/review-live.png)
+
+
+### 17. 漏洞运营：运营总览
+
+集中展示风险分布、整改进度与业务统计；顶部切换台账、整改、资产和审计。以下业务记录均为专门建立的演示数据，不随部署包提供。
+
+![漏洞运营：运营总览](docs/images/pages/vuln-overview.png)
+
+
+### 18. 漏洞运营：漏洞台账
+
+统一登记风险、严重程度、责任人与关联资产；支持搜索、筛选和查看详情，以颜色区分风险。
+
+![漏洞运营：漏洞台账](docs/images/pages/vuln-ledger.png)
+
+
+### 19. 漏洞运营：整改工作台
+
+跟踪分派、修复、提交复测和关闭过程，保持漏洞状态与操作记录关联。
+
+![漏洞运营：整改工作台](docs/images/pages/vuln-remediation.png)
+
+
+### 20. 漏洞运营：资产目录
+
+支持资产新增、搜索、编辑、删除及关联漏洞查看；不同资产类别使用定制图标和多彩渐变卡片。
+
+![漏洞运营：资产目录](docs/images/pages/assets.png)
+
+
+### 21. 漏洞运营：操作审计
+
+查看业务操作留痕。成员与业务权限在主系统账号管理中统一维护。
+
+![漏洞运营：操作审计](docs/images/pages/vuln-audit.png)
+
+
+### 22. Atlas 原生 AI 辅助
+
+登记资产、漏洞、主机和事件时可先与 Atlas 对话，也可切换手工填写。问答采用主系统原生会话能力，AI 输出需核实后使用。
+
+![Atlas 原生 AI 辅助](docs/images/pages/atlas-assist.png)
+
+
+### 23. 应急响应：事件工作台
+
+可从已确认告警下发事件，也可手工或由 AI 辅助登记；支持事件搜索、删除与调查状态跟踪。截图为未执行调查的模拟事件。
+
+![应急响应：事件工作台](docs/images/pages/incident.png)
+
+
+### 24. 应急响应：调查时间线
+
+以定制图标展示确认、日志关联、主机排查、证据、沙箱和报告阶段。采用固定采集流程约束执行，再由 AI 分析证据。
+
+![应急响应：调查时间线](docs/images/pages/incident-timeline.png)
+
+
+### 25. 应急响应：远程排查
+
+支持 Linux SSH 与 Windows WinRM 的受控只读采集。主机需先登记，配置连接凭据、可信主机公钥或证书；首版不集成 EDR。
+
+![应急响应：远程排查](docs/images/pages/incident-host.png)
+
+
+### 26. 应急响应：证据与样本
+
+保留采集结果、文件摘要和证据关联，支持获取授权主机上的指定文件，以及显式确认后提交微步云沙箱。微步需开通对应文件上传与报告 API 权限。
+
+![应急响应：证据与样本](docs/images/pages/incident-evidence.png)
+
+
+### 27. 应急响应：响应报告
+
+基于现有证据生成和导出 Markdown 报告，区分事实、推断与待验证线索。未采集到的证据不会被视作已确认结果。
+
+![应急响应：响应报告](docs/images/pages/incident-report.png)
+
+
+### 28. 应急响应：主机与连接
+
+集中登记调查目标和连接信息，明确目标、采集方式与信任校验。未配置连接的事件不会自动登录任意主机。
+
+![应急响应：主机与连接](docs/images/pages/incident-connections.png)
+
+
+### 29. 偏好设置
+
+统一维护工作台显示与使用偏好。
+
+![偏好设置](docs/images/pages/preferences.png)
+
+
+### 30. 账号管理
+
+首次部署自行创建管理员；管理员可新增可登录的用户、分配系统角色，并统一维护漏洞运营成员权限。
+
+![账号管理](docs/images/pages/accounts.png)
+
+
+### 31. 系统日志
+
+查看系统运行记录，用于定位连接、任务执行及服务运行问题。
+
+![系统日志](docs/images/pages/system-logs.png)
+
+
+### 32. 已归档会话
+
+集中管理归档后的历史会话，保持当前工作列表简洁。
+
+![已归档会话](docs/images/pages/archived.png)
+
+
+### 33. 在线更新
+
+管理员点击侧栏底部更新图标，手动检查 GitHub 稳定版本。支持校验、备份、安装、重启与启动失败自动回滚；依赖发生变化时提示下载完整包。
+
+![在线更新](docs/images/pages/online-update.png)
+
+## 更新与数据保存
+
+使用本版 `run.py` 或 Windows `start.cmd` 启动后，管理员可在侧栏底部使用在线更新。**2026.11.06 及更早版本需先手工升级一次**；Docker 使用新包重新构建，并复用原数据卷。备份包含敏感业务数据，请保存在受控目录。不要删除 `runtime/` 或原有数据卷。
+
+## 贡献与许可
+
+欢迎通过 Issues 提交问题、设备接入建议和界面反馈，提交日志前请移除凭据及业务数据。代码采用 [Apache-2.0](LICENSE.txt)。第三方依赖、厂商品牌与图标权利归其各自权利人所有；展示标识不代表获得厂商背书。Windows 运行环境说明见 [第三方组件](WINDOWS-THIRD-PARTY.md)。

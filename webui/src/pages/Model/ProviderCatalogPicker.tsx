@@ -1,3 +1,4 @@
+import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
 import { useMemo, useState } from 'react';
 import { ArrowLeft, ArrowRight, Check, Link2, Loader2, Search } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -107,15 +108,11 @@ export default function ProviderCatalogPicker({
                 type="button"
                 aria-label={provider.name}
                 aria-pressed={selected}
+                style={brandStyle(`${provider.id} ${provider.name}`)}
                 onClick={() => onSelect(provider.id)}
-                className={`group flex min-h-24 items-start gap-3 rounded-xl border p-4 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-violet-400 ${compatible ? 'border-violet-200 bg-violet-50/60 hover:border-violet-400 hover:bg-violet-50' : 'border-gray-200 bg-white hover:border-violet-300 hover:bg-gray-50'} ${selected ? 'ring-2 ring-violet-400' : ''}`}
+                className={`aegis-provider-choice group flex min-h-24 items-start gap-3 rounded-xl border p-4 text-left transition-colors focus:outline-none focus:ring-2 focus:ring-violet-400 ${compatible ? 'border-violet-200 bg-violet-50/60 hover:border-violet-400 hover:bg-violet-50' : 'border-gray-200 bg-white hover:border-violet-300 hover:bg-gray-50'} ${selected ? 'ring-2 ring-violet-400' : ''}`}
               >
-                <span
-                  aria-hidden="true"
-                  className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-sm font-semibold ${compatible ? 'bg-violet-100 text-violet-700' : 'bg-gray-100 text-gray-600'}`}
-                >
-                  {compatible ? <Link2 className="h-5 w-5" /> : provider.name.slice(0, 2)}
-                </span>
+                <ModelBrandIcon value={`${provider.id} ${provider.name}`} />
                 <span className="min-w-0 flex-1">
                   <span className="block text-sm font-semibold text-gray-900">{provider.name}</span>
                   <span className="mt-1 block line-clamp-2 text-xs leading-5 text-gray-500">

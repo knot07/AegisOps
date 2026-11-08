@@ -140,6 +140,11 @@ interface TdpRow {
 interface TdpData { rows: TdpRow[]; start_time: number; end_time: number; event_total?: number; }
 interface TrendData { labels?: string[]; tdp?: number[]; total?: number[]; summary?: Record<string, number>; }
 
+function loadSceneAssistant():Promise<any>{
+ const win=window as any;if(win.AegisSceneAI)return Promise.resolve(win.AegisSceneAI);
+ if(win.aegisSceneAILoad)return win.aegisSceneAILoad;
+ win.aegisSceneAILoad=new Promise((resolve,reject)=>{const script=document.createElement('script');script.src='/api/scenes/assistant/widget.js';script.onload=()=>resolve(win.AegisSceneAI);script.onerror=()=>{win.aegisSceneAILoad=null;reject(Error('AI 助手加载失败，请刷新后重试'));};document.head.append(script);});return win.aegisSceneAILoad;
+}
 function rowKey(row: TdpRow) {
   return row.row_key || row.aggregation_key || [row.ip, row.ioc || row.ip, row.threat_type || '', row.threat_name || ''].join('|');
 }
@@ -626,6 +631,39 @@ export default function Page() {
   const importLocks = useRef(new Set<string>());
   const importAlive = useRef(true);
   useEffect(()=>{importAlive.current=true;return()=>{importAlive.current=false;};},[]);
+  const askAlertAI = async () => {
+    try {
+      const host=window.parent!==window?window.parent:window;
+      const ready=await new Promise<boolean>(resolve=>{
+        const id=crypto.randomUUID();
+        const done=(ok:boolean)=>{clearTimeout(timer);window.removeEventListener('message',receive);resolve(ok);};
+        const receive=(event:MessageEvent)=>{if(event.origin===location.origin&&event.source===host&&event.data?.type==='aegis:scene-assistant-ready'&&event.data.id===id)done(true);};
+        const timer=setTimeout(()=>done(false),1800);
+        window.addEventListener('message',receive);
+        host.postMessage({type:'aegis:scene-assistant-ping',id},location.origin);
+      });
+      if(!ready){
+        const last=Number(host.sessionStorage.getItem('aegis-onboarding-reload')||0);
+        if(Date.now()-last<60000)throw Error('Atlas 接入面板未能加载，请刷新页面后重试。');
+        host.sessionStorage.setItem('aegis-onboarding-reload',String(Date.now()));
+        host.sessionStorage.setItem('aegis-onboarding-pending',String(Date.now()));
+        host.location.reload();return;
+      }
+      const assistant=await loadSceneAssistant();assistant.open({kind:'onboarding',title:'Atlas快速接入使用',context:{environment:'demo',visible_rows:rows.slice((page-1)*pageSize,page*pageSize).map(row=>({ip:row.ip,ioc:row.ioc,threat_name:row.threat_name,threat_type:row.threat_type,severity:row.severity,count:row.count,first_time:row.first_time,last_time:row.last_time,dst_ip:(row as any).dst_ip,ai_status:row.ai_status})),scope:'仅当前分页可见数据',time_range:{start:tdp.start_time,end:tdp.end_time}}});}
+    catch(e:any){alert(e.message||'AI 助手暂不可用');}
+  };
+  const [irBusy,setIrBusy]=useState(false);
+  const [irMessage,setIrMessage]=useState('');
+  const [irUrl,setIrUrl]=useState('');
+  const transferIncident = async (row:TdpRow) => {
+    if(irBusy||!confirm('将此演示告警转入应急工作台预览调查流程？不会查询真实设备、远程上机或上传样本。'))return;
+    setIrBusy(true);setIrMessage('');setIrUrl('');
+    try {
+      const response=await fetch('/api/scenes/incident/from-demo-alert',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify({row_key:rowKey(row),first_time:row.first_time,confirmed:true})});
+      const result=await response.json();if(!response.ok)throw new Error(result.detail||'下发失败');
+      setIrUrl(result.url);window.location.assign(result.url);
+    }catch(e:any){setIrMessage(e.message||'应急下发失败');}finally{setIrBusy(false);}
+  };
   const transferVulnerability = async (row:TdpRow) => {
     const key=rowKey(row);
     if(importLocks.current.has(key))return;
@@ -1000,13 +1038,14 @@ export default function Page() {
       [data-layout="mobile"] h1 { font-size: 18px !important; }
       @media (prefers-reduced-motion: reduce) { [data-aegisops-theme] * { transition: none !important; } }
     `}</style>
+<nav aria-label="研判环境切换" style={{display:"flex",gap:8,padding:"12px 24px",borderBottom:`1px solid ${C.border}`,background:C.panel}}><a href="/contracts/webui/workspaces/tdp_ai/ai" aria-current={undefined} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"transparent",color:C.textMuted}}>正式研判</a><a href="/contracts/webui/workspaces/tdp_ai/ai-demo" aria-current={"page"} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"#edf4e5",color:"#526e3d"}}>演示平台</a></nav>
     <header style={topbarStyle}>
       <div style={brandStyle}>
         <div style={{ position: 'relative' }}><button type="button" aria-label="更换 Logo" title="点击更换 Logo" onClick={brandLogo.chooseLogo} style={brandLogoStyle}>{brandLogo.logo ? <img src={brandLogo.logo} alt="工作台 Logo" style={{ maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: 'contain' }} /> : <span style={{ color: C.textDim, fontSize: 12, fontWeight: 600 }}>＋ 上传 Logo</span>}</button><input ref={brandLogo.inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onChange={brandLogo.onLogoChange} style={{ display: 'none' }} />{brandLogo.logo && <button type="button" aria-label="恢复默认 Logo" title="恢复默认 Logo" onClick={brandLogo.resetLogo} style={resetLogoButtonStyle}>×</button>}</div>
         <div style={{ minWidth: 0 }}><h1 style={brandTitleStyle}><button type="button" onClick={renamePlatform} title="点击自定义平台名称" aria-label="修改平台名称" style={{ font: 'inherit', color: 'inherit', background: 'none', border: 0, padding: 0, cursor: 'pointer', textAlign: 'left' }}>{brandName} · 演示</button></h1><div style={{ marginTop: 4, color: C.textDim, fontSize: 12, fontWeight: 600 }}>固定样例数据 · 只读演示 · 不连接生产 TDP</div></div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: isMobile ? 'flex-start' : 'flex-end' }}>
-        <span style={chipStyle}><span style={{ ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green }} />{syncText}</span>
+        <button type="button" onClick={()=>void askAlertAI()} style={{...secondaryButton,color:"#526d42",borderColor:"#d8e4cc",background:"#f3f7ee"}}><Icon name="spark" size={15}/>Atlas快速接入使用</button><span style={chipStyle}><span style={{ ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green }} />{syncText}</span>
         <span style={chipStyle}><Icon name="clock" size={16} />{error || fmtTime(updatedAt)}</span>
         <button type="button" title="立即刷新" onClick={() => void loadDashboard()} style={primaryButton}><Icon name="refresh" size={16} />{loading ? '刷新中' : '刷新'}</button>
       </div>
@@ -1056,9 +1095,9 @@ export default function Page() {
 
         <section style={{ ...panelStyle, height: 782, minHeight: 782, maxHeight: 782, boxSizing: 'border-box', padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div style={{ ...sectionHeadStyle, marginBottom: 0, padding: '20px 20px 14px', borderBottom: `1px solid ${C.border}`, flex: '0 0 auto' }}>
-            <div style={{ minWidth: 0 }}><h2 style={sectionTitleStyle}>TDP 攻击源列表</h2><p style={sectionDescStyle}>共 {rows.length} 条 · 每页 {pageSize} 条 · 第 {page}/{pages} 页</p></div>
+            <div style={{ minWidth: 0 }}><h2 style={sectionTitleStyle}>告警事件列表</h2><p style={sectionDescStyle}>共 {rows.length} 条 · 每页 {pageSize} 条 · 第 {page}/{pages} 页</p></div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <MiniStat icon="shield" label="TDP列表" value={`${rows.length} 个研判事件`} />
+              <MiniStat icon="shield" label="告警列表" value={`${rows.length} 个研判事件`} />
               <MiniStat icon="bot" label="AI研判" value={`${done} 已完成 / ${pending} 进行中`} />
               <button onClick={() => downloadCsv(rows)} style={secondaryButton}><Icon name="download" size={15} />下载</button>
             </div>
@@ -1082,7 +1121,7 @@ export default function Page() {
               <td style={tdStyle}><button type="button" onClick={() => void openDetail(row)} className="dt-detail-button" style={detailLinkStyle}>查看详情</button></td>
             </tr>;
           })}{rows.length > 0 && Array.from({ length: Math.max(0, 10 - pageRows.length) }, (_, index) => <tr aria-hidden="true" key={`empty-row-${index}`} style={{ height: 58, background: (pageRows.length + index) % 2 ? C.rowAlt : 'transparent' }}><td colSpan={9} style={{ ...tdStyle, color: 'transparent' }}>&nbsp;</td></tr>)}</tbody></table></div>
-          {!rows.length && <div style={{ padding: 38, textAlign: 'center', color: C.textMuted }}>{loading ? '正在获取 TDP 数据...' : error || '当前时间范围暂无数据'}</div>}
+          {!rows.length && <div style={{ padding: 38, textAlign: 'center', color: C.textMuted }}>{loading ? '正在获取设备告警...' : error || '当前时间范围暂无数据'}</div>}
           <div style={{ position: 'relative', zIndex: 10, display: 'flex', justifyContent: 'flex-end', alignItems: 'center', height: 64, minHeight: 64, maxHeight: 64, boxSizing: 'border-box', padding: '10px 18px', borderTop: `1px solid ${C.border}`, background: C.panel, flex: '0 0 auto', overflow: 'visible' }}><Pager current={page} total={pages} totalItems={rows.length} pageSize={pageSize} onChange={setPage} onPageSizeChange={nextPageSize => { setPageSize(nextPageSize); setPage(1); }} /></div>
         </section>
       </main>
@@ -1090,11 +1129,11 @@ export default function Page() {
 
     {detail && <div onClick={() => { setDetailIp(null); setOutputOpen(false); }} style={modalMask}><div className="dt-report-dialog" onClick={e => e.stopPropagation()} style={{ ...modalCard, width: 'min(1440px, calc(100vw - 32px))', height: 'min(920px, calc(100dvh - 32px))', maxHeight: 'calc(100dvh - 32px)', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
       <div style={{ ...modalHead, flex: '0 0 auto', background: C.panel, zIndex: 2 }}>
-        <div style={{ minWidth: 0 }}><strong style={{ color: C.text, fontSize: 20, lineHeight: 1.25 }}>告警研判详情</strong><div style={{ display: 'flex', alignItems: 'center', gap: 9, marginTop: 5, color: C.textDim, fontSize: 12, flexWrap: 'wrap' }}><code style={inlineCodeStyle}>{detail.ip}</code><span>{detail.threat_name || 'TDP 告警研判'}</span><span>·</span><span>{fmtTime(detail.last_time || detail.first_time)}</span></div></div>
+        <div style={{ minWidth: 0 }}><strong style={{ color: C.text, fontSize: 20, lineHeight: 1.25 }}>告警研判详情</strong><div style={{ display: 'flex', alignItems: 'center', gap: 9, marginTop: 5, color: C.textDim, fontSize: 12, flexWrap: 'wrap' }}><code style={inlineCodeStyle}>{detail.ip}</code><span>{detail.threat_name || '告警研判'}</span><span>·</span><span>{fmtTime(detail.last_time || detail.first_time)}</span></div></div>
         <button aria-label="关闭研判详情" title="关闭" onClick={() => { setDetailIp(null); setOutputOpen(false); }} style={closeStyle}><Icon name="x" size={20} /></button>
       </div>
       <ReviewReport key={rowKey(detail)} row={detail} compact={isCompact} />
-      <div style={{padding:'10px 20px',borderTop:`1px solid ${C.border}`,background:C.panel,color:C.textMuted,fontSize:12}}>当前为隔离演示环境，样例告警不会写入正式漏洞台账。正式环境提供“确认攻击成功 · AI 转入漏洞”。</div><div style={reportActionsStyle}><button disabled title="演示数据不写入正式台账" style={{...secondaryButton,opacity:.5}}>AI 转入漏洞（正式环境可用）</button><button disabled={detail.ai_status === 'pending'} title={detail.ai_status === 'done' ? '重新执行固定工作流并用最新结果更新当前详情' : detail.ai_status === 'pending' ? '研判正在执行' : '开始AI研判'} onClick={() => detail.ai_status === 'done' ? void launchJudgement(detail, true) : detail.ai_status !== 'pending' ? void startJudge(detail) : undefined} style={{ ...primaryButton, opacity: detail.ai_status === 'pending' ? .58 : 1, cursor: detail.ai_status === 'pending' ? 'not-allowed' : 'pointer' }}><Icon name={detail.ai_status === 'done' ? 'spark' : 'bot'} size={15} />{detail.ai_status === 'done' ? '二次研判' : detail.ai_status === 'pending' ? '研判中' : 'AI研判'}</button><button onClick={() => void openWorkbench(detail)} style={secondaryButton}>查看工作台</button><button disabled={!detail.ai_raw_output && !detail.ai_progress} onClick={() => setOutputOpen(true)} style={{ ...secondaryButton, opacity: detail.ai_raw_output || detail.ai_progress ? 1 : .45 }}>AI输出全文</button><button onClick={() => setDetailIp(null)} style={secondaryButton}>关闭</button></div>
+      <div style={{padding:'10px 20px',borderTop:`1px solid ${C.border}`,background:C.panel,color:C.textMuted,fontSize:12}}>当前为演示环境，应急响应仅预览流程，不连接真实设备。漏洞建档请切换正式环境。</div><div style={{padding:"8px 20px",color:C.textMuted,fontSize:12}} aria-live="polite">{irMessage}</div><div style={reportActionsStyle}><button type="button" disabled={irBusy} onClick={()=>void transferIncident(detail)} style={{...primaryButton,background:"#3f6749",color:"#fff"}}>{irBusy?"正在转入…":"应急响应"}</button><button disabled title="演示数据不写入正式台账" style={{...secondaryButton,opacity:.5}}>转入漏洞库</button><button disabled={detail.ai_status === 'pending'} title={detail.ai_status === 'done' ? '重新执行固定工作流并用最新结果更新当前详情' : detail.ai_status === 'pending' ? '研判正在执行' : '开始AI研判'} onClick={() => detail.ai_status === 'done' ? void launchJudgement(detail, true) : detail.ai_status !== 'pending' ? void startJudge(detail) : undefined} style={{ ...primaryButton, opacity: detail.ai_status === 'pending' ? .58 : 1, cursor: detail.ai_status === 'pending' ? 'not-allowed' : 'pointer' }}><Icon name={detail.ai_status === 'done' ? 'spark' : 'bot'} size={15} />{detail.ai_status === 'done' ? '二次研判' : detail.ai_status === 'pending' ? '研判中' : 'AI研判'}</button></div>
     </div></div>}
     {detail && outputOpen && <div onClick={() => setOutputOpen(false)} style={{ ...modalMask, zIndex: 1100 }}><div onClick={e => e.stopPropagation()} style={{ ...modalCard, width: 'min(920px, 96vw)' }}><div style={modalHead}><strong>AI输出全文</strong><button onClick={() => setOutputOpen(false)} style={closeStyle}>×</button></div><pre style={{ margin: 0, padding: 18, background: C.bg, color: C.textMid, whiteSpace: 'pre-wrap', maxHeight: '68vh', overflow: 'auto', fontSize: 12 }}>{detail.ai_raw_output || detail.ai_progress || '暂无AI输出'}</pre></div></div>}
   </div>;
@@ -1166,12 +1205,9 @@ const closeStyle = { width: 32, height: 32, display: 'grid', placeItems: 'center
 const primaryButton = { minHeight: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7, background: 'var(--dt-control)', color: 'var(--dt-control-text)', border: '1px solid transparent', borderRadius: 8, padding: '0 14px', cursor: 'pointer', fontSize: 13, fontWeight: 650, boxShadow: '0 3px 10px rgba(16,20,24,.16), inset 0 1px 0 rgba(255,255,255,.12)' } as const;
 const secondaryButton = { minHeight: 36, display: 'inline-flex', alignItems: 'center', justifyContent: 'center', gap: 7, background: C.panel, color: C.textMid, border: `1px solid ${C.borderLight}`, borderRadius: 8, padding: '0 13px', cursor: 'pointer', fontSize: 13, fontWeight: 600, boxShadow: '0 1px 2px rgba(46,58,62,.04), inset 0 1px 0 rgba(255,255,255,.12)' } as const;
 function MiniStat({ icon, label, value }: { icon: string; label: string; value: string }) {
-  return <div style={{ minHeight: 36, display: 'inline-flex', alignItems: 'center', gap: 8, padding: '6px 10px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.panelSoft, color: C.textMid }}>
-    <span style={{ color: C.blueLight }}><Icon name={icon} size={15} /></span>
-    <span style={{ display: 'grid', gap: 1, lineHeight: 1.1 }}>
-      <b style={{ color: C.text, fontSize: 12, fontWeight: 800 }}>{label}</b>
-      <small style={{ color: C.textDim, fontSize: 11, whiteSpace: 'nowrap' }}>{value}</small>
-    </span>
+  return <div data-tdp-stat style={{ minHeight:44,display:'inline-flex',alignItems:'center',gap:10,padding:'7px 12px',borderRadius:12,border:`1px solid ${C.border}`,background:C.panel,color:C.textMid }}>
+    <span style={{width:28,height:28,display:'grid',placeItems:'center',borderRadius:9,background:C.greenDark,color:C.greenLight}}><Icon name={icon} size={15}/></span>
+    <span style={{display:'grid',gap:3,lineHeight:1.25}}><span style={{color:C.textMid,fontSize:12,fontWeight:500}}>{label}</span><small style={{color:C.textDim,fontSize:11,whiteSpace:'nowrap'}}>{value}</small></span>
   </div>;
 }
 function DetailMetric({ label, value, danger = false }: { label: string; value: string; danger?: boolean }) {
@@ -1297,14 +1333,14 @@ function HttpEvidencePanel({ items }: { items?: HttpEvidence[] }) {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(min(340px, 100%), 1fr))', gap: 12, marginTop: 9 }}>
             <div style={packetColumnStyle}>
-              <div style={{ padding: 12 }}><div style={packetHeadStyle}><strong style={{ color: C.text }}>请求包</strong><span style={{ ...packetStatusStyle, color: requestAvailable ? C.greenLight : C.orangeLight, background: requestAvailable ? C.greenDark : C.orangeDark }}>{item.request_status || 'TDP原始告警未采集'}</span></div>
-              {requestAvailable ? <code style={packetLineStyle}>{item.request_line || '请求行未采集'}</code> : <div style={packetEmptyStyle}>TDP 原始告警中没有请求行和请求体。</div>}
+              <div style={{ padding: 12 }}><div style={packetHeadStyle}><strong style={{ color: C.text }}>请求包</strong><span style={{ ...packetStatusStyle, color: requestAvailable ? C.greenLight : C.orangeLight, background: requestAvailable ? C.greenDark : C.orangeDark }}>{item.request_status || '原始告警未采集'}</span></div>
+              {requestAvailable ? <code style={packetLineStyle}>{item.request_line || '请求行未采集'}</code> : <div style={packetEmptyStyle}>设备原始告警中没有请求行和请求体。</div>}
               <div style={packetByteStyle}>客户端到服务端 {item.bytes_to_server || 0} bytes</div></div>
               {requestAvailable && <details><summary style={{ padding: '10px 12px', color: C.blueLight, borderTop: `1px solid ${C.border}`, cursor: 'pointer', fontSize: 12, fontWeight: 750 }}>完整请求体</summary><pre style={packetBodyStyle}>{item.request_body || '请求体为空'}</pre></details>}
             </div>
             <div style={packetColumnStyle}>
-              <div style={{ padding: 12 }}><div style={packetHeadStyle}><strong style={{ color: C.text }}>响应包</strong><span style={{ ...packetStatusStyle, color: responseAvailable ? C.greenLight : C.orangeLight, background: responseAvailable ? C.greenDark : C.orangeDark }}>{item.response_status || 'TDP原始告警未采集'}</span></div>
-              {responseAvailable ? <><code style={packetLineStyle}>{item.response_line || '响应行未采集'}</code><pre style={{ ...packetBodyStyle, marginTop: 8, border: 'none', borderRadius: 4 }}>{item.response_body || '响应体为空'}</pre></> : <div style={packetEmptyStyle}>TDP 原始告警的响应行和响应体为空，不能据此判断攻击是否成功。</div>}
+              <div style={{ padding: 12 }}><div style={packetHeadStyle}><strong style={{ color: C.text }}>响应包</strong><span style={{ ...packetStatusStyle, color: responseAvailable ? C.greenLight : C.orangeLight, background: responseAvailable ? C.greenDark : C.orangeDark }}>{item.response_status || '原始告警未采集'}</span></div>
+              {responseAvailable ? <><code style={packetLineStyle}>{item.response_line || '响应行未采集'}</code><pre style={{ ...packetBodyStyle, marginTop: 8, border: 'none', borderRadius: 4 }}>{item.response_body || '响应体为空'}</pre></> : <div style={packetEmptyStyle}>设备原始告警的响应行和响应体为空，不能据此判断攻击是否成功。</div>}
               <div style={packetByteStyle}>服务端到客户端 {item.bytes_to_client || 0} bytes{!responseAvailable && item.bytes_to_client ? '，仅有流量计数，无可解析响应内容' : ''}</div></div>
             </div>
           </div>

@@ -350,6 +350,23 @@ async function openBrowserDeviceGuidance(user: ReturnType<typeof userEvent.setup
 }
 
 describe('DeviceIntegrationPage', () => {
+  it('saves a manual device without starting a model session or model test', async () => {
+    const user = userEvent.setup();
+    mocks.createDevice.mockResolvedValue({data:{id:'manual-test', name:'Manual device'}});
+    render(<DeviceIntegrationPage />);
+    await openManualAddWizard(user);
+    await user.click(screen.getByRole('button', {name:'手动接入'}));
+    expect(screen.getByRole('heading', {name:'微步'})).toBeInTheDocument();
+    await user.type(screen.getByRole('textbox', {name:'搜索设备模板'}), 'Existing');
+    await user.click(screen.getByRole('button', {name:/Existing Device/}));
+    await user.type(screen.getByPlaceholderText('config.namePlaceholder'), 'Manual device');
+    await user.click(screen.getByRole('button', {name:/^(确认接入|添加设备|config.addBtn)$/}));
+    await waitFor(() => expect(mocks.createDevice).toHaveBeenCalledWith(expect.objectContaining({name:'Manual device', storage_key:'existing_device_v1'})));
+    expect(mocks.createAndSend).not.toHaveBeenCalled();
+    expect(mocks.testDevice).not.toHaveBeenCalled();
+    expect(mocks.toastError).not.toHaveBeenCalled();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.sessionId = null;
@@ -539,7 +556,7 @@ describe('DeviceIntegrationPage', () => {
     await openSupportedDeviceList(user);
     expect(screen.getByText('已支持设备列表')).toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: /^工作台$/ }));
+    await user.click(screen.getByRole('button', { name: /^Atlas 辅助接入$/ }));
 
     expect(screen.getByText('Rex 辅助接入')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^API 接入$/ })).toBeInTheDocument();
@@ -677,7 +694,7 @@ describe('DeviceIntegrationPage', () => {
     expect(screen.getByRole('combobox')).toHaveValue('group-1');
     expect(screen.getAllByText('北京机房').length).toBeGreaterThan(0);
     expect(screen.getByRole('link', { name: /查看配置指引/ })).toHaveAttribute('href', 'https://docs.example.com/qingteng');
-    expect(screen.queryByRole('button', { name: /^工作台$/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Atlas 辅助接入$/ })).not.toBeInTheDocument();
     expect(mocks.toastSuccess).toHaveBeenCalledWith('已填充设备配置表单');
   });
 

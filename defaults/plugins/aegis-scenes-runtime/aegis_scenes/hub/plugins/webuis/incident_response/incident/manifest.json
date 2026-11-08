@@ -1,0 +1,8 @@
+{
+  "id": "incident",
+  "title": "应急响应",
+  "route": "/contracts/webui/incident",
+  "icon": "ShieldAlert",
+  "enabled": true,
+  "entry": "src/index.tsx"
+}

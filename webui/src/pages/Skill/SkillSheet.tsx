@@ -1,3 +1,5 @@
+import ResourceDetailSummary from '@/components/common/ResourceDetailSummary';
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 /**
  * SkillSheet — unified Skill create/edit/view side panel
  *
@@ -192,15 +194,23 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
       mode={isEdit ? 'edit' : 'create'}
       entityType={t('sheet.entityType')}
       entityName={skill?.name}
-      icon={<BookOpen className="w-5 h-5" />}
+      resizable={false}
+      surfaceClassName="aegis-skill-editor aegis-resource-detail"
+      surfaceStyle={resourceStyle('skill',skill?.name || 'custom')}
+      icon={<ResourceIdentity kind="skill" name={skill?.name || 'custom'} />}
       rexSystemContext={buildRexContext(isEdit, formData)}
       rexWelcomeMessage={buildRexWelcome(isEdit, skill?.name)}
-      rexGuideGroups={!isEdit ? createGuideGroups : undefined}
-      rexGuidePanelTitle={!isEdit ? t('create.guidePanelTitle') : undefined}
-      rexGuidePanelDesc={!isEdit ? t('create.guidePanelDesc') : undefined}
+      rexGuideGroups={isEdit ? [{title:'技能工作台',actions:[
+        {label:'解释这个技能',description:'',prompt:'请解释当前技能的用途、触发条件、所需配置和适用边界。'},
+        {label:'优化技能指令',description:'',prompt:'请检查当前技能的指令结构、工具约束和输出要求，给出改进建议。不要未经确认直接修改。'},
+        {label:'检查接入配置',description:'',prompt:'请分析当前技能对应的设备接入、鉴权和依赖配置，说明还缺少哪些信息。'},
+        {label:'设计验证步骤',description:'',prompt:'请根据当前技能设计具体且可验证的测试步骤，说明预期结果与失败排查方法。'},
+      ]}] : createGuideGroups}
+      rexGuidePanelTitle={isEdit ? '与 Atlas 一起完善技能' : t('create.guidePanelTitle')}
+      rexGuidePanelDesc={isEdit ? '理解技能、调整配置，或直接提出你的问题' : t('create.guidePanelDesc')}
       rexGuideEmptyTitle={!isEdit ? t('create.emptyStateTitle') : undefined}
-      rexGuideIcon={!isEdit ? <BookOpen className="h-5 w-5" /> : undefined}
-      {...(!isEdit ? rexComposerControls : {})}
+      rexGuideIcon={<img src="/favicon.svg" alt="Atlas" className="w-8 h-8" />}
+      {...rexComposerControls}
       // Read-only sheets turn the submit button into 「关闭」; it must stay clickable even though the form can't be submitted.
       submitDisabled={isReadonly ? false : !canSubmit}
       submitLoading={loading}
@@ -225,7 +235,10 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
         </button>
       ) : undefined}
     >
-      <div className="space-y-4">
+      <div className="aegis-skill-detail-form aegis-detail-form space-y-4">
+        <ResourceDetailSummary kind="skill" name={formData.name} title={formData.name || '新技能'}
+          badges={[isUserSkill ? '自定义技能' : '内置技能',isReadonly ? '只读定义' : '可编辑',skill?.disabled ? '已停用' : '已启用']}
+          metrics={[{label:'来源',value:skill?.source || '用户'},{label:'指令',value:`${formData.content.length.toLocaleString()} 字符`}]} />
         {/* Read-only banner */}
         {isReadonly && (
           <div className="flex items-center gap-2 px-3 py-2 bg-amber-50 border border-amber-200 rounded-lg text-xs text-amber-700">
@@ -235,7 +248,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
         )}
 
         {/* Name */}
-        <div>
+        <div data-detail-section="identity">
           <label className="block text-sm font-medium text-gray-700 mb-1">
             {t('sheet.skillName')} {!isEdit && <span className="text-red-500">*</span>}
           </label>
@@ -259,7 +272,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
         </div>
 
         {/* Description */}
-        <div>
+        <div data-detail-section="description">
           <label className={`block text-sm font-medium mb-1 ${isReadonly ? 'text-gray-500' : 'text-gray-700'}`}>
             {t('sheet.description')} {!isEdit && <span className="text-red-500">*</span>}
           </label>
@@ -293,7 +306,7 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
         )}
 
         {/* Content */}
-        <div>
+        <div data-detail-section="instructions">
           <div className="flex items-center justify-between mb-1">
             <label className="text-sm font-medium text-gray-700">
               {t('sheet.content')}
@@ -359,8 +372,8 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
           ) : (
             /* Preview mode: render Markdown */
             <div
-              className="px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm prose prose-sm max-w-none overflow-y-auto"
-              style={{ minHeight: '320px', maxHeight: '65vh' }}
+              className="px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm prose prose-sm max-w-none aegis-skill-markdown"
+              style={{ minHeight: '240px' }}
             >
               <Suspense fallback={<MarkdownFallback />}>
                 <ReactMarkdown>{contentForRender || t('sheet.noContent')}</ReactMarkdown>

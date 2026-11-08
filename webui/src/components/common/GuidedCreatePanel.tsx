@@ -98,7 +98,7 @@ function GuidedCreateSection({
         {actions.map((action) => (
           <div
             key={action.label}
-            className="yushu-guide-action group flex w-full items-center justify-between"
+            className={`yushu-guide-action group flex w-full items-center justify-between ${action.highlighted ? 'aegis-guide-highlight' : ''}`}
           >
             <button
               type="button"

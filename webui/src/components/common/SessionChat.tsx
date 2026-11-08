@@ -2403,6 +2403,7 @@ export default function SessionChat({
     if (sessionId) sessionApi.get(sessionId).then(session => {
       if (active) setSchedulingMode(session.scheduling_mode === 'superagent' ? 'superagent' : 'legacy');
     }).catch(() => {});
+    else client.get('/api/agent/atlas/scheduling').then(r=>{if(active)setSchedulingMode(r.data.mode==='superagent'?'superagent':'legacy');}).catch(()=>{});
     return () => { active = false; };
   }, [sessionId]);
   const changeSchedulingMode = async (mode: SchedulingMode) => {

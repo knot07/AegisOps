@@ -492,6 +492,10 @@ class Session:
             Session info
         """
         is_child = parent_id is not None
+        if not is_child and "scheduling_mode" not in kwargs:
+            from aegisops.agent.scheduling import settings as scheduling_settings
+            kwargs["scheduling_mode"] = "superagent" if scheduling_settings().get("mode") == "superagent" else "legacy"
+
 
         # Ensure sessions default to the configured primary agent (e.g., rex)
         agent_info = None

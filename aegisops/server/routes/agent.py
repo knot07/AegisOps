@@ -1120,3 +1120,31 @@ async def test_agent(name: str, req: AgentTestRequest = AgentTestRequest()):
     except Exception as e:
         log.error("agent.test.error", {"error": str(e), "name": name})
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class AtlasSchedulingRequest(BaseModel):
+    mode: Literal["legacy", "superagent"]
+
+@router.get("/atlas/scheduling")
+async def get_atlas_scheduling():
+    from aegisops.agent.scheduling import settings
+    return {"mode": "superagent" if settings().get("mode") == "superagent" else "legacy"}
+
+@router.put("/atlas/scheduling")
+async def set_atlas_scheduling(body: AtlasSchedulingRequest, request: Request):
+    _require_admin_for_agent_config(request)
+    import os
+    from pathlib import Path
+    from aegisops.agent.scheduling import settings
+    if os.environ.get("AEGIS_AGENT_SCHEDULING") is not None:
+        raise HTTPException(status_code=409, detail="Scheduling default is managed by the service environment")
+    async with _get_overrides_lock():
+        import json
+        target = Path.home()/".aegisops/config/agent-scheduling.json"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        value=settings(); value["mode"]=body.mode
+        temporary=target.with_suffix(".tmp")
+        temporary.write_text(json.dumps(value))
+        temporary.chmod(0o600)
+        temporary.replace(target)
+    return {"mode":body.mode}

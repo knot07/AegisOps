@@ -16,7 +16,7 @@ from aegisops.utils.log import Log
 
 log = Log.create(service="server.branding")
 
-DEFAULT_DISPLAY_NAME = "御枢 · AegisOps"
+DEFAULT_DISPLAY_NAME = "AegisOps"
 
 _providers: List[Any] = []
 

@@ -9,7 +9,7 @@ COPY . .
 RUN python -m pip install --no-cache-dir -r requirements.lock && python -m pip install --no-cache-dir --no-deps -e . -e defaults/plugins/aegis-scenes-runtime && cd webui && npm ci --include=dev && npm run build
 RUN useradd --uid 10001 --create-home --shell /bin/bash aegisops && mkdir -p /var/lib/aegisops && chown -R aegisops:aegisops /opt/aegisops /var/lib/aegisops
 USER aegisops
-ENV AEGISOPS_ROOT=/var/lib/aegisops PYTHONUNBUFFERED=1
+ENV AEGISOPS_CONTAINER=1 AEGISOPS_ROOT=/var/lib/aegisops PYTHONUNBUFFERED=1
 EXPOSE 5200
 HEALTHCHECK --interval=30s --timeout=5s --start-period=90s CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5200/api/health',timeout=4)"
 CMD ["python","run.py","--host","0.0.0.0","--port","5200"]

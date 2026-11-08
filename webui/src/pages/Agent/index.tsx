@@ -1,3 +1,4 @@
+import {AgentIdentity, agentStyle} from '@/components/common/VisualIdentity';
 import { useState, useEffect, useMemo } from 'react';
 import { Bot, Plus, Cpu, Search, RefreshCw, Shield, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -550,7 +551,10 @@ function AgentCard({
   return (
     <PluginCard
       layout={layout}
-      icon={<Bot className="h-4 w-4" />}
+      icon={<AgentIdentity name={agent.name} label={displayName} />}
+      style={agentStyle(agent.name, displayName)}
+      className="aegis-agent-card"
+      iconClassName="aegis-agent-icon-wrap"
       title={displayName}
       tags={<>
         <PluginSourceTag builtin={isBuiltinAgent(agent)} label={sourceLabel} />

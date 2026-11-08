@@ -154,3 +154,262 @@
 .aegis-context-popover>div:first-child{padding:13px 15px 12px;border-color:rgb(var(--ui-border) / .75)}.aegis-context-popover>div:first-child .text-xs{font-size:13px}.aegis-context-popover>div:first-child .text-\[10px\]{font-size:11px}.aegis-context-rows{max-height:min(300px,calc(100dvh - 230px));padding:8px;margin:0 6px 6px}.aegis-context-rows>[role=menuitem]{min-height:35px;padding:7px 8px;font-size:12px;gap:16px}.aegis-context-rows>[role=menuitem]:hover{background:rgb(var(--ui-hover))}.aegis-context-rows .h-3.w-3{width:10px;height:10px;border-radius:3px}.aegis-context-rows .font-medium{font-weight:500}.aegis-context-rows>[role=menuitem]>span{font-variant-numeric:tabular-nums;color:rgb(var(--ui-secondary))}
 .aegis-context-system{background:#94a394}.aegis-context-definitions{background:#a49ab8}.aegis-context-tools{background:#849db4}.aegis-context-skills{background:#c9aa70}.aegis-context-agents{background:#79a88d}.aegis-context-conversation{background:#738b9b}.aegis-context-reasoning{background:#c28d96}.aegis-context-draft{background:#8cabb0}.aegis-context-compacted{background:#bcc3b6}
 @media(prefers-reduced-motion:no-preference){.aegis-composer-popover,.aegis-context-popover{animation:aegis-popover-reveal .18s cubic-bezier(.16,1,.3,1) both}@keyframes aegis-popover-reveal{from{opacity:0;translate:0 4px}to{opacity:1;translate:0 0}}}
+
+/* Featured native onboarding action. */
+.yushu-guide-action.aegis-guide-highlight{background:linear-gradient(125deg,#edf7e1,#f7fbf1);border-color:#b9d796;box-shadow:0 3px 12px #668c3210;grid-column:1/-1}
+.yushu-guide-action.aegis-guide-highlight .yushu-guide-action-trigger>span:first-child{color:#557f31;font-weight:600}
+.yushu-guide-action.aegis-guide-highlight .yushu-guide-action-description{color:#7a9563}
+.yushu-guide-action.aegis-guide-highlight .yushu-guide-action-arrow{color:#79a34e}
+
+/* Device connection forms */
+.aegis-device-config{background:#fafbf8!important;color:#303b2c;font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif}
+.aegis-device-config>div:first-child{background:#fff;padding:22px 24px;border-bottom:1px solid #e7ecdf}
+.aegis-device-config input,.aegis-device-config select{border-color:#e0e6d9!important;border-radius:12px!important;background-color:#fff!important;min-height:40px;font-size:13px}
+.aegis-device-config input:focus,.aegis-device-config select:focus{outline:none!important;border-color:#a2c67b!important;box-shadow:0 0 0 3px #a2c67b20!important}
+.aegis-device-config label{font-size:12px!important;font-weight:500!important;color:#65705e!important}
+.aegis-device-config .space-y-4{padding:24px;gap:0}
+.aegis-device-config button{transition:background-color .18s,border-color .18s,color .18s}
+.aegis-device-config button[aria-pressed="true"]{background:#eef4e6;border-radius:10px 10px 0 0}
+.yushu-device-workbench-tab button[aria-pressed="false"]{background:transparent!important;color:#8a9284!important;box-shadow:none!important}
+
+/* Native Atlas interactive answers share the product theme. */
+.aegis-question{color:#36422e;box-shadow:0 5px 22px #516b3510;font-family:"Microsoft YaHei","PingFang SC","Segoe UI",sans-serif;animation:aegisQuestionEnter .22s ease-out}
+.aegis-question-heading{display:flex;align-items:center;gap:9px;padding:14px 18px;background:linear-gradient(110deg,#f1f6e9,#fafcf7);border-bottom:1px solid #e7eddf}
+.aegis-question-heading>svg{width:18px;height:18px}
+.aegis-question-heading>span{font-size:13px!important;font-weight:600;color:#58763e}
+.aegis-question-body{padding:18px!important}
+.aegis-question-section+.aegis-question-section{padding-top:15px;border-top:1px solid #edf0e8}
+.aegis-question-label{font-size:12px!important;font-weight:600;color:#687d55;margin-bottom:6px}
+.aegis-question-copy{font-size:13px!important;line-height:1.75;font-weight:400;color:#65705e;margin-bottom:12px}
+.aegis-question-option{padding:11px 13px!important;border-radius:12px!important;box-shadow:none;transition:background-color .16s,border-color .16s,box-shadow .16s;line-height:1.55}
+.aegis-question-option:hover:not(:disabled){border-color:#b6cf99;background:#f8faf4}
+.aegis-question-option:focus-visible{outline:2px solid #a2c67b;outline-offset:2px}
+.aegis-question-option[aria-pressed="true"]{box-shadow:inset 3px 0 #99bc76;background:#f0f6e8;border-color:#b6cf99}
+.aegis-question-option>span:last-child>span:first-child{font-size:13px!important;font-weight:500!important;line-height:1.6}
+.aegis-question-option>span:last-child>span+span{font-size:12px!important;line-height:1.6;margin-top:3px}
+.aegis-question input:not([type="file"]),.aegis-question textarea{background:#fcfdfb;border-color:#dce4d4;border-radius:11px;min-height:39px;font-size:13px!important;line-height:1.7;transition:border-color .16s,box-shadow .16s}
+.aegis-question input:focus,.aegis-question textarea:focus{border-color:#a2c67b!important;--tw-ring-color:#e7f0dc!important;box-shadow:0 0 0 3px #a2c67b20!important}
+.aegis-question-footer{margin-top:18px;padding-top:14px;border-top:1px solid #edf0e8;justify-content:flex-end}
+.aegis-question-footer>button{min-height:36px;font-size:12px!important;border-radius:10px}
+.aegis-question-submit{min-width:110px;box-shadow:0 2px 6px #789b5615}
+.aegis-question button:disabled{cursor:not-allowed}
+@keyframes aegisQuestionEnter{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.aegis-question{animation:none}.aegis-question *{transition:none!important}}
+@media(max-width:600px){.aegis-question-body{padding:14px!important}.aegis-question-heading{padding:12px 14px}.aegis-question-footer>button:first-child{flex:1}}
+
+/* Vendor accents are local to the device configuration drawer. */
+.aegis-device-config .aegis-vendor-badge,.aegis-device-config .aegis-device-assist-icon{background:var(--device-soft)!important;color:var(--device-ink)!important}
+.aegis-device-config .aegis-device-tab[aria-pressed="true"]{background:var(--device-soft)!important;color:var(--device-ink)!important;border-color:var(--device-accent)!important}
+.aegis-device-config .aegis-device-docs{background:var(--device-soft)!important;border-color:var(--device-line)!important;color:var(--device-ink)!important}
+.aegis-device-config input:focus,.aegis-device-config select:focus{border-color:var(--device-accent)!important;box-shadow:0 0 0 3px var(--device-soft)!important}
+.aegis-device-config [data-device-toggle="on"]{background:var(--device-accent)!important}
+.aegis-device-config .aegis-device-save{background:var(--device-accent)!important;color:#fff!important;min-height:40px;border-radius:12px!important;box-shadow:0 3px 10px var(--device-soft)}
+.aegis-device-config .aegis-device-save:hover:not(:disabled){background:var(--device-hover)!important}
+.aegis-device-config .aegis-device-save:focus-visible{outline:2px solid var(--device-accent);outline-offset:3px}
+
+.aegis-device-card .aegis-card-vendor{background:var(--device-soft)!important;color:var(--device-ink)!important}
+.aegis-device-card .aegis-device-logo{display:flex;align-items:center;justify-content:center;width:38px;height:38px;background:#fff;border:1px solid var(--device-line);border-radius:12px}
+.aegis-device-card[data-selected="true"]{background:var(--device-soft)!important;border-color:var(--device-accent)!important;--tw-ring-color:var(--device-line)!important}
+.aegis-device-card:hover{border-color:var(--device-line)!important}
+.aegis-manual-vendor>div:first-child{background:var(--device-soft)!important;border-color:var(--device-line)!important}
+
+/* The entire drawer follows its vendor's pale accent, including empty space. */
+.aegis-device-config{background:var(--device-soft,#f1f6e9)!important}
+.aegis-device-config>div:first-child{background:color-mix(in srgb,var(--device-soft) 48%,white)!important;border-color:var(--device-line)!important}
+.aegis-device-config input,.aegis-device-config select{background:#fff!important;border-color:var(--device-line)!important}
+
+/* Soft vendor color blooms fade into the neutral canvas. */
+.aegis-device-config{
+ background-color:#fafbf9!important;
+ background-image:
+  radial-gradient(ellipse 110% 48% at 0% 0%,color-mix(in srgb,var(--device-accent) 12%,transparent) 0%,color-mix(in srgb,var(--device-soft) 65%,transparent) 42%,transparent 78%),
+  radial-gradient(ellipse 95% 45% at 100% 72%,color-mix(in srgb,var(--device-accent) 6%,transparent) 0%,transparent 75%),
+  linear-gradient(155deg,#fff 0%,color-mix(in srgb,var(--device-soft) 28%,#fff) 52%,#fafbf9 100%)!important;
+}
+.aegis-device-config>div:first-child{
+ background:linear-gradient(125deg,color-mix(in srgb,var(--device-soft) 80%,#fff),#ffffffd9 82%)!important;
+ border-bottom-color:color-mix(in srgb,var(--device-line) 65%,#fff)!important;
+}
+.aegis-device-config input,.aegis-device-config select{border-color:color-mix(in srgb,var(--device-line) 55%,#e7e9e4)!important}
+.aegis-device-config .aegis-device-tab[aria-pressed="true"]{background:linear-gradient(145deg,var(--device-soft),#ffffffb8)!important}
+
+/* Model brand identities and soft brand gradients. */
+.aegis-model-brand-icon{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:36px;height:36px;padding:7px;border:1px solid color-mix(in srgb,var(--brand-accent) 15%,white);border-radius:11px;background:linear-gradient(140deg,#fff,var(--brand-soft));color:var(--brand-accent);box-shadow:0 2px 5px #263a5310}
+.aegis-model-brand-icon img,.aegis-model-brand-icon svg{display:block;width:100%;height:100%;object-fit:contain}
+.aegis-model-brand-icon.is-small{width:27px;height:27px;padding:5px;border-radius:8px}
+.aegis-provider-choice,.aegis-model-branded,.aegis-default-model-brand,.aegis-provider-card{background:radial-gradient(ellipse at 0% 0%,var(--brand-soft),transparent 78%),linear-gradient(130deg,#fff 40%,color-mix(in srgb,var(--brand-soft) 38%,#fff))!important;border-color:color-mix(in srgb,var(--brand-accent) 14%,#eee)!important}
+.aegis-provider-choice:hover,.aegis-model-branded:hover{border-color:color-mix(in srgb,var(--brand-accent) 45%,#fff)!important;box-shadow:0 4px 15px color-mix(in srgb,var(--brand-accent) 9%,transparent)}
+.aegis-provider-choice[aria-pressed="true"],.aegis-provider-card[aria-selected="true"]{border-color:color-mix(in srgb,var(--brand-accent) 50%,#fff)!important;box-shadow:inset 3px 0 var(--brand-accent)!important;--tw-ring-color:color-mix(in srgb,var(--brand-accent) 25%,transparent)!important}
+.aegis-provider-choice>svg{color:var(--brand-accent)!important}
+.aegis-model-branded>div:first-child{flex-wrap:nowrap!important}
+.aegis-model-branded .aegis-model-brand-icon{width:32px;height:32px;padding:6px}
+.aegis-model-overview>.aegis-default-model-brand{background:radial-gradient(ellipse at 0% 0%,var(--brand-soft),transparent 80%),#fff!important;color:#33402d!important}
+/* Individually designed agent emblems. */
+.aegis-agent-identity{position:relative;display:inline-flex;align-items:center;justify-content:center;width:38px;height:38px;flex-shrink:0;color:var(--agent-accent);background:linear-gradient(140deg,#fff 0%,var(--agent-soft) 60%,color-mix(in srgb,var(--agent-accent) 18%,#fff));border:1px solid color-mix(in srgb,var(--agent-accent) 22%,#fff);border-radius:12px;box-shadow:0 3px 7px color-mix(in srgb,var(--agent-accent) 12%,transparent)}
+.aegis-agent-identity>svg{width:23px;height:23px}
+.aegis-agent-identity>i{position:absolute;right:3px;bottom:3px;width:5px;height:5px;border-radius:50%;background:var(--agent-accent);border:1px solid #fff}
+.aegis-agent-identity.is-atlas{background:linear-gradient(140deg,#fff,#f0f6e8);padding:3px}
+.aegis-agent-identity>img{width:100%;height:100%;object-fit:contain}
+.aegis-agent-card .aegis-agent-icon-wrap{width:38px!important;height:38px!important;background:none!important;border-radius:12px!important;color:var(--agent-accent)!important}
+.aegis-agent-card{background:radial-gradient(ellipse 100% 80% at 0% 0%,color-mix(in srgb,var(--agent-soft) 65%,#fff),transparent 82%),linear-gradient(145deg,#fff 55%,color-mix(in srgb,var(--agent-soft) 42%,#fff))!important;border-color:color-mix(in srgb,var(--agent-accent) 13%,#e9ede7)!important}
+.aegis-agent-card:hover{border-color:color-mix(in srgb,var(--agent-accent) 40%,#fff)!important}
+.dark :is(.aegis-agent-card,.aegis-provider-choice,.aegis-model-branded,.aegis-default-model-brand,.aegis-provider-card){background:radial-gradient(ellipse at 0% 0%,color-mix(in srgb,var(--agent-accent,var(--brand-accent)) 12%,transparent),transparent 75%),rgb(var(--ui-surface))!important}
+
+/* Model configuration sheets: fixed responsive width, quiet brand surfaces. */
+.aegis-model-sheet{--brand-accent:#789b56;--brand-soft:#f1f6e9;background:radial-gradient(ellipse 100% 50% at 0% 0%,var(--brand-soft),transparent 85%),linear-gradient(150deg,#fff,color-mix(in srgb,var(--brand-soft) 30%,#fff))!important}
+.aegis-model-sheet>div:first-of-type{border-bottom-color:color-mix(in srgb,var(--brand-accent) 14%,white)!important}
+.aegis-model-sheet .aegis-model-create-body{padding:4px}
+.aegis-model-sheet input:not([type=checkbox]),.aegis-model-sheet select{min-height:40px;border-radius:11px;border-color:#dfe5d8;background:#fff;font-size:13px}
+.aegis-model-sheet input:focus,.aegis-model-sheet select:focus{outline:none;border-color:var(--brand-accent)!important;--tw-ring-color:var(--brand-soft)!important;box-shadow:0 0 0 3px var(--brand-soft)!important}
+.aegis-model-sheet [role=tablist]{padding:4px;border:1px solid color-mix(in srgb,var(--brand-accent) 13%,white);border-radius:13px;background:color-mix(in srgb,var(--brand-soft) 65%,white)}
+.aegis-model-sheet [role=tab]{border-radius:9px;font-size:12px;min-height:36px}
+.aegis-model-sheet [role=tab][aria-selected=true]{color:var(--brand-accent);background:#fff;box-shadow:0 2px 5px #30442b0b}
+.aegis-model-discovery>ul{border:0!important;background:transparent!important;display:flex;flex-direction:column;gap:8px;padding:2px}
+.aegis-model-discovery .aegis-discovery-row{border:1px solid color-mix(in srgb,var(--brand-accent) 15%,#eee);border-radius:12px;background:linear-gradient(125deg,var(--brand-soft),#fff 82%);padding:12px;min-height:60px}
+.aegis-discovery-row .aegis-model-brand-icon{width:30px;height:30px;padding:6px}
+.aegis-discovery-row>span{font-size:13px;line-height:1.6}
+.aegis-discovery-row [role=switch][aria-checked=true]{background:var(--brand-accent)!important}
+.aegis-model-sheet label{font-size:12px!important;color:#64715b!important}
+.aegis-model-sheet .aegis-model-discovery button{transition:background-color .16s,color .16s}
+
+/* Semantic resource emblems, shared by installed resources and the Hub. */
+.aegis-resource-identity{position:relative;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:36px;height:36px;border-radius:11px;color:var(--resource-accent);background:linear-gradient(145deg,#fff,var(--resource-soft));border:1px solid color-mix(in srgb,var(--resource-accent) 22%,white);box-shadow:0 2px 5px color-mix(in srgb,var(--resource-accent) 9%,transparent)}
+.aegis-resource-identity .aegis-resource-symbol{width:21px;height:21px}
+.aegis-resource-badge{position:absolute;right:-2px;bottom:-2px;display:flex;align-items:center;justify-content:center;width:13px;height:13px;border:1px solid #fff;background:var(--resource-accent);color:#fff;border-radius:4px}
+.aegis-resource-badge svg{width:8px;height:8px}
+.aegis-resource-identity.is-compact{width:28px;height:28px;border-radius:9px}
+.aegis-resource-identity.is-compact .aegis-resource-symbol{width:17px;height:17px}
+.aegis-resource-icon-wrap{width:36px!important;height:36px!important;background:transparent!important}
+.aegis-resource-surface{background:radial-gradient(ellipse at 0% 0%,var(--resource-soft),transparent 80%),linear-gradient(145deg,#fff 50%,color-mix(in srgb,var(--resource-soft) 45%,#fff))!important;border-color:color-mix(in srgb,var(--resource-accent) 12%,#e7eae5)!important}
+.aegis-resource-surface:hover{border-color:color-mix(in srgb,var(--resource-accent) 35%,#fff)!important}
+.aegis-hub-resource-row{background:linear-gradient(100deg,color-mix(in srgb,var(--resource-soft) 70%,white),#fff 70%)}
+.aegis-hub-resource-row:hover{background:linear-gradient(100deg,var(--resource-soft),#fff 95%)}
+.aegis-hub-resource-row td{padding-top:12px;padding-bottom:12px}
+.aegis-model-brand-icon.is-composer{width:19px;height:19px;padding:3px;border-radius:6px;box-shadow:none}
+.aegis-model-brand-icon.is-composer-choice{width:25px;height:25px;padding:4px;border-radius:8px;box-shadow:none}
+button[data-chat-model-choice]{background:linear-gradient(110deg,var(--brand-soft),#fff 90%)!important;border:1px solid color-mix(in srgb,var(--brand-accent) 12%,white)!important;border-radius:10px!important;margin:3px 0;min-height:38px}
+button[data-chat-model-choice]:hover{border-color:color-mix(in srgb,var(--brand-accent) 40%,white)!important}
+
+/* Shared vendor logos and resource editors. */
+.aegis-resource-vendor-logo{width:26px;height:26px;object-fit:contain;filter:none}
+.aegis-resource-identity.is-compact .aegis-resource-vendor-logo{width:20px;height:20px}
+.aegis-resource-identity[data-vendor]{background:linear-gradient(140deg,#fff,var(--resource-soft));padding:5px}
+.aegis-resource-identity[data-vendor] .aegis-resource-badge{display:none}
+.aegis-agent-editor,.aegis-skill-editor{background:#f8faf6!important}
+.aegis-agent-editor .yushu-creation-header,.aegis-skill-editor .yushu-creation-header{background:linear-gradient(115deg,#fff 20%,#f1f6e9)!important}
+.aegis-agent-form>div,.aegis-agent-form>section{padding:16px 18px;border:1px solid #e5eadf;border-radius:16px;background:linear-gradient(125deg,#fff,#fbfcf9);box-shadow:0 2px 7px #31492303}
+.aegis-agent-form label{font-size:13px!important;color:#526047!important;font-weight:500}
+.aegis-agent-form input,.aegis-agent-form textarea,.aegis-agent-form select{border-radius:10px!important;border-color:#e1e8da!important;background:#fff!important;color:#35432e!important;font-family:inherit!important;font-size:13px!important;line-height:1.65}
+.aegis-agent-form textarea{height:260px!important;line-height:1.8;font-size:13px!important;padding:14px 16px!important;scrollbar-gutter:stable}
+.aegis-agent-form :is(input,textarea,select):focus{outline:none;box-shadow:0 0 0 3px #a2c67b25!important;border-color:#a2c67b!important}
+.aegis-agent-form :is(input,textarea):disabled{background:#f7f9f4!important;color:#5e6a56!important;opacity:1;cursor:default}
+.aegis-agent-form>div:first-child:has(svg){background:#f1f6e9;color:#637d46;border-color:#dce8cd;font-size:12px}
+.aegis-agent-scheduling{position:relative;display:flex;flex-wrap:wrap;align-items:center;gap:12px}
+.aegis-agent-scheduling>div:first-child{flex:1;min-width:180px}
+.aegis-agent-scheduling h3{font-size:13px;font-weight:600;color:#455b35}
+.aegis-agent-scheduling p{font-size:12px;color:#829074;line-height:1.8;margin-top:4px}
+.aegis-agent-scheduling>p{width:100%;border-top:1px solid #edf1e7;padding-top:8px}
+.aegis-agent-scheduling .aegis-scheduling-panel{bottom:100%;top:auto;margin-bottom:8px;left:auto;right:0}
+.aegis-skill-editor .yushu-creation-icon{background:none!important}
+.aegis-skill-editor :is(input,textarea,select){font-size:13px;border-radius:11px;border-color:#e0e8d8}
+.aegis-skill-editor .text-red-500:not([role=alert]){color:#779854}
+.dark :is(.aegis-agent-editor,.aegis-skill-editor){background:rgb(var(--ui-surface))!important}
+.dark .aegis-agent-form>div,.dark .aegis-agent-form>section{background:rgb(var(--ui-surface))!important;border-color:rgb(var(--ui-border))}
+
+/* Device inventory carries the same soft vendor palette as its configuration. */
+.aegis-device-card{background:radial-gradient(ellipse at 0% 0%,color-mix(in srgb,var(--device-soft) 90%,white),transparent 85%),linear-gradient(125deg,#fff 35%,var(--device-soft))!important;border-color:var(--device-line)!important;box-shadow:0 2px 8px color-mix(in srgb,var(--device-accent) 4%,transparent)}
+.aegis-device-card:hover{border-color:var(--device-accent)!important;box-shadow:0 6px 16px color-mix(in srgb,var(--device-accent) 10%,transparent)}
+.aegis-device-card[data-selected="true"]{background:linear-gradient(125deg,var(--device-soft),color-mix(in srgb,var(--device-accent) 12%,white))!important}
+/* API, MCP and individual tool configuration surfaces inherit their resource palette. */
+.aegis-resource-config{background:linear-gradient(155deg,color-mix(in srgb,var(--resource-soft) 75%,white),#fff 65%)!important;color:#344039}
+.aegis-resource-config>div:first-child{background:radial-gradient(ellipse at 100% 0%,var(--resource-soft),#fff 90%);border-color:color-mix(in srgb,var(--resource-accent) 15%,#e8ece7)!important}
+.aegis-resource-config>div:first-child .w-10.h-10{background:none!important}
+.aegis-resource-config :is(input,select,textarea){border-radius:11px!important;border-color:color-mix(in srgb,var(--resource-accent) 20%,#e8ece7)!important;background:linear-gradient(135deg,#fff,color-mix(in srgb,var(--resource-soft) 30%,white))!important;font-size:13px!important}
+.aegis-resource-config :is(input,select,textarea):focus{outline:none;box-shadow:0 0 0 3px color-mix(in srgb,var(--resource-accent) 12%,transparent)!important;border-color:var(--resource-accent)!important}
+.aegis-resource-config button:not(:has(.text-red-500)){border-radius:11px;transition:background .18s,border-color .18s,box-shadow .18s}
+.aegis-resource-config button.border:not([class*="border-red-"]){border-color:color-mix(in srgb,var(--resource-accent) 20%,#e5e9e2)!important;background:linear-gradient(120deg,#fff,var(--resource-soft))!important;color:var(--resource-accent)!important}
+.aegis-resource-config button.border:hover{box-shadow:0 2px 7px color-mix(in srgb,var(--resource-accent) 12%,transparent)}
+.aegis-resource-config button:is(.bg-red-600,.bg-purple-600,.bg-blue-600){background:var(--resource-accent)!important;color:white!important}
+.aegis-resource-config [data-resource-config-tab][aria-selected="true"]{background:linear-gradient(0deg,var(--resource-soft),#fff)!important;color:var(--resource-accent)!important;border-color:var(--resource-accent)!important}
+.aegis-resource-config :is(.bg-gray-50,.bg-zinc-50){background:linear-gradient(125deg,#fff,var(--resource-soft))!important}
+.aegis-resource-config :is(.border-green-200.bg-green-50\/60,.border-green-200.bg-green-50){background:linear-gradient(125deg,#fff,var(--resource-soft))!important;border-color:color-mix(in srgb,var(--resource-accent) 20%,white)!important}
+.aegis-resource-config :is(.rounded-lg.border,.rounded-xl.border){border-radius:14px}
+.dark :is(.aegis-device-card,.aegis-resource-config){background:radial-gradient(ellipse at 0% 0%,color-mix(in srgb,var(--resource-accent,var(--device-accent)) 15%,transparent),transparent 90%),rgb(var(--ui-surface))!important}
+
+.aegis-agent-form .aegis-agent-resource-card{margin:7px 8px!important;padding:11px 12px!important;border:1px solid color-mix(in srgb,var(--resource-accent) 16%,white)!important;border-radius:12px!important;background:linear-gradient(115deg,var(--resource-soft),#fff 95%)!important;align-items:center!important;gap:10px!important}
+.aegis-agent-form .aegis-agent-resource-card[data-checked="true"]{border-color:color-mix(in srgb,var(--resource-accent) 38%,white)!important}
+.aegis-agent-form .aegis-agent-resource-card:has(input:disabled){cursor:default!important}
+.aegis-agent-resource-card .text-gray-500,.aegis-agent-resource-card .text-gray-800{color:#3f4d3c!important}
+.aegis-agent-resource-card input[type=checkbox]{accent-color:var(--resource-accent);box-shadow:none!important}
+.aegis-agent-form :is(.aegis-temperature-help,.aegis-role-help){font-size:12px;color:#7b8871;line-height:1.9;padding:3px 0}
+.aegis-composer-resource{background:linear-gradient(115deg,var(--resource-soft),#fff 95%)!important;border:1px solid color-mix(in srgb,var(--resource-accent) 15%,white);margin:4px 0;min-height:46px}
+.aegis-composer-resource:hover{border-color:color-mix(in srgb,var(--resource-accent) 45%,white);box-shadow:0 2px 8px color-mix(in srgb,var(--resource-accent) 8%,transparent)}
+.aegis-composer-resource>span:first-child{background:transparent!important}
+.aegis-resource-config>div.bg-white{background:transparent!important}
+
+.aegis-welcome-emblem{filter:drop-shadow(0 7px 13px #64834816);animation:atlas-emblem-enter .55s ease-out both}
+.aegis-welcome-emblem img{transition:transform .25s ease,filter .25s ease}
+.aegis-welcome-emblem:hover img{transform:translateY(-2px);filter:drop-shadow(0 4px 7px #64834818)}
+@keyframes atlas-emblem-enter{from{opacity:0;transform:translateY(7px) scale(.94)}to{opacity:1;transform:translateY(0) scale(1)}}
+@media(prefers-reduced-motion:reduce){.aegis-welcome-emblem{animation:none}.aegis-welcome-emblem img{transition:none}.aegis-welcome-emblem:hover img{transform:none}}
+
+.aegis-agent-model-trigger{background:linear-gradient(110deg,var(--brand-soft),#fff 95%)!important;border-color:color-mix(in srgb,var(--brand-accent) 20%,#e5e9e0)!important;color:#425039}
+.aegis-agent-model-trigger:focus-visible{outline:2px solid #a2c67b;outline-offset:2px}
+.aegis-agent-model-option{background:linear-gradient(110deg,var(--brand-soft),#fff 95%);border-color:color-mix(in srgb,var(--brand-accent) 12%,white);color:#43503d;margin:4px 0}
+.aegis-agent-model-option.is-active{border-color:var(--brand-accent);box-shadow:0 0 0 2px color-mix(in srgb,var(--brand-accent) 8%,transparent)}
+.aegis-agent-model-option[aria-selected=true]{border-color:#a2c67b;color:#63843f}
+.dark :is(.aegis-agent-model-menu,.aegis-agent-model-option,.aegis-agent-model-trigger){background:rgb(var(--ui-surface))!important;color:rgb(var(--ui-text))}
+/* Resource detail workspaces inherit the selected card's palette. */
+.aegis-resource-detail{background:linear-gradient(155deg,var(--resource-soft),#fff 68%)!important}
+.aegis-resource-detail .yushu-creation-header,.aegis-tool-detail>div:first-child{background:linear-gradient(110deg,#fff,var(--resource-soft))!important;border-color:color-mix(in srgb,var(--resource-accent) 16%,#e8ece7)!important}
+.aegis-detail-form{display:flex;flex-direction:column;gap:18px}
+.aegis-detail-form>[data-detail-section],.aegis-detail-sections>div{padding:18px;border-radius:16px;border:1px solid color-mix(in srgb,var(--resource-accent) 13%,#e7eae7);background:linear-gradient(135deg,#fff,color-mix(in srgb,var(--resource-soft) 38%,white))}
+.aegis-resource-detail .aegis-detail-summary{padding:22px!important;border:1px solid color-mix(in srgb,var(--resource-accent) 22%,white)!important;border-radius:18px;background:radial-gradient(ellipse at 100% 0%,color-mix(in srgb,var(--resource-accent) 11%,white),transparent 80%),linear-gradient(125deg,#fff,var(--resource-soft))!important;box-shadow:0 4px 18px color-mix(in srgb,var(--resource-accent) 5%,transparent);margin-bottom:18px}
+.aegis-detail-form>.aegis-detail-summary{margin-bottom:0}
+.aegis-detail-summary-heading{display:flex;align-items:center;gap:14px}
+.aegis-detail-summary-heading>.aegis-resource-identity{width:48px;height:48px;border-radius:15px}
+.aegis-detail-summary h3{font-size:20px;font-weight:650;letter-spacing:-.4px;color:#293b36;line-height:1.4;overflow-wrap:anywhere}
+.aegis-detail-eyebrow{font-size:10px;font-weight:600;letter-spacing:1.5px;color:var(--resource-accent);margin-bottom:5px}
+.aegis-detail-tags{display:flex;flex-wrap:wrap;gap:6px;margin-top:16px}
+.aegis-detail-tags>span{padding:4px 9px;font-size:11px;line-height:1.5;border-radius:7px;color:var(--resource-accent);background:color-mix(in srgb,var(--resource-soft) 75%,white);border:1px solid color-mix(in srgb,var(--resource-accent) 13%,white)}
+.aegis-detail-metrics{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px;padding-top:16px;border-top:1px solid color-mix(in srgb,var(--resource-accent) 13%,white)}
+.aegis-detail-metrics>div{flex:1;min-width:90px}
+.aegis-detail-metrics dt{font-size:11px;color:#87918b;margin-bottom:5px}
+.aegis-detail-metrics dd{font-size:13px;font-weight:550;color:#42544b;overflow-wrap:anywhere}
+.aegis-resource-detail .aegis-detail-form>div,.aegis-resource-detail .aegis-detail-form>section{border-color:color-mix(in srgb,var(--resource-accent) 14%,#e7eae7)}
+.aegis-resource-detail :is(input:not([type=checkbox]):not([type=range]),textarea,select){border-radius:11px!important;border-color:color-mix(in srgb,var(--resource-accent) 18%,#e6eae5)!important;font-size:13px!important;background:#fff!important}
+.aegis-resource-detail :is(input,textarea,select):focus{outline:none;border-color:var(--resource-accent)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--resource-accent) 11%,transparent)!important}
+.aegis-resource-detail [data-detail-tab][aria-selected=true]{color:var(--resource-accent)!important;border-color:var(--resource-accent)!important;background:linear-gradient(0deg,var(--resource-soft),white)!important}
+.aegis-resource-detail :is(button.bg-red-600,button.bg-purple-600,button.bg-blue-600){background:var(--resource-accent)!important;color:#fff!important}
+.aegis-tool-detail-body{scrollbar-gutter:stable}
+.aegis-tool-detail .aegis-detail-sections{font-size:13px;line-height:1.75}
+.aegis-tool-detail table{font-size:12px;border-collapse:separate;border-spacing:0;overflow:hidden;border-radius:10px}
+.aegis-tool-detail th{background:var(--resource-soft)!important;color:var(--resource-accent)!important;font-weight:550}
+.aegis-tool-detail td{padding-top:12px;padding-bottom:12px}
+.aegis-skill-markdown{padding:18px!important;line-height:1.85!important;background:linear-gradient(140deg,#fff,var(--resource-soft))!important;border:1px solid color-mix(in srgb,var(--resource-accent) 15%,white);overflow-wrap:anywhere}
+.aegis-skill-markdown :is(h1,h2,h3){color:#3b4f45;line-height:1.5}
+.aegis-skill-markdown a{color:var(--resource-accent)}
+.aegis-skill-markdown pre{overflow-x:auto;border-radius:11px}
+/* Channel brand colors apply to navigation and the complete configuration surface. */
+.aegis-channel-card{border-radius:13px!important;border-color:color-mix(in srgb,var(--channel-accent) 16%,#e8ece9)!important;background:radial-gradient(ellipse at 0% 0%,var(--channel-soft),transparent 95%),linear-gradient(120deg,#fff,var(--channel-soft))!important;transition:background .2s,border-color .2s,box-shadow .2s!important}
+.aegis-channel-card:hover{border-color:color-mix(in srgb,var(--channel-accent) 45%,white)!important;box-shadow:0 3px 10px color-mix(in srgb,var(--channel-accent) 9%,transparent)}
+.aegis-channel-card[aria-pressed=true]{border-color:color-mix(in srgb,var(--channel-accent) 55%,white)!important;background:linear-gradient(115deg,var(--channel-soft),color-mix(in srgb,var(--channel-accent) 13%,white))!important;box-shadow:inset 3px 0 var(--channel-accent),0 3px 10px color-mix(in srgb,var(--channel-accent) 7%,transparent)}
+.aegis-channel-card .font-medium{color:var(--channel-accent)!important}
+.aegis-channel-panel{border-radius:17px!important;border-color:color-mix(in srgb,var(--channel-accent) 17%,#e8ece9)!important;background:linear-gradient(150deg,color-mix(in srgb,var(--channel-soft) 65%,white),#fff 70%)!important}
+.aegis-channel-panel>div:first-child{background:radial-gradient(ellipse at 100% 0%,color-mix(in srgb,var(--channel-accent) 13%,white),transparent 85%),linear-gradient(110deg,#fff,var(--channel-soft));border-color:color-mix(in srgb,var(--channel-accent) 15%,white)!important}
+.aegis-channel-panel h2{color:var(--channel-accent)!important}
+.aegis-channel-section{border-radius:13px!important;border-color:color-mix(in srgb,var(--channel-accent) 16%,#e8ece9)!important;background:#fff}
+.aegis-channel-section-heading{background:linear-gradient(110deg,var(--channel-soft),#fff)!important;padding:16px 18px!important}
+.aegis-channel-section-heading>div>div:first-child{color:var(--channel-accent)}
+.aegis-channel-panel :is(input:not([type=checkbox]),textarea,select){border-radius:10px!important;border-color:color-mix(in srgb,var(--channel-accent) 18%,#e7eae7)!important;background:linear-gradient(120deg,#fff,color-mix(in srgb,var(--channel-soft) 25%,white))!important}
+.aegis-channel-panel :is(input,textarea,select):focus{outline:none;border-color:var(--channel-accent)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--channel-accent) 12%,transparent)!important}
+.aegis-channel-panel button.bg-slate-800{background:var(--channel-accent)!important;border-radius:10px;box-shadow:0 3px 8px color-mix(in srgb,var(--channel-accent) 15%,transparent)}
+.aegis-channel-panel button.bg-slate-800:hover{filter:brightness(.94)}
+.aegis-channel-panel button.text-blue-600{color:var(--channel-accent)!important;border-color:color-mix(in srgb,var(--channel-accent) 35%,white)!important;background:linear-gradient(120deg,#fff,var(--channel-soft))!important}
+.aegis-channel-panel input[type=checkbox]{accent-color:var(--channel-accent)}
+.dark :is(.aegis-resource-detail,.aegis-channel-panel,.aegis-channel-card,.aegis-channel-section,.aegis-channel-section-heading){background:rgb(var(--ui-surface))!important;color:rgb(var(--ui-text))}
+.dark .aegis-resource-detail :is(.aegis-detail-summary,[data-detail-section],.aegis-detail-sections>div),.dark .aegis-channel-panel>div:first-child{background:rgb(var(--ui-surface))!important}
+@media(prefers-reduced-motion:reduce){.aegis-channel-card{transition:none!important}}
+.aegis-resource-detail .yushu-creation-tab[aria-pressed=true]{color:var(--resource-accent)!important;border-color:var(--resource-accent)!important;background:linear-gradient(135deg,#fff,var(--resource-soft))!important}
+.aegis-resource-detail .yushu-creation-footer{background:linear-gradient(110deg,#fff,color-mix(in srgb,var(--resource-soft) 50%,white))!important;border-color:color-mix(in srgb,var(--resource-accent) 15%,white)!important}
+.aegis-tool-detail button.bg-slate-700{background:var(--resource-accent)!important}

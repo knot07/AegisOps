@@ -111,6 +111,9 @@ export interface EntitySheetProps {
   entityType: string;
   /** Displayed in title for edit mode, e.g. "rex" */
   entityName?: string;
+  resizable?: boolean;
+  surfaceClassName?: string;
+  surfaceStyle?: React.CSSProperties;
   /** Small icon in the header */
   icon?: React.ReactNode;
   /** Form content. Use useEntitySheet() inside to call openRex(). */
@@ -186,6 +189,9 @@ export default function EntitySheet({
   mode,
   entityType,
   entityName,
+  resizable = true,
+  surfaceClassName = '',
+  surfaceStyle,
   icon,
   children,
   rexSystemContext,
@@ -236,7 +242,7 @@ export default function EntitySheet({
   const showTabs = !(hideRex && hideTest);
   const hasFormTab = !hideForm;
   const title =
-    mode === 'create'
+    hideForm && !onExtractFromRex ? entityType : mode === 'create'
       ? t('entity.createTitle', { entityType })
       : entityName
         ? t('entity.editTitleWithName', { entityType, entityName })
@@ -535,11 +541,11 @@ export default function EntitySheet({
         tabIndex={-1}
         data-creation-surface="drawer"
         data-closing={closing || undefined}
-        className="yushu-creation-sheet yushu-entity-sheet fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors max-md:!w-full"
-        style={{ width: drawerWidth, maxWidth: '100%' }}
+        className={`yushu-creation-sheet yushu-entity-sheet ${surfaceClassName} fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors max-md:!w-full`}
+        style={{ width: drawerWidth, maxWidth: '100%', ...surfaceStyle }}
       >
         {/* Drag handle */}
-        <div
+        {resizable && <div
           className={`absolute left-0 top-0 bottom-0 w-1 cursor-ew-resize hover:bg-red-400 transition-colors max-md:hidden ${
             isDragging ? 'bg-red-500' : ''
           }`}
@@ -548,7 +554,7 @@ export default function EntitySheet({
           <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
             <GripVertical className="w-3 h-6 text-gray-300 hover:text-gray-500" />
           </div>
-        </div>
+        </div>}
         {/* ── Header ── */}
         <div className="yushu-creation-header flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4 max-md:px-4">
@@ -749,7 +755,7 @@ export default function EntitySheet({
                         />
                       ) : (
                         <div className="text-center max-w-md">
-                          <MessageSquare className="w-10 h-10 text-red-500 mx-auto mb-3" />
+                          <img src="/favicon.svg" alt="Atlas" className="w-14 h-14 mx-auto mb-4" />
                           <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('entity.rexAssist')}</h3>
                           <p className="text-sm text-gray-500">{t('entity.rexReady')}</p>
                         </div>

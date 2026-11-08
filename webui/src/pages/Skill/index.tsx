@@ -1,3 +1,4 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   BookOpen,
@@ -743,10 +744,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
           className="flex items-start gap-2.5 min-w-0 w-full text-left group/name focus:outline-none"
         >
           <span className="w-7 h-7 rounded-lg flex items-center justify-center shrink-0 bg-gray-100 text-gray-400 mt-0.5">
-            {isUser
-              ? <FolderOpen className="w-3.5 h-3.5" />
-              : <Sparkles className="w-3.5 h-3.5" />
-            }
+            <ResourceIdentity kind="skill" name={skill.name} label={skill.description?.replace(/\baegisops\b/gi, 'AegisOps')} compact />
           </span>
           <span className="min-w-0 flex-1">
             <span className="block font-medium text-gray-900 truncate transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline">
@@ -836,14 +834,16 @@ function SkillCard({ skill, isSelected, installingDeps, toggling, onSelect, onIn
 
   return (
     <PluginCard
-      icon={isUser ? <FolderOpen className="h-4 w-4" /> : <Sparkles className="h-4 w-4" />}
+      icon={<ResourceIdentity kind="skill" name={skill.name} label={skill.description?.replace(/\baegisops\b/gi, 'AegisOps')} />}
+      style={resourceStyle('skill',skill.name,skill.description)}
+      className="aegis-resource-surface" iconClassName="aegis-resource-icon-wrap"
       title={skill.name}
       tags={<PluginSourceTag builtin={!isUser} label={isUser ? t('table.custom') : t('table.builtin')} />}
       status={<EnabledBadge enabled={enabled} />}
       statusControl={<EnabledSwitch enabled={enabled} loading={toggling} label={t('table.enabled')}
         title={enabled ? t('toggle.enabledTip') : t('toggle.disabledTip')}
         onChange={(event) => onToggle(skill, event)} />}
-      description={skill.description}
+      description={skill.description?.replace(/\baegisops\b/gi, 'AegisOps')}
       emptyDescription={t('sheet.noDescription')}
       meta={<>
         {hasMissingDeps && <div className="mb-1 flex items-start gap-1 text-amber-600" title={(skill.missing ?? []).join(', ')}>

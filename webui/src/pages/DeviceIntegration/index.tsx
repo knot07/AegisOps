@@ -72,16 +72,33 @@ interface DeviceVendor {
 }
 
 const VENDOR_PRESENTATION: Record<string, Omit<DeviceVendor, 'id'>> = {
-  '360':       { nameCn: '360',    nameEn: '360',        color: 'bg-zinc-100 text-zinc-700', mark: '360', logoSrc: '/vendor-logos/360.png' },
+  '360':       { nameCn: '360',    nameEn: '360',        color: 'bg-zinc-100 text-zinc-700', mark: '360', logoSrc: '/vendor-logos/360-hd.svg' },
   huaweicloud: { nameCn: '华为云', nameEn: 'Huawei Cloud', color: 'bg-red-100 text-red-700', mark: '华', logoSrc: '/vendor-logos/huaweicloud.png' },
-  huorong:     { nameCn: '火绒',   nameEn: 'Huorong',    color: 'bg-amber-100 text-amber-700', mark: '火', logoSrc: '/vendor-logos/huorong.png' },
-  sangfor:     { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800', mark: '深', logoSrc: '/vendor-logos/sangfor.png' },
+  huorong:     { nameCn: '火绒',   nameEn: 'Huorong',    color: 'bg-amber-100 text-amber-700', mark: '火', logoSrc: '/vendor-logos/huorong-hd.png' },
+  sangfor:     { nameCn: '深信服', nameEn: 'Sangfor',    color: 'bg-blue-100 text-blue-800', mark: '深', logoSrc: '/vendor-logos/sangfor-hd.png' },
   qianxin:     { nameCn: '奇安信', nameEn: 'Qi-AnXin',   color: 'bg-purple-100 text-purple-800', mark: '奇', logoSrc: '/vendor-logos/qianxin.png' },
-  threatbook:  { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800', mark: '微', logoSrc: '/vendor-logos/threatbook.png' },
+  threatbook:  { nameCn: '微步',   nameEn: 'ThreatBook', color: 'bg-orange-100 text-orange-800', mark: '微', logoSrc: '/vendor-logos/threatbook-hd.svg' },
   qingteng:    { nameCn: '青藤',   nameEn: 'Qingteng',   color: 'bg-teal-100 text-teal-800', mark: '青', logoSrc: '/vendor-logos/qingteng.png' },
   nsfocus:     { nameCn: '绿盟',   nameEn: 'NSFOCUS',    color: 'bg-green-100 text-green-800', mark: '绿', logoSrc: '/vendor-logos/nsfocus.png' },
-  chaitin:     { nameCn: '长亭',   nameEn: 'Chaitin',    color: 'bg-lime-100 text-lime-800', mark: '长', logoSrc: '/vendor-logos/chaitin.png' },
+  chaitin:     { nameCn: '长亭',   nameEn: 'Chaitin',    color: 'bg-lime-100 text-lime-800', mark: '长', logoSrc: '/vendor-logos/chaitin-hd.png' },
 };
+
+// Accent palettes follow the installed vendor logos; unknown vendors use the product theme.
+const DEVICE_ACCENTS: Record<string, [string,string,string,string,string]> = {
+  qianxin: ['#3565ae','#244c86','#eef3fb','#cbd9ef','#2b5697'],
+  threatbook: ['#cf5549','#923c34','#fcf0ed','#efcfc9','#b8473d'],
+  sangfor: ['#2d789b','#235b75','#edf5f9','#c9e0eb','#256885'],
+  qingteng: ['#168b9e','#116674','#edf8f9','#c5e5e9','#10798b'],
+  chaitin: ['#4a873c','#365f2d','#f0f7ec','#d2e5c9','#3d7431'],
+  '360': ['#459748','#316b34','#eff8ee','#cce5ca','#37833b'],
+  huaweicloud: ['#c64750','#91353c','#fcf0f1','#edcdd0','#ae3b43'],
+  huorong: ['#c47a2b','#86531e','#fcf5e9','#ecdcbd','#a96623'],
+  nsfocus: ['#65963e','#476b2c','#f3f8ed','#d8e6c8','#568333'],
+};
+function deviceTheme(vendorKey?: string): React.CSSProperties {
+  const [accent,ink,soft,line,hover] = DEVICE_ACCENTS[vendorKey || ''] || ['#8baa68','#4d6d36','#f1f6e9','#d8e5ca','#789954'];
+  return {'--device-accent':accent,'--device-ink':ink,'--device-soft':soft,'--device-line':line,'--device-hover':hover} as React.CSSProperties;
+}
 
 function vendorPresentation(vendorKey: string): DeviceVendor {
   const preset = VENDOR_PRESENTATION[vendorKey];
@@ -175,7 +192,11 @@ function ActiveCard({ device, grouping, vendorKey, selected, onClick, viewMode =
   return (
     <div
       onClick={onClick}
-      className={`${viewMode === 'cards' ? 'w-full text-left rounded-xl border p-4 transition-all duration-150 group' : 'w-full text-left rounded-lg border px-4 py-3 transition-all duration-150 group'} ${
+      data-device-card={device.id}
+      data-vendor={vendorKey || 'default'}
+      data-selected={selected}
+      style={deviceTheme(vendorKey)}
+      className={`aegis-device-card ${viewMode === 'cards' ? 'w-full text-left rounded-xl border p-4 transition-all duration-150 group' : 'w-full text-left rounded-lg border px-4 py-3 transition-all duration-150 group'} ${
         selected
           ? 'border-blue-300 bg-blue-50 shadow-sm ring-1 ring-blue-200'
           : 'border-zinc-200 bg-white hover:border-zinc-300 hover:shadow-sm'
@@ -186,7 +207,7 @@ function ActiveCard({ device, grouping, vendorKey, selected, onClick, viewMode =
         <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${
           selected ? 'bg-blue-100' : 'bg-zinc-50 group-hover:bg-zinc-100'
         }`}>
-          <PlugZap className={`w-4 h-4 ${selected ? 'text-blue-600' : 'text-zinc-500'}`} />
+          <span className="aegis-device-logo">{vendor ? <VendorMark vendor={vendor} label={vendorLabel || vendor.nameCn} className="h-8 w-8 rounded-lg" /> : <PlugZap className="w-4 h-4 text-zinc-500" />}</span>
         </div>
         <div className={viewMode === 'cards' ? 'flex-1 min-w-0' : 'flex-1 min-w-0 grid gap-x-4 gap-y-1 md:grid-cols-2 xl:grid-cols-[minmax(160px,1fr)_minmax(150px,1fr)_minmax(180px,1fr)_auto] xl:items-center'}>
           <div className="flex items-center justify-between gap-2">
@@ -202,7 +223,7 @@ function ActiveCard({ device, grouping, vendorKey, selected, onClick, viewMode =
             {vendor && (
               <>
                 <span className="text-zinc-200">·</span>
-                <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{vendorLabel}</span>
+                <span className="aegis-card-vendor text-[10px] font-medium px-1.5 py-0.5 rounded-md">{vendorLabel}</span>
               </>
             )}
           </div>
@@ -253,9 +274,9 @@ function buildDeviceAddSessionContext(templates: DeviceTemplate[]): string {
   });
 
   return [
-    '你是 AegisOps 的设备接入助手，目标是引导用户把安全设备接入到「设备接入」页面。',
+    '你是御枢 AegisOps 的设备接入助手，目标是引导用户把安全设备接入到「设备接入」页面。',
     '先判断用户要接入的是已有设备模板，还是需要创建自定义设备接入。',
-    '设备模板列表来自 FlockHub catalog 和本地已发现插件；只有 state=installed 的模板可以直接进入设备配置表单，未安装模板需要先引导用户前往 FlockHub 安装。',
+    '设备模板列表来自 插件广场 catalog 和本地已发现插件；只有 state=installed 的模板可以直接进入设备配置表单，未安装模板需要先引导用户前往 插件广场 安装。',
     '如果已有已安装模板可以满足，收集设备名称、Base URL/Host、认证字段、SSL 验证偏好等表单信息。',
     '不要要求用户在对话里暴露真实密钥；涉及 API Key、Secret、Token、密码时，只说明应填写到设备接入表单的密钥字段。',
     buildCustomDeviceModeRoutingPrompt(),
@@ -265,7 +286,7 @@ function buildDeviceAddSessionContext(templates: DeviceTemplate[]): string {
     '不要把真实密码、Token、Secret、API Key 写入 JSON；这些密钥字段留空或省略，并提示用户稍后在设备接入表单中填写。',
     '',
     '当前可见设备模板：',
-    templateLines.length ? templateLines.join('\n') : '- 暂无可见设备模板，请先在 FlockHub 安装或通过自定义设备接入创建。',
+    templateLines.length ? templateLines.join('\n') : '- 暂无可见设备模板，请先在 插件广场 安装或通过自定义设备接入创建。',
   ].join('\n');
 }
 
@@ -421,7 +442,7 @@ function buildTemplateGuidePrompt(template: DeviceTemplate): string {
     fields ? `该设备表单字段包括：${fields}。` : '该设备模板没有声明额外表单字段。',
     installed
       ? '请直接引导我确认设备名称、所属机房、连接地址、认证字段、SSL 验证和连通测试步骤。'
-      : '该模板尚未安装，请先引导我前往 FlockHub 安装或更新该设备模板，安装完成后再继续配置。',
+      : '该模板尚未安装，请先引导我前往 插件广场 安装或更新该设备模板，安装完成后再继续配置。',
     installed
       ? '信息足够后，请输出设备配置 JSON 草稿，页面会用它填充表单；不要在 JSON 中写入真实密钥。'
       : '模板安装完成前不要输出设备配置 JSON 草稿。',
@@ -507,7 +528,7 @@ function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): Cr
     ? `当前状态=${device.status}，message=${device.message || '无'}，latency_ms=${device.latency_ms ?? '无'}`
     : '当前状态=尚未保存到设备列表';
   const common = [
-    '你是 AegisOps 的设备接入助手，请基于当前设备配置上下文继续工作。',
+    '你是御枢 AegisOps 的设备接入助手，请基于当前设备配置上下文继续工作。',
     '不要要求我在 API 接入、浏览器接入、Workflow 接入之间重新选择；不要索要或复述真实密钥。',
     '敏感字段只根据“已填写/未填写”判断，不要让用户在对话里粘贴真实密码、Token、API Key 或 Secret。',
     '',
@@ -954,6 +975,7 @@ function WorkbenchSection({
 function WorkbenchAction({ label, description, onClick }: { label: string; description: string; onClick: () => void }) {
   return (
     <button
+        aria-label={label}
       type="button"
       onClick={onClick}
       title={description}
@@ -979,6 +1001,7 @@ function AddDeviceWizardPanel({
   createAndSend,
   rexComposerControls,
   onApplyRexDraft,
+  onManualSelect,
   onInstallTemplate,
   onResetWorkbench,
   onClose,
@@ -991,15 +1014,27 @@ function AddDeviceWizardPanel({
   createAndSend: (options: CreateAndSendOptions) => Promise<string>;
   rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyRexDraft: (draft: DeviceAddDraft) => void;
+  onManualSelect: (template: DeviceTemplate) => void;
   onInstallTemplate: (template: DeviceTemplate) => Promise<DeviceTemplate | null>;
   onResetWorkbench: () => void;
   onClose: () => void;
 }) {
   const { t } = useTranslation('device');
+  const [manual, setManual] = useState(false);
+  const [search, setSearch] = useState('');
+  const [installing, setInstalling] = useState<string | null>(null);
+  const selectManualTemplate = async (template: DeviceTemplate) => {
+    setInstalling(template.storage_key);
+    try {
+      const ready = template.installed ? template : await onInstallTemplate(template);
+      if (ready) onManualSelect(ready);
+    } finally { setInstalling(null); }
+  };
   const [showBuiltInTemplates, setShowBuiltInTemplates] = useState(false);
   const [workbenchResetToken, setWorkbenchResetToken] = useState(0);
 
   const handleWorkbenchClick = () => {
+    setManual(false);
     setShowBuiltInTemplates(false);
     setWorkbenchResetToken((current) => current + 1);
     onResetWorkbench();
@@ -1032,17 +1067,47 @@ function AddDeviceWizardPanel({
             <button
               type="button"
               onClick={handleWorkbenchClick}
-              className="flex items-center gap-2 px-4 pb-3 text-sm font-semibold text-red-600 transition-colors hover:text-red-700 focus:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
+              aria-pressed={!manual}
+              className={`flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-colors ${!manual ? 'bg-[#e7f0dc] text-[#58793e]' : 'text-gray-500 hover:bg-[#f4f7ef]'}`}
             >
               <ServerCog className="h-4 w-4" />
-              {t('wizard.guide.workbenchTab')}
+              Atlas 辅助接入
+            </button>
+            <button type="button" onClick={() => setManual(true)} aria-pressed={manual}
+              className={`ml-2 flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-semibold transition-colors ${manual ? 'bg-[#e7f0dc] text-[#58793e]' : 'text-gray-500 hover:bg-[#f4f7ef] hover:text-[#58793e]'}`}>
+              <Pencil className="h-4 w-4" />手动接入
             </button>
           </div>
         </div>
 
         {/* Content */}
         <div className="flex-1 min-h-0 overflow-hidden">
-          <DeviceAddRexPanel
+          {manual ? <div className="h-full overflow-y-auto p-5 space-y-4">
+            <div><h3 className="text-base font-semibold text-gray-900">选择设备模板</h3>
+              <p className="mt-2 text-xs leading-6 text-gray-500">已有接入资料时，可直接填写地址与认证信息，无需调用模型。未安装的模板将先安装，再进入配置。</p></div>
+            <input aria-label="搜索设备模板" placeholder="搜索厂商或设备名称" value={search} onChange={e => setSearch(e.target.value)} className="w-full rounded-xl border border-gray-200 bg-white px-3 py-2.5 text-sm outline-none focus:border-[#a2c67b] focus:ring-2 focus:ring-[#e7f0dc]" />
+            <div className="space-y-4">{Object.entries(templates.reduce<Record<string, DeviceTemplate[]>>((groups, template) => {
+              if (`${template.name} ${template.vendor} ${template.storage_key} ${vendorPresentation(template.vendor || '其他厂商').nameCn}`.toLowerCase().includes(search.trim().toLowerCase())) {
+                (groups[template.vendor || '其他厂商'] ||= []).push(template);
+              }
+              return groups;
+            }, {})).map(([key, items]) => {
+              const vendor = vendorPresentation(key);
+              return <section key={key} style={deviceTheme(key)} className="aegis-manual-vendor rounded-2xl border border-[#e1e8db] bg-white overflow-hidden">
+                <div className="flex items-center gap-3 px-4 py-3 bg-[#f6f8f2] border-b border-[#e8eddf]">
+                  <VendorMark vendor={vendor} label={vendor.nameCn} className="h-8 w-8 rounded-lg bg-white p-1" />
+                  <h4 style={{color:'var(--device-ink)'}} className="flex-1 text-sm font-semibold">{vendor.nameCn}</h4><span className="text-xs text-gray-400">{items.length} 个模板</span>
+                </div>
+                <div className="grid grid-cols-1 min-[480px]:grid-cols-2 gap-2 p-3">{items.map(template =>
+                  <button key={`${template.plugin_id}:${template.storage_key}`} type="button" disabled={installing !== null} onClick={() => void selectManualTemplate(template)} className="min-w-0 flex items-center gap-2 rounded-xl border border-gray-100 bg-white p-3 text-left transition-all hover:border-[#a2c67b] hover:bg-[#f6f9f2] disabled:opacity-50">
+                    <span className="min-w-0 flex-1"><span className="block truncate text-[13px] font-semibold text-gray-800">{template.name}</span><span className="block mt-1 text-[11px] text-gray-400">{template.version ? formatTemplateVersion(template.version) + ' · ' : ''}{template.installed ? '填写配置' : '安装并配置'}</span></span>
+                    {installing === template.storage_key ? <Loader2 className="h-4 w-4 animate-spin text-[#789b56]" /> : <ChevronRight className="h-4 w-4 shrink-0 text-[#789b56]" />}
+                  </button>)}</div>
+              </section>;
+            })}</div>
+            {!templates.some(t => `${t.name} ${t.vendor} ${t.storage_key} ${vendorPresentation(t.vendor || '其他厂商').nameCn}`.toLowerCase().includes(search.trim().toLowerCase())) && <p className="py-8 text-center text-sm text-gray-500">暂无匹配模板，可在插件广场安装，或使用 Atlas 辅助适配。</p>}
+            <p className="text-xs leading-6 text-gray-400">设备连接配置与告警研判流程分别管理。新类型设备仍需适配日志字段和研判工作流。</p>
+          </div> : <DeviceAddRexPanel
             templates={templates}
             instanceCounts={instanceCounts}
             sessionId={sessionId}
@@ -1055,7 +1120,7 @@ function AddDeviceWizardPanel({
             rexComposerControls={rexComposerControls}
             onApplyDraft={onApplyRexDraft}
             onInstallTemplate={onInstallTemplate}
-          />
+          />}
         </div>
       </div>
     </div>
@@ -1089,7 +1154,8 @@ function Toggle({ on, onToggle }: { on: boolean; onToggle: () => void }) {
     <button
       type="button"
       onClick={onToggle}
-      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${on ? 'bg-blue-500' : 'bg-zinc-300'}`}
+      data-device-toggle={on ? 'on' : 'off'}
+      className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${on ? 'bg-[#96b975]' : 'bg-zinc-300'}`}
     >
       <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white shadow transition-transform ${on ? 'translate-x-4' : 'translate-x-0.5'}`} />
     </button>
@@ -1362,8 +1428,9 @@ function DeviceConfigPanel({
           style={{ top: 0, right: `min(${DEVICE_DRAWER_WIDTH_CSS}, 100vw)` }}
         />
         <div
-          className="yushu-device-creation pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
-          style={{ maxWidth: DEVICE_DRAWER_WIDTH }}
+          className="yushu-device-creation aegis-device-config pointer-events-auto absolute right-0 top-0 bottom-0 w-full bg-white shadow-2xl border-l border-zinc-200 flex flex-col"
+          data-vendor={vendorKey || 'default'}
+          style={{ maxWidth: DEVICE_DRAWER_WIDTH, ...deviceTheme(vendorKey) }}
         >
           {/* Header */}
           <div className="flex items-center justify-between px-5 py-4 border-b border-zinc-100 flex-shrink-0">
@@ -1373,13 +1440,13 @@ function DeviceConfigPanel({
                   <ChevronLeft className="w-4 h-4" />
                 </button>
               )}
-              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${device ? 'bg-blue-50' : 'bg-zinc-50'}`}>
-                {device ? <PlugZap className="w-4 h-4 text-blue-500" /> : <Plus className="w-4 h-4 text-zinc-400" />}
+              <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${device ? 'bg-[#f1f6ea]' : 'bg-zinc-50'}`}>
+                {vendor ? <VendorMark vendor={vendor} label={vendor.nameCn} className="h-7 w-7 rounded-lg" /> : <PlugZap className="w-4 h-4 text-[#789b56]" />}
               </div>
               <div className="min-w-0">
                 <h3 className="text-sm font-semibold text-zinc-900 truncate">{device ? device.name : t('config.newDeviceTitle')}</h3>
                 <div className="flex items-center gap-1.5 mt-0.5">
-                  {vendor && <span className={`text-[10px] font-medium px-1.5 py-0.5 rounded-md ${vendor.color}`}>{i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn}</span>}
+                  {vendor && <span className="aegis-vendor-badge text-[10px] font-medium px-1.5 py-0.5 rounded-md">{i18n.language.startsWith('zh') ? vendor.nameCn : vendor.nameEn}</span>}
                   <span className="text-xs text-zinc-400 truncate">{device?.storage_key ?? template?.storage_key}</span>
                 </div>
               </div>
@@ -1395,9 +1462,10 @@ function DeviceConfigPanel({
               <button
                 key={key}
                 onClick={() => setTab(key)}
-                className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
+                aria-pressed={tab === key}
+                className={`aegis-device-tab flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
                   tab === key
-                    ? 'border-blue-500 text-blue-600'
+                    ? 'border-[#91b56a] text-[#597d3d]'
                     : 'border-transparent text-zinc-500 hover:text-zinc-700'
                 }`}
               >
@@ -1417,7 +1485,7 @@ function DeviceConfigPanel({
                     href={metadata.docs_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center justify-between gap-3 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm font-medium text-blue-700 transition-colors hover:border-blue-200 hover:bg-blue-100"
+                    className="aegis-device-docs flex items-center justify-between gap-3 rounded-lg border border-[#dce8cf] bg-[#f1f6ea] px-3 py-2 text-sm font-medium text-[#597d3d] transition-colors hover:border-[#a2c67b] hover:bg-[#e7f0dc]"
                   >
                     <span>{t('overview.viewDocs')}</span>
                     <ChevronRight className="h-4 w-4 flex-shrink-0" />
@@ -1537,7 +1605,7 @@ function DeviceConfigPanel({
                   <div className="rounded-xl border border-zinc-100 bg-white px-3 py-2.5">
                     <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                       <div className="flex min-w-0 items-center gap-2">
-                        <div className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-red-50 text-red-500">
+                        <div className="aegis-device-assist-icon flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg bg-[#edf4e5] text-[#789b56]">
                           <Sparkles className="h-3.5 w-3.5" />
                         </div>
                         <p className="truncate text-sm font-semibold text-zinc-800">{t('config.aiAssistTitle')}</p>
@@ -1556,7 +1624,7 @@ function DeviceConfigPanel({
                               onClick={() => handleRexAssist(action)}
                               disabled={disabled || !!rexAssistAction}
                               title={disabled ? t('config.aiAssistSaveFirst') : undefined}
-                              className="flex h-8 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-red-200 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
+                              className="flex h-8 items-center justify-center gap-1.5 rounded-lg border border-zinc-200 bg-white px-2.5 text-xs font-medium text-zinc-700 transition-colors hover:border-[#a2c67b] hover:bg-[#f1f6ea] hover:text-[#597d3d] disabled:cursor-not-allowed disabled:border-zinc-100 disabled:bg-zinc-50 disabled:text-zinc-300"
                             >
                               {loading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Icon className="h-3.5 w-3.5 flex-shrink-0" />}
                               <span className="truncate">{label}</span>
@@ -1574,7 +1642,7 @@ function DeviceConfigPanel({
                     <button
                       onClick={handleSave}
                       disabled={saving}
-                      className="w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 transition-colors"
+                      className="aegis-device-save w-full flex items-center justify-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-[#a2c67b] text-[#263521] hover:bg-[#92b86a] disabled:opacity-50 transition-colors"
                     >
                       {saving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Save className="w-3.5 h-3.5" />}
                       {device ? t('config.saveBtn') : t('config.addBtn')}
@@ -1632,7 +1700,7 @@ function DeviceConfigPanel({
                               <td className="px-4 py-3 text-right">
                                 <button
                                   onClick={() => setToolModal({ ...tool, enabled: isOn })}
-                                  className="text-xs text-blue-600 hover:text-blue-800 font-medium"
+                                  className="text-xs text-[#597d3d] hover:text-[#45652d] font-medium"
                                 >
                                   {t('tools.detail')}
                                 </button>
@@ -1680,7 +1748,7 @@ function DeviceConfigPanel({
                     href={metadata.docs_url}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex items-center gap-2 text-sm text-blue-600 hover:text-blue-800 px-1"
+                    className="flex items-center gap-2 text-sm text-[#597d3d] hover:text-[#45652d] px-1"
                   >
                     <ChevronRight className="w-4 h-4" />
                     {t('overview.viewDocs')}
@@ -1988,7 +2056,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
 type PanelMode =
   | { kind: 'pick-group' }
   | { kind: 'wizard' }
-  | { kind: 'add'; template: DeviceTemplate; draft?: Omit<DeviceAddDraft, 'template'> }
+  | { kind: 'add'; template: DeviceTemplate; manual?: boolean; draft?: Omit<DeviceAddDraft, 'template'> }
   | { kind: 'edit'; device: DeviceIntegration }
   | null;
 
@@ -2287,6 +2355,11 @@ export default function DeviceIntegrationPage() {
         fields: data.fields,
       });
       const createdDevice = createRes.data;
+      if (panel.manual) {
+        setPanel(null);
+        await fetchData(true);
+        return;
+      }
       setPanel({ kind: 'wizard' });
       createAndSendRex({
         ...buildDeviceTestGuidePrompt(createdDevice, panel.template),
@@ -2686,6 +2759,7 @@ export default function DeviceIntegrationPage() {
           createAndSend={createAndSendRex}
           rexComposerControls={rexComposerControls}
           onApplyRexDraft={handleApplyRexDraft}
+          onManualSelect={(template) => setPanel({ kind: 'add', template, manual: true })}
           onInstallTemplate={handleInstallTemplate}
           onResetWorkbench={resetRexSession}
           onClose={closeAddWorkbench}

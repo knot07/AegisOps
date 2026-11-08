@@ -1,3 +1,5 @@
+import ResourceDetailSummary from '@/components/common/ResourceDetailSummary';
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import ResourceOverview from '@/components/common/ResourceOverview';
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
@@ -1783,7 +1785,7 @@ function MCPServerDetailPanel({
                         <span className="text-sm font-medium text-gray-900 font-mono break-all">{tool.name}</span>
                       </td>
                       <td className="px-4 py-3">
-                        <span className="text-sm text-gray-600 line-clamp-2 leading-relaxed">{tool.description}</span>
+                        <span className="text-sm text-gray-600 line-clamp-2 leading-relaxed">{tool.description?.replace(/\baegisops\b/gi, 'AegisOps')}</span>
                       </td>
                     </tr>
                   ))}
@@ -3092,7 +3094,7 @@ function APIServiceDetailPanel({
                     {serviceTools.map((tool) => (
                       <tr key={tool.name} className="hover:bg-gray-50">
                         <td className="px-5 py-2.5 truncate"><span className="text-sm font-medium text-gray-900 font-mono">{tool.name}</span></td>
-                        <td className="px-5 py-2.5"><span className="text-sm text-gray-600 line-clamp-1">{tool.description}</span></td>
+                        <td className="px-5 py-2.5"><span className="text-sm text-gray-600 line-clamp-1">{tool.description?.replace(/\baegisops\b/gi, 'AegisOps')}</span></td>
                         <td className="px-5 py-2.5 whitespace-nowrap"><EnabledBadge enabled={tool.enabled} /></td>
                         <td className="px-5 py-2.5 whitespace-nowrap"><button onClick={() => onSelectTool(tool)} className="text-sm text-sky-700 hover:text-sky-900">{t('detail.testDetail')}</button></td>
                       </tr>
@@ -3542,7 +3544,8 @@ function ToolTable({
             return (
               <PluginCard
                 key={tool.name}
-                icon={<Wrench className="h-4 w-4" />}
+                icon={<ResourceIdentity kind="tool" name={tool.name} label={tool.source_name || tool.category} />}
+                style={resourceStyle('tool',tool.name,tool.source_name || tool.category)} className="aegis-resource-surface" iconClassName="aegis-resource-icon-wrap"
                 title={tool.name}
                 tags={<>
                   <span className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${sb.className}`}>{sourceLabel}</span>
@@ -3581,6 +3584,7 @@ function ToolTable({
 
               {/* Tool names follow the readable inventory type scale. */}
               <div className="min-w-0 flex items-center gap-1.5">
+                <ResourceIdentity kind="tool" name={tool.name} label={tool.source_name || tool.category} compact />
                 <button
                   type="button"
                   onClick={() => onSelect(tool)}
@@ -3827,18 +3831,19 @@ export function ToolDetailDrawer({
     <>
       <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
 
-      <div data-yushu-drawer
+      <div data-yushu-drawer data-resource-detail="tool"
+        style={resourceStyle('tool',tool.name,tool.source_name || tool.category)}
         ref={drawerRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="tool-detail-drawer-title"
         tabIndex={-1}
-        className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[520px] max-w-full outline-none"
+        className="aegis-tool-detail aegis-resource-detail fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col bg-white shadow-2xl w-[680px] max-w-full outline-none"
       >
         <div className="flex-shrink-0 border-b border-gray-200">
           <div className="flex items-center gap-3 px-6 py-4">
             <div className="w-8 h-8 bg-gray-100 rounded-lg flex items-center justify-center flex-shrink-0">
-              <Wrench className="w-4 h-4 text-gray-600" />
+              <ResourceIdentity kind="tool" name={tool.name} label={tool.source_name || tool.category}/>
             </div>
             <div className="flex-1 min-w-0">
               <h2 id="tool-detail-drawer-title" className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
@@ -3866,7 +3871,7 @@ export function ToolDetailDrawer({
 
           <div className="flex px-6">
             <button
-              onClick={() => setSection('info')}
+              onClick={() => setSection('info')} data-detail-tab aria-selected={section==='info'}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
                 section === 'info'
                   ? 'border-slate-700 text-slate-800'
@@ -3876,7 +3881,7 @@ export function ToolDetailDrawer({
               <Info className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}
             </button>
             <button
-              onClick={() => setSection('test')}
+              onClick={() => setSection('test')} data-detail-tab aria-selected={section==='test'}
               className={`flex items-center gap-1.5 px-4 py-2.5 text-sm font-medium border-b-2 transition-colors ${
                 section === 'test'
                   ? 'border-slate-700 text-slate-800'
@@ -3888,9 +3893,12 @@ export function ToolDetailDrawer({
           </div>
         </div>
 
-        <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
+        <div className="aegis-tool-detail-body min-h-0 flex-1 overflow-y-auto px-6 py-5">
+          <ResourceDetailSummary kind="tool" name={tool.name} title={tool.name}
+            badges={[sourceLabel,tool.source_name || 'AegisOps',enabled ? '已启用' : '已停用']}
+            metrics={[{label:'参数',value:tool.parameters?.length || 0},{label:'执行方式',value:canDirectTest ? '直接测试' : '会话调用'}]}/>
           {section === 'info' ? (
-            <div className="space-y-5">
+            <div className="aegis-detail-sections space-y-5">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
                 <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">

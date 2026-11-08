@@ -223,6 +223,8 @@ export function MCPServerDetailPanel({
           <button
             key={tab.key}
             onClick={() => setDetailTab(tab.key)}
+            aria-selected={detailTab === tab.key}
+            data-resource-config-tab
             className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${detailTab === tab.key ? 'border-red-500 text-red-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
           >
             {tab.icon}
@@ -802,6 +804,8 @@ export function APIServiceDetailPanel({
           <button
             key={tab.key}
             onClick={() => setDetailTab(tab.key)}
+            aria-selected={detailTab === tab.key}
+            data-resource-config-tab
             className={`flex items-center gap-1.5 px-4 py-3 text-sm font-medium border-b-2 transition-colors ${detailTab === tab.key ? 'border-purple-500 text-purple-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
           >
             {tab.icon}

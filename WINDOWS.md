@@ -1,78 +1,22 @@
-# 御枢 · AegisOps Windows 便携版
+# AegisOps Windows x64 部署
 
-适用：Windows 10 / 11 **64 位 x64**。不适用于 32 位或 ARM64 原生环境。
+版本 2026.11.08，下载 Releases 中唯一的 `Windows-x64.zip`。支持原生 Windows 10/11 x64；本次在 Windows 本机验证，无需 WSL 或 Docker。
 
-本次实机验证使用 Windows 11 x64；Windows 10 x64 为兼容目标，未进行独立实机验证。
+1. 完整解压至可写的较短目录，例如 `D:\Apps\AegisOps`，不要直接在压缩包内启动。
+2. 运行 `start.cmd --check`。若提示缺少 VC++ 运行库，运行 `_runtime\vc_redist.x64.exe` 后重试。
+3. 双击 `start.cmd`，等待 Service ready，并打开显示的地址。
+4. 首次访问自行设置管理员，没有默认账号。配置模型与设备后使用 AI 和真实研判功能。
 
-## 下载与启动
-
-1. 从 GitHub Releases 下载 `AegisOps-2026.11.06-Windows-x64.zip`，不要选 Linux 或 Source 包。
-2. 完整解压到自己的本地目录，建议 `C:\AegisOps` 或 `D:\AegisOps`。不要直接在压缩包内运行，不建议放入需要管理员权限的 Program Files。
-3. 双击 `start.cmd`。如果提示缺少 Microsoft Visual C++ x64 运行库，先运行包内 `_runtime\vc_redist.x64.exe` 完成微软官方安装（此步骤可能需要管理员权限），再重新启动。等待控制台提示 `Service ready`，浏览器会自动打开 `http://127.0.0.1:5200`。
-4. 首次进入自行设置管理员账号和密码。没有预置账号，也没有预置模型密钥。
-5. 登录后到模型清单填写自己的接口地址、模型标识及 API Key，保存、测试并设置默认模型。使用设备研判功能时还需配置设备连接。
-
-便携包内置 Python、Node、Git for Windows、Python 依赖、前端资源和 Windows 场景编译器。**基础服务启动不需要安装 Python、Node、Git、Docker 或 WSL，也不需要联网安装依赖。** 模型调用、设备接入、消息渠道及在线插件依然需要相应网络和凭据。各第三方技能可能要求额外的软件或工具，按该技能文档准备。
-
-首次启动会把内置插件复制到数据目录，两个场景会进行本机编译；请等待完成后刷新。保持启动窗口打开。停止服务时在窗口按 Ctrl+C，等待进程退出后再关闭窗口。
-
-## 常用命令
-
-在解压目录的 PowerShell 中执行：
-
-```powershell
-.\start.cmd
-.\start.cmd --check
-.\start.cmd --port 5201
-.\start.cmd --data-dir D:\AegisOps-data
-.\start.cmd --no-browser
+```bat
+start.cmd --check
+start.cmd --port 5200
+start.cmd --host 0.0.0.0 --port 5201 --data-dir D:\AegisOpsData --no-browser
 ```
 
-默认仅本机访问。需要局域网访问时，在完成管理员初始化后使用：
+启动窗口需要保持运行，停止前等待任务结束。默认绑定本机地址；远程访问需配置防火墙和 HTTPS。日志位于数据目录 `logs/windows-server.log`。
 
-```powershell
-.\start.cmd --host 0.0.0.0 --port 5200
-```
+包内已附 Python 3.12、Node、Git、前端编译器与 Python 依赖，部署不需要全局安装 Python/npm。模型、设备、沙箱等外部服务仍需要网络及有效凭据；部分 AI/文档能力可能按需下载模型文件。本包不包含当前业务数据或任何账号密钥。
 
-再允许 Windows 防火墙中的对应端口，其他设备访问 `http://服务器IP:5200`。
+管理员可在左侧底部打开在线更新。依赖变化时下载新 Windows 完整包，停止旧服务，备份原数据目录，在新目录解压新包并指定原 `--data-dir`。旧版首次手工迁移后才具备此更新入口。
 
-端口被占用时启动器会提示错误，不会停止占用端口的其他服务。选择一个空闲端口即可。
-
-## 两个场景与工作流
-
-- 场景管理包含 TDP AI 研判与漏洞运营，可切换进入。
-- 工作流包含 `datang-tdp-fixed-review` 研判流程。流程已提供，设备和模型参数需要自行配置。
-- 漏洞运营成员权限在主系统账号管理维护；新增用户可从主系统登录。
-- 资产目录支持搜索、编辑、删除。关联漏洞的资产会受到删除保护。
-- 人工确认告警攻击成功后，可触发 AI 提取信息并写入漏洞运营；使用前配置模型和业务连接。
-
-详细业务操作见 [DEPLOY.md](DEPLOY.md)。
-
-## 数据与备份
-
-默认数据目录为程序目录中的 `runtime`，其中包含账号、配置、凭据、会话、漏洞、资产和工作文件。不要删除该目录。启动日志在 `runtime\logs\windows-server.log`。
-
-备份前按 Ctrl+C 停止服务，再完整复制数据根目录，包括隐藏文件。恢复时使用同版本程序，指定恢复后的数据目录启动。不要单独移动某个数据库文件代替完整备份。
-
-首次包中不包含 `runtime`，所有业务数据和账号都由首次使用者创建。重新解压程序时不要覆盖或丢弃已有数据；升级前先备份。
-
-## 故障定位
-
-| 问题 | 处理 |
-| --- | --- |
-| 双击即报缺少运行时 | 检查是否下载了 Windows portable 包并完整解压，确认 `_runtime\python\python.exe` 存在 |
-| 提示 Microsoft Visual C++ runtime is missing | 运行包内 `_runtime\vc_redist.x64.exe`，完成微软运行库安装后重试 |
-| 端口被占用 | 使用 `start.cmd --port 5201` |
-| 页面没有自动打开 | 手动打开控制台显示的地址；检查日志与 `start.cmd --check` 输出 |
-| 场景页面尚未显示 | 等待首轮编译完成后刷新，检查日志中构建错误 |
-| AI 无法回答 | 检查模型地址、Key、模型名称及网络；发行包不附送模型服务 |
-| 日志提示无写权限 | 将整个程序解压到自己可写的本地目录，或用 `--data-dir` 指定可写目录 |
-| 移动目录后启动失败 | 完整移动整个目录，不要只移动启动脚本；不要移动正在运行的程序 |
-
-## 验证记录
-
-本次发行的原生 Windows 验证结果见同目录 `WINDOWS-VERIFICATION.json`。仅在实际验证通过后上传发行附件。独立测试产生的账号和业务数据不会进入 ZIP。
-
-## 许可证
-
-主项目见 `LICENSE.txt`。内置 Python、Node 和各第三方依赖保留其原始许可证。运行时版本与包依赖清单位于验证记录和 `requirements.windows.lock`。
+本次 Windows 验证包括启动依赖检查、首次管理员初始化、普通用户登录、更新权限、资产增改删、应急事件增删，以及六个主要界面加载。未连接真实业务主机或企业沙箱执行远程调查。完整说明见 [部署与操作手册](DEPLOY.md)。

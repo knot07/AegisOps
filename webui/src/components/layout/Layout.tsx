@@ -9,7 +9,6 @@ import {
   Bot,
   Blocks,
   Brain,
-  Database,
   FolderOpen,
   ServerCog,
   Wrench,
@@ -52,6 +51,7 @@ function readSidebarCollapsed(): boolean {
   }
 }
 
+const SceneAssistantBridge = lazyLayoutComponent(() => import('@/components/common/SceneAssistantBridge'));
 const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
 const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 import {
@@ -426,7 +426,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         { name: t('aegisopsHome'), href: '/', icon: Home },
         { name: i18n.language.startsWith('zh') ? '对话' : 'Conversations', href: '/sessions', icon: MessageSquarePlus },
         { name: t('tasks'), href: '/tasks', icon: ListTodo, count: taskCounts ? (taskCounts.running ?? 0) + (taskCounts.queued ?? 0) : undefined },
-        { name: t('workspace'), href: '/workspace', icon: FolderOpen },
         ...workbenchItems,
         ...customItems,
       ],
@@ -439,9 +438,8 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       { name: t('skills'), href: '/skills', icon: Sparkles },
       { name: t('workflows'), href: '/workflows', icon: Workflow },
     ] },
-    { id: 'knowledge-memory', name: t('knowledgeAndMemory'), items: [
-      { name: t('knowledgeBase'), href: '/workspace?tab=knowledge', icon: Database },
-      { name: t('memory'), href: '/workspace?tab=memory', icon: Brain },
+    { id: 'knowledge-memory', items: [
+      { name: i18n.language.startsWith('zh') ? '工作·记忆·知识' : 'Work · Memory · Knowledge', href: '/workspace', icon: FolderOpen },
     ] },
     { id: 'tools-models', name: t('toolsAndModels'), items: [
       { name: t('tools'), href: '/tools', icon: Wrench },
@@ -451,7 +449,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       { name: t('hub', { productName }), href: '/hub', icon: Blocks },
       ...extensionNavItems.workshop,
     ] },
-  ], [extensionNavItems, productName, t]);
+  ], [extensionNavItems, productName, t, i18n.language]);
 
   const sceneSections = useMemo(() => {
     const map = new Map<string, NavSection[]>();
@@ -522,24 +520,9 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       return next;
     });
   }, [viewingConfiguration]);
-  const visibleSections = useMemo<NavSection[]>(() => {
-    const scenes: NavSection[] = [{
-      id: 'scene-management', name: i18n.language.startsWith('zh') ? '场景中心' : 'Scenes',
-      items: [{ name: t('sceneManagement'), href: SCENE_SUITES_PATH, icon: Layers }],
-    }];
-    for (const workspace of openSceneWorkspaces) {
-      const activeScene = workspaceIdFromPath(location.pathname);
-      const groups = activeScene === workspace.id ? sceneSections.get(sceneNavWorkspace(workspace.id)) ?? [] : [];
-      if (groups.length === 0) scenes.push({ id: workspace.id, items: [{ name: getLocalizedWebUIContractTitle(workspace, i18n.language), href: workspace.route, icon: sceneHeaderIcon(workspace) }] });
-      scenes.push(...groups.map((group) => ({
-        ...group,
-        name: group.name || getLocalizedWebUIContractTitle(workspace, i18n.language),
-      })));
-    }
-    return workspaceIdFromPath(location.pathname)
-      ? [...scenes, workbenchSection, ...workshopSections, settingsSection]
-      : [workbenchSection, ...workshopSections, ...scenes, settingsSection];
-  }, [workbenchSection, workshopSections, sceneSections, openSceneWorkspaces, settingsSection, i18n.language, t, location.pathname]);
+  const visibleSections = useMemo<NavSection[]>(() => [
+    workbenchSection, ...workshopSections, settingsSection,
+  ], [workbenchSection, workshopSections, settingsSection]);
 
   // ── Keep-alive panes: every visited nav href stays mounted ────────────────
   const allNavItems = useMemo<NavItem[]>(() => {
@@ -760,7 +743,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         </button>
       </div>
       <button type="button" onClick={() => setSidebarOpen(false)} aria-label={t('close')} className="absolute right-2 top-2 rounded p-1 text-ui-secondary lg:hidden"><X className="h-4 w-4" /></button>
-      {!collapsed && openSceneWorkspaces.length > 0 && <div className="aegis-scene-switcher"><label htmlFor="aegis-scene-select">{i18n.language.startsWith('zh') ? '切换工作空间' : 'Workspace'}</label><select id="aegis-scene-select" aria-label="切换工作空间" value={workspaceIdFromPath(location.pathname) || 'agent'} onChange={event => selectWorkspace(event.target.value === 'agent' ? AGENT_WORKSPACE : sceneNavWorkspace(event.target.value))}><option value="agent">御枢工作台</option>{openSceneWorkspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{getLocalizedWebUIContractTitle(workspace, i18n.language)}</option>)}</select></div>}
+      {!collapsed && openSceneWorkspaces.length > 0 && <div className="aegis-scene-switcher"><label htmlFor="aegis-scene-select">{i18n.language.startsWith('zh') ? '场景中心·切换工作空间' : 'Scene Center · Workspace'}</label><select id="aegis-scene-select" aria-label="场景中心·切换工作空间" value={workspaceIdFromPath(location.pathname) || 'agent'} onChange={event => selectWorkspace(event.target.value === 'agent' ? AGENT_WORKSPACE : sceneNavWorkspace(event.target.value))}><option value="agent">御枢工作台</option>{openSceneWorkspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{getLocalizedWebUIContractTitle(workspace, i18n.language)}</option>)}</select></div>}
       {navigation}
       <div className={`shrink-0 border-t border-ui-border ${collapsed ? 'p-2' : 'p-3'}`}>
       <WorkspaceHeader
@@ -796,6 +779,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       } as CSSProperties}
     >
       <LazyLoadErrorBoundary mode="overlay">
+        <Suspense fallback={null}><SceneAssistantBridge /></Suspense>
         <Suspense fallback={null}>
           {onboardingOpen && <OnboardingModal onClose={handleCloseOnboarding} />}
         </Suspense>

@@ -1,3 +1,4 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import HubFilters from './HubFilters';
 import './hub-filters.css';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -287,9 +288,7 @@ export default function HubPage() {
   const [searchParams] = useSearchParams();
   const text = i18n.language.toLowerCase().startsWith('zh') ? HUB_TEXT.zh : HUB_TEXT.en;
   const hubTitle = `${productName} Hub`;
-  const hubDescription = i18n.language.toLowerCase().startsWith('zh')
-    ? `浏览随 ${productName} 打包的本地插件广场，并安装到本机插件目录。`
-    : `Browse bundled ${hubTitle} plugins and install them into the local plugin directory.`;
+
   const urlPluginId = searchParams.get('plugin') || searchParams.get('id') || '';
   const urlType = normalizePluginType(searchParams.get('type'));
   const [catalogItems, setCatalogItems] = useState<HubCatalogEntry[]>([]);
@@ -589,7 +588,6 @@ export default function HubPage() {
       {protectedUpdate.dialog}
       <PageHeader
         title={hubTitle}
-        description={hubDescription}
         icon={<Archive className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
@@ -784,12 +782,15 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
         </thead>
         <tbody className="divide-y divide-gray-100">
           {items.map(item => (
-            <tr key={`${item.type}:${item.id}`} className="hover:bg-gray-50">
+            <tr key={`${item.type}:${item.id}`} style={resourceStyle(item.type,item.id,getHubName(item,language))} className="aegis-hub-resource-row hover:bg-gray-50">
               <td className="px-3 py-2 text-gray-500">{formatPluginTypeLabel(item.type, language)}</td>
               <td className="max-w-0 px-3 py-2">
-                <button onClick={() => onSelect(item)} className="w-full text-left">
+                <button onClick={() => onSelect(item)} className="w-full text-left flex items-center gap-3">
+                  <ResourceIdentity kind={item.type} name={item.id} label={getHubName(item,language)} />
+                  <span className="min-w-0 flex-1">
                   <div className="truncate font-medium text-gray-900 hover:text-slate-700">{getHubName(item, language)}</div>
                   <div className="truncate text-[11px] text-gray-500">{getHubDescription(item, language)}</div>
+                  </span>
                 </button>
               </td>
               <td className="max-w-0 px-3 py-2">
@@ -899,7 +900,7 @@ function HubTreeNodeView({ node, depth, actionId, text, onSelect, onAction, root
         {hasChildren ? (
           open ? <FolderOpen className="w-4 h-4 shrink-0 text-amber-500" /> : <Folder className="w-4 h-4 shrink-0 text-amber-500" />
         ) : (
-          <FileText className="w-4 h-4 shrink-0 text-gray-400" />
+          node.entry ? <ResourceIdentity kind={node.entry.type} name={node.entry.id} label={node.entry.name} compact /> : <FileText className="w-4 h-4 shrink-0 text-gray-400" />
         )}
         {node.entry ? (
           <button onClick={() => onSelect(node.entry!)} className="flex-1 min-w-0 text-left">
@@ -997,7 +998,7 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
       <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between max-md:gap-3 max-md:px-4">
         <div className="max-md:min-w-0">
           <div className="flex items-center gap-2 max-md:flex-wrap">
-            <h2 className="text-lg font-semibold text-gray-900">{getHubName(entry, language)}</h2>
+            <h2 className="flex items-center gap-3 text-lg font-semibold text-gray-900"><ResourceIdentity kind={entry.type} name={entry.id} label={getHubName(entry,language)}/>{getHubName(entry, language)}</h2>
             <StateBadge state={entry.state} text={text} guidedKind={entry.guidedInstall?.kind} />
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>

@@ -1,3 +1,4 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useState, useMemo, useCallback, useEffect } from 'react';
 import {
   Cloud, Wrench, Settings, X, Download, ExternalLink, Star, Power, PowerOff, Trash2,
@@ -427,12 +428,12 @@ export default function APITabContent({
               <div
                 key={service.id}
                 {...groupDrag.dragProps(service.id)}
-                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ' max-md:min-w-[48rem]'}`}
-                style={{ gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)' }}
+                className={`aegis-resource-surface grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-purple-50' : 'hover:bg-gray-50'}${viewMode === 'cards' ? ' rounded-lg border border-gray-200 bg-white [&>:nth-child(5)]:col-span-2 [&>:nth-child(6)]:col-span-2' : ' max-md:min-w-[48rem]'}`}
+                style={{...resourceStyle('api',service.name), gridTemplateColumns: viewMode === 'list' ? SERVICE_TAB_GRID_COLS : '32px minmax(0, 1fr)'}}
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${service.enabled ? 'bg-purple-50' : 'bg-gray-50'}`}>
-                  <Cloud className={`w-4 h-4 ${service.enabled ? 'text-purple-600' : 'text-gray-400'}`} />
+                  <ResourceIdentity kind="api" name={service.name} compact />
                 </div>
 
                 {/* Name + description.
@@ -648,11 +649,11 @@ export default function APITabContent({
         return (
           <>
             <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setSelectedServiceId(null)} />
-            <div data-yushu-drawer className="fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH }} onClick={(e) => e.stopPropagation()}>
+            <div data-yushu-drawer data-resource-config={selectedServiceId} className="aegis-resource-config aegis-resource-detail aegis-service-detail fixed right-0 top-0 bottom-0 z-50 flex min-h-0 flex-col w-full bg-white shadow-2xl" style={{ maxWidth: DETAIL_DRAWER_WIDTH, ...resourceStyle('api',selectedServiceId || '',displayName) }} onClick={(e) => e.stopPropagation()}>
               <div className="flex-shrink-0 border-b border-gray-200">
                 <div className="flex items-center gap-3 px-6 py-4">
                   <div className="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 bg-purple-50">
-                    <Cloud className="w-5 h-5 text-purple-600" />
+                    <ResourceIdentity kind="api" name={selectedServiceId} label={displayName} />
                   </div>
                   <div className="flex-1 min-w-0">
                     <h2 className="text-lg font-semibold text-gray-900">{displayName}</h2>

@@ -202,7 +202,7 @@ async def test_hook_pipeline_timeout_can_propagate():
 async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_success")
     assistant_msg = SimpleNamespace(id="msg_assistant_success")
-    agent = SimpleNamespace(name="rex")
+    agent = SimpleNamespace(name="rex", temperature=0.23)
     usage = {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18}
     order: list[str] = []
 
@@ -265,6 +265,7 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
 
     class _Provider:
         def chat_stream(self, **kwargs):
+            assert kwargs["temperature"] == 0.23
             assert kwargs["model_id"] == runner.model_id
             assert kwargs["session_id"] == runner.session.id
 

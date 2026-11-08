@@ -1,3 +1,4 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useState, useMemo, useEffect, useId, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
@@ -422,8 +423,10 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
 
   return (
     <div
+      style={resourceStyle('workflow',workflow.id,displayName)}
+      data-resource-card="workflow"
       onClick={() => navigate(`/workflows/${workflow.id}`)}
-      className={`group relative bg-white rounded-xl border border-gray-200 flex flex-col
+      className={`aegis-resource-surface group relative bg-white rounded-xl border border-gray-200 flex flex-col
                  overflow-hidden cursor-pointer transition-all duration-150
                  hover:border-gray-300 hover:shadow-md ${layout === 'list' ? 'sm:flex-row' : ''}`}
     >
@@ -432,7 +435,7 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
         {/* Avatar + name row */}
         <div className="flex items-start gap-2.5">
           <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
-            <WorkflowIcon className="w-4 h-4 text-gray-500" />
+            <ResourceIdentity kind="workflow" name={workflow.id} label={displayName} />
           </div>
 
           <div className="min-w-0 flex-1">

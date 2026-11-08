@@ -21,7 +21,7 @@ try:
 except PackageNotFoundError:
     _from_metadata = None
 # Partial/corrupt installs can yield missing Version metadata (None); treat as unknown.
-if not _from_metadata:
+if not _from_metadata or (__import__("pathlib").Path(__file__).resolve().parents[1] / "pyproject.toml").is_file():
     # Not installed as a package (e.g. running directly from source tree),
     # or metadata is incomplete — read pyproject.toml in the project root.
     try:

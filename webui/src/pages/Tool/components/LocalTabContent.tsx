@@ -1,3 +1,4 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useMemo, useState, useCallback, useEffect } from 'react';
 import type { MouseEvent } from 'react';
 import { Code, Wrench, Settings, Power, PowerOff, AlertTriangle } from 'lucide-react';
@@ -111,7 +112,8 @@ export default function LocalTabContent({
               return (
                 <PluginCard
                   key={tool.name}
-                  icon={<Code className="h-4 w-4" />}
+                  icon={<ResourceIdentity kind="tool" name={tool.name} />}
+                  style={resourceStyle('tool',tool.name)} className="aegis-resource-surface" iconClassName="aegis-resource-icon-wrap"
                   title={tool.name}
                   tags={<>
                     <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">{t('source.local')}</span>
@@ -162,7 +164,7 @@ export default function LocalTabContent({
               >
                 {/* Icon */}
                 <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-blue-50' : 'bg-gray-50'}`}>
-                  <Code className={`w-4 h-4 ${tool.enabled ? 'text-blue-600' : 'text-gray-400'}`} />
+                  <ResourceIdentity kind="tool" name={tool.name} compact />
                 </div>
 
                 {/* Name + description.

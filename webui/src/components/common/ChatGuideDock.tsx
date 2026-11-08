@@ -4,6 +4,7 @@ import GuideInfoIcon from './GuideInfoIcon';
 
 export interface ChatGuideAction {
   label: string;
+  highlighted?: boolean;
   description: string;
   prompt: string;
   group?: string;

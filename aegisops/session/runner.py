@@ -1713,8 +1713,8 @@ class SessionRunner:
         # Resolve agent
         agent_name = last_user.agent or self.agent_name
         agent = await Agent.get(agent_name) or await Agent.get("rex")
-        from aegisops.agent.scheduling import runtime_agent
-        agent = runtime_agent(agent, self.session.id)
+        from aegisops.agent.scheduling import configured_runtime_agent
+        agent = await configured_runtime_agent(agent, self.session.id)
         self._turn_permission_ruleset = self._permission_ruleset_for_agent(agent)
         self._turn_delegating_sessions = None
 
@@ -4157,6 +4157,8 @@ class SessionRunner:
         # Build provider options (thinking / reasoning / max_tokens)
         from aegisops.provider.options import build_provider_options
         provider_options = build_provider_options(self.provider_id, self.model_id)
+        from aegisops.provider.options import apply_agent_temperature
+        provider_options = apply_agent_temperature(provider_options, agent, self.provider_id, self.model_id)
         provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
 
         # Clean up any leftover reasoning state from a previous (failed) call

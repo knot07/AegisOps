@@ -124,6 +124,12 @@ class SkillResponse(BaseModel):
     group: Optional[str] = None
     group_readonly: bool = False
     description: str = Field(..., description="Skill description")
+    @field_validator("description", mode="before")
+    @classmethod
+    def current_product_description(cls, value):
+        import re
+        return re.sub(r"\baegisops\b", "AegisOps", value, flags=re.I) if isinstance(value,str) else value
+
     location: str = Field(..., description="Path to SKILL.md")
     source: Optional[str] = Field(None, description="Discovery source")
     content: Optional[str] = Field(None, description="Full SKILL.md content")

@@ -1,3 +1,5 @@
+import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
+import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
 import { useContext, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Plus,
@@ -143,6 +145,7 @@ function ComposerResourcePicker({
   title,
   emptyText,
   icon: Icon,
+  resourceKind,
   items,
   loading,
   open,
@@ -153,6 +156,7 @@ function ComposerResourcePicker({
   title: string;
   emptyText: string;
   icon: React.ComponentType<{ className?: string }>;
+  resourceKind: 'skill' | 'workflow';
   items: ComposerResourceItem[];
   loading: boolean;
   open: boolean;
@@ -213,13 +217,15 @@ function ComposerResourcePicker({
               filteredItems.map((item) => (
                 <button
                   key={item.id}
+                  data-composer-resource={resourceKind+':'+item.id}
+                  style={resourceStyle(resourceKind,item.id,item.name)}
                   type="button"
                   onClick={() => onSelect(item)}
                   title={item.description}
-                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
+                  className="aegis-composer-resource flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
                 >
                   <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
-                    <Icon className="h-3 w-3" />
+                    <ResourceIdentity kind={resourceKind} name={item.id} label={item.name} compact />
                   </span>
                   <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
                   <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
@@ -2053,6 +2059,7 @@ export default function SessionPage() {
               title={t('chat.addMenu.selectSkill')}
               emptyText={t('chat.addMenu.noSkills')}
               icon={BookOpen}
+              resourceKind="skill"
               items={composerSkills.map((skill) => ({
                 id: skill.name,
                 name: skill.name,
@@ -2076,6 +2083,7 @@ export default function SessionPage() {
               title={t('chat.addMenu.selectWorkflow')}
               emptyText={t('chat.addMenu.noWorkflows')}
               icon={WorkflowIcon}
+              resourceKind="workflow"
               items={composerWorkflows.map((workflow) => ({
                 id: workflow.id,
                 name: getWorkflowDisplayName(workflow, i18n.language),
@@ -2256,7 +2264,7 @@ export default function SessionPage() {
               >
                 {selectedModelAuto
                   ? <Sparkles className="h-3 w-3 shrink-0" />
-                  : <Cpu className="h-3 w-3 shrink-0" />}
+                  : <ModelBrandIcon value={selectedModelOption?.modelID || ''} className="is-composer" />}
                 <span className="truncate font-medium">
                   {selectedModelAuto
                     ? t('modelPicker.auto')
@@ -2333,7 +2341,7 @@ export default function SessionPage() {
                         {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
                           <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
-                            <span className="min-w-0 truncate" title={group.providerName}>{group.providerName}</span>
+                            <span className="min-w-0 flex items-center gap-1.5 truncate" title={group.providerName}><ModelBrandIcon value={group.providerID} className="is-composer"/>{group.providerName}</span>
                             <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">
                               {t('modelPicker.count', { count: group.models.length })}
                             </span>
@@ -2342,6 +2350,8 @@ export default function SessionPage() {
                             {group.models.map((option) => (
                               <button
                                 key={option.key}
+                                style={brandStyle(option.modelID)}
+                                data-chat-model-choice={option.modelID}
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
                                 title={`${option.label}\n${option.providerName} / ${option.modelID}\n${option.pricingLabel}\n${option.contextLabel}`}
@@ -2352,7 +2362,7 @@ export default function SessionPage() {
                                 }`}
                               >
                                 <div className="flex min-w-0 items-center gap-2">
-                                  <Cpu className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                                  <ModelBrandIcon value={option.modelID} className="is-composer-choice" />
                                   <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
                                   {option.supportsVision === true && (
                                     <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
@@ -2499,52 +2509,13 @@ function WelcomeScreen({
   const { t } = useTranslation('session');
   return (
     <div className="w-full max-w-[700px] px-9 text-center max-[600px]:px-4">
-      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-ui-selected text-ui-text">
-        <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
+      <div className="aegis-welcome-emblem mx-auto mb-6 flex h-20 w-20 items-center justify-center">
+        <img src="/atlas-welcome.svg" alt="Atlas 安全运营中枢" className="h-20 w-20" />
       </div>
       <h3 className="text-[28px] font-medium tracking-tight text-ui-text">{t('welcome.title')}</h3>
       <p className="mt-3 text-sm leading-7 text-ui-muted">{t('welcome.description')}</p>
 
-      {/* One row (REA V5): narrow screens scroll it sideways instead of wrapping; the top padding keeps the 「新」 badge visible. */}
-      <div
-        data-testid="welcome-shortcuts"
-        className="mt-6 flex justify-center gap-2.5 max-[850px]:-mx-1 max-[850px]:justify-start max-[850px]:overflow-x-auto max-[850px]:px-1 max-[850px]:pb-1 max-[850px]:pt-3"
-      >
-        <button
-          onClick={onAlertOperationsSetup}
-          disabled={alertOperationsBusy}
-          className={SHORTCUT_CLASS}
-        >
-          {alertOperationsBusy ? (
-            <Loader2 className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
-          ) : (
-            <Shield className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
-          )}
-          <span>{t('welcome.alertOperations')}</span>
-        </button>
-        <button
-          onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
-          className={SHORTCUT_CLASS}
-        >
-          <Search className="h-[18px] w-[18px] text-[#f4511e]" />
-          <span>{t('welcome.threatHunting')}</span>
-        </button>
-        <button
-          onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
-          className={SHORTCUT_CLASS}
-        >
-          <AlertTriangle className="h-[18px] w-[18px] text-amber-500" />
-          <span>{t('welcome.incidentResponse')}</span>
-        </button>
-        {reaShortcut && (
-          <ReaShortcut
-            badge={reaShortcut.badge}
-            busy={reaShortcut.busy}
-            onClick={reaShortcut.onClick}
-            className={SHORTCUT_CLASS}
-          />
-        )}
-      </div>
+
     </div>
   );
 }
