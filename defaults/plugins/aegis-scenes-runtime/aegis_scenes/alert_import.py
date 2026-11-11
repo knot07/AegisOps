@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-ALLOWED_FIELDS=('ip','src_ip','dst_ip','dst_port','threat_name','threat_type','ioc','first_time','last_time','count','severity','grouped_targets')
+ALLOWED_FIELDS=('_source_device','ip','src_ip','dst_ip','dst_port','threat_name','threat_type','ioc','first_time','last_time','count','severity','grouped_targets')
 
 def generate_vulnerability(evidence):
     from aegisops.workflow.llm import LLMClient

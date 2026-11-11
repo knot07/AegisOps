@@ -96,16 +96,37 @@ def test_owner_scope_and_viewer_readonly(env):
     assert "password_hash" not in root.get("/api/users").text
 
 
-def test_no_self_review_and_illegal_transitions(env):
+def test_admin_self_retest_archives_with_audit(env):
     _, root, m, _, create, _ = env
     vid = create()
     assert action(root, vid, "pass").status_code == 409
     assert action(root, vid, "submit").status_code == 200
-    assert action(root, vid, "pass").status_code == 403
-    assert action(root, vid, "reject").status_code == 403
-    assert action(m["security"]["client"], vid, "pass").status_code == 200
+    assert action(root, vid, "pass", note=" ").status_code == 422
+    assert action(root, vid, "pass").status_code == 200
+    item = root.get(f"/api/vulnerabilities/{vid}").json()
+    assert item["status"] == "closed" and item["closed_at"]
+    assert any("管理员复测本人" in e["note"] and "历史漏洞" in e["note"] for e in item["events"])
+    assert root.get("/api/vulnerabilities?status=closed").json()["total"] == 1
+    metrics = root.get("/api/dashboard").json()
+    assert metrics["open"] == 0 and metrics["closed"] == 1 and metrics["critical_high"] == 0
+    assert action(root, vid, "pass").status_code == 409
     assert action(root, vid, "start").status_code == 409
-    assert action(root, vid, "assign", owner_id=m["owner2"]["id"]).status_code == 409
+    assert action(root, vid, "reopen").status_code == 200
+    item = root.get(f"/api/vulnerabilities/{vid}").json()
+    assert item["status"] == "assigned" and item["closed_at"] is None
+
+
+def test_security_self_retest_denied_and_admin_can_return(env):
+    _, root, m, _, create, _ = env
+    vid = create()
+    security = m["security"]["client"]
+    assert action(security, vid, "submit").status_code == 200
+    assert action(security, vid, "pass").status_code == 403
+    assert action(security, vid, "reject").status_code == 403
+    assert action(root, vid, "reject").status_code == 200
+    assert action(root, vid, "submit").status_code == 200
+    assert action(root, vid, "reject").status_code == 200
+    assert root.get(f"/api/vulnerabilities/{vid}").json()["status"] == "fixing"
 
 
 def test_overdue_sla_and_dashboard_filters(env):

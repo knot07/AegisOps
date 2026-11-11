@@ -586,7 +586,7 @@ export default function HubPage() {
   return (
     <div data-yushu-page="hub" className="h-full min-h-0 flex flex-col" aria-busy={loading}>
       {protectedUpdate.dialog}
-      <PageHeader
+      <PageHeader emblem="hub"
         title={hubTitle}
         icon={<Archive className="w-8 h-8" />}
         action={

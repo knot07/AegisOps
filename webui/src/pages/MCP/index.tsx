@@ -28,7 +28,7 @@ export default function MCPPage() {
 
   return (
     <div data-yushu-page="mcp" className="h-full flex flex-col">
-      <PageHeader
+      <PageHeader emblem="device"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<Server className="w-8 h-8" />}

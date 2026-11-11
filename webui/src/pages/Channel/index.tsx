@@ -3654,7 +3654,7 @@ export default function ChannelPage() {
 
   return (
     <div data-yushu-page="channel" className="h-full flex flex-col">
-      <PageHeader
+      <PageHeader emblem="channel"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<Radio className="w-8 h-8" />}

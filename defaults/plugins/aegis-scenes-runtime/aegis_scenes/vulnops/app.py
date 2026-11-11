@@ -27,7 +27,7 @@ DATA.mkdir(parents=True, exist_ok=True)
 DB = DATA / "vulnops.db"
 ROLES = {"admin": "系统管理员", "security": "安全运营", "owner": "整改负责人", "viewer": "只读观察员"}
 SEVERITIES = {"critical": "严重", "high": "高危", "medium": "中危", "low": "低危"}
-STATES = {"new": "待分派", "assigned": "待整改", "fixing": "整改中", "retest": "待复测", "closed": "已关闭"}
+STATES = {"new": "待分派", "assigned": "待整改", "fixing": "整改中", "retest": "待复测", "closed": "历史漏洞"}
 SLA = {"critical": 1, "high": 7, "medium": 30, "low": 90}
 
 
@@ -523,7 +523,7 @@ def act(vid: int, data: Action, user=Depends(current_user)):
         elif action in {"pass", "reject"}:
             if state != "retest":
                 raise HTTPException(409, "只有待复测漏洞可以复测")
-            if item["last_submitter"] == user["id"]:
+            if item["last_submitter"] == user["id"] and user["role"] != "admin":
                 raise HTTPException(403, "整改提交人与复测人员必须不同")
             update.update(status="closed" if action == "pass" else "fixing", closed_at=now() if action == "pass" else None)
         elif action == "reopen":
@@ -536,6 +536,10 @@ def act(vid: int, data: Action, user=Depends(current_user)):
         if action == "assign":
             owner = con.execute("SELECT name FROM users WHERE id=?", (data.owner_id,)).fetchone()[0]
             note = f"责任人：{owner}。{note}"
+        if action in {"pass", "reject"} and item["last_submitter"] == user["id"]:
+            note = "管理员复测本人提交的整改。" + note
+        if action == "pass":
+            note += "\n复测通过，已归档为历史漏洞。"
         event(con, user["id"], names[action], note, vid)
     return {"ok": True}
 

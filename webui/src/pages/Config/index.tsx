@@ -9,7 +9,7 @@ export default function ConfigPage() {
 
   return (
     <div data-yushu-page="config" className="space-y-6">
-      <PageHeader
+      <PageHeader emblem="accounts"
         title={t('admin.pageTitle')}
         description={t('admin.pageDescription')}
         icon={<UserCog className="w-8 h-8" />}

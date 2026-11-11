@@ -1,5 +1,6 @@
+import ModuleEmblem from '@/components/common/ModuleEmblem';
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
-import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
+import {ModelBrandIcon, brandStyle, AgentIdentity, agentStyle} from '@/components/common/VisualIdentity';
 import { useContext, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Plus,
@@ -186,17 +187,18 @@ function ComposerResourcePicker({
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
       </button>
       {open && (
-        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
-          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+        <div className="aegis-agent-picker aegis-resource-picker absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+          <div className="agent-picker-header flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
             <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
               {title}
             </span>
-            <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+            <div className="agent-picker-filters inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
               {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                 <button
                   key={filter}
                   type="button"
                   onClick={() => setSourceFilter(filter)}
+                  aria-pressed={sourceFilter === filter}
                   className={`rounded-md px-2 py-1 transition-colors ${
                     sourceFilter === filter
                       ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
@@ -208,7 +210,7 @@ function ComposerResourcePicker({
               ))}
             </div>
           </div>
-          <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+          <div className="agent-picker-list h-64 overflow-y-auto p-2">
             {loading ? (
               <div className="flex h-full items-center justify-center text-zinc-400">
                 <Loader2 className="h-4 w-4 animate-spin" />
@@ -222,13 +224,13 @@ function ComposerResourcePicker({
                   type="button"
                   onClick={() => onSelect(item)}
                   title={item.description}
-                  className="aegis-composer-resource flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
+                  className="agent-picker-card aegis-composer-resource flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
                 >
                   <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
                     <ResourceIdentity kind={resourceKind} name={item.id} label={item.name} compact />
                   </span>
-                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
-                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                  <span className="agent-picker-name min-w-0 flex-1 truncate">{item.name}</span>
+                  <span className={`agent-picker-badge shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
                     item.source === 'builtin'
                       ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
                       : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
@@ -1950,8 +1952,8 @@ export default function SessionPage() {
                 <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
-                  <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+                <div className="aegis-agent-picker absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[360px] max-w-[calc(100vw-2rem)] overflow-hidden max-md:left-0 rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+                  <div className="agent-picker-header flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
                     <div className="min-w-0">
                       <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
                       <div
@@ -1965,12 +1967,13 @@ export default function SessionPage() {
                         {t('agentPicker.hint')}
                       </div>
                     </div>
-                    <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+                    <div className="agent-picker-filters inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
                       {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                         <button
                           key={filter}
                           type="button"
                           onClick={() => setAgentSourceFilter(filter)}
+                          aria-pressed={agentSourceFilter === filter}
                           className={`rounded-md px-2 py-1 transition-colors ${
                             agentSourceFilter === filter
                               ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
@@ -1982,7 +1985,7 @@ export default function SessionPage() {
                       ))}
                     </div>
                   </div>
-                  <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+                  <div className="agent-picker-list h-80 overflow-y-auto p-2.5">
                     {loadingAgents ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
                     ) : filteredChatAgents.length > 0 ? (
@@ -1998,24 +2001,17 @@ export default function SessionPage() {
                               insertMention(agent.name);
                               closeMenu();
                             }}
-                            className={`w-full min-w-0 rounded-lg border px-2.5 py-2 text-left transition-colors ${
-                              selectedAgent === agent.name
-                                ? 'border-[#bdd19f] bg-[#eef4e5] text-[#526e37] shadow-none dark:border-[#829f5c]/50 dark:bg-[#a2c67b]/12 dark:text-[#c5d9ac]'
-                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
-                            }`}
+                            className="agent-picker-card"
+                            style={agentStyle(agent.name, displayName)}
+                            aria-pressed={selectedAgent === agent.name}
+                            data-agent-name={agent.name}
                           >
                             <div className="flex min-w-0 items-center gap-2">
-                              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-md ${
-                                selectedAgent === agent.name
-                                  ? 'bg-white text-zinc-700 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.10] dark:text-white'
-                                  : 'bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500'
-                              }`}>
-                                <Bot className="h-3 w-3" />
-                              </span>
-                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                              <AgentIdentity name={agent.name} label={displayName} />
+                              <span className="agent-picker-name min-w-0 flex-1">
                                 {displayName}
                               </span>
-                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                              <span className={`agent-picker-badge shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
                                 agent.mode === 'primary'
                                   ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
                                   : agent.native
@@ -2509,8 +2505,8 @@ function WelcomeScreen({
   const { t } = useTranslation('session');
   return (
     <div className="w-full max-w-[700px] px-9 text-center max-[600px]:px-4">
-      <div className="aegis-welcome-emblem mx-auto mb-6 flex h-20 w-20 items-center justify-center">
-        <img src="/atlas-welcome.svg" alt="Atlas 安全运营中枢" className="h-20 w-20" />
+      <div className="aegis-welcome-emblem aegis-welcome-pair mx-auto mb-6 flex items-center justify-center">
+        <ModuleEmblem kind="chat" size="hero" /><span className="aegis-welcome-dot" aria-hidden="true">·</span><img className="aegis-welcome-brand" src="/favicon.svg" alt="AegisOps" />
       </div>
       <h3 className="text-[28px] font-medium tracking-tight text-ui-text">{t('welcome.title')}</h3>
       <p className="mt-3 text-sm leading-7 text-ui-muted">{t('welcome.description')}</p>

@@ -140,7 +140,7 @@ export default function AgentPage() {
 
   return (
     <div data-yushu-page="agent" className="yushu-resource-page h-full flex flex-col">
-      <PageHeader
+      <PageHeader emblem="agent"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<Bot className="w-8 h-8" />}

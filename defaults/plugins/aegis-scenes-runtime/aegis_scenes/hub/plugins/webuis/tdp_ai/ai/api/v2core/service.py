@@ -35,6 +35,9 @@ class NativeTdpService:
         summaries = annotate_scan_campaigns(aggregate_domain_alerts(aggregate_attackers(events)))
         trend = build_trend(events, start_time, end_time)
         key = self.range_key(start_time, end_time)
+        from aegis_scenes.incident_sources import source_for_connection
+        provenance=source_for_connection(self.client.connection)
+        for row in summaries:row['_source_device']=dict(provenance)
         self.store.replace_summary(key, summaries)
         self.store.replace_buckets(trend)
         rows, total = self.store.list_summary(key, page=page, page_size=page_size)

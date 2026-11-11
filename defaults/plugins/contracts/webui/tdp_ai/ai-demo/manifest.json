@@ -1,6 +1,6 @@
 {
   "id": "ai-demo",
-  "title": "TDP AI 研判 · 演示环境",
+  "title": "态势感知 AI 研判 · 演示环境",
   "route": "/contracts/webui/ai-demo",
   "icon": "Bot",
   "order": 11,

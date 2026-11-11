@@ -1,7 +1,7 @@
 {
   "schemaVersion": "hub.component.v1",
   "id": "tdp-ai-scene",
-  "name": "TDP AI 研判",
+  "name": "态势感知 AI 研判",
   "components": [
     {
       "type": "webui",

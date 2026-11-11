@@ -150,7 +150,7 @@ export default function ArchivedDataPanel() {
 
   return (
     <div>
-      <PageHeader
+      <PageHeader emblem="archive"
         title={t('archivedData.title')}
         description={t('archivedData.description')}
         icon={<Archive className="h-8 w-8" />}

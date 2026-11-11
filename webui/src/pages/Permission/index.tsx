@@ -99,7 +99,7 @@ export default function PermissionPage() {
 
   return (
     <div data-yushu-page="permission" className="h-full flex flex-col">
-      <PageHeader
+      <PageHeader emblem="accounts"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<Shield className="w-8 h-8" />}

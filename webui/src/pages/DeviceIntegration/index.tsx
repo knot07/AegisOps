@@ -776,7 +776,7 @@ function DeviceAddRexPanel({
                   <>
                     <div className="yushu-guide-intro">
                       <div className="yushu-guide-symbol">
-                        <ServerCog className="h-5 w-5" />
+                        <img className="atlas-guide-brand" src="/favicon.svg" alt="Atlas" /><span aria-hidden="true"><Sparkles /></span>
                       </div>
                       <h3 className="mt-4 text-sm font-semibold text-gray-900">{t('wizard.guide.title')}</h3>
                       <p className="mx-auto mt-2 max-w-[300px] text-xs leading-relaxed text-gray-500">
@@ -2490,7 +2490,7 @@ export default function DeviceIntegrationPage() {
 
   return (
     <div data-yushu-page="deviceintegration" className="h-full flex flex-col p-6 bg-gray-50 overflow-hidden max-md:p-4">
-      <PageHeader
+      <PageHeader emblem="device"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<ServerCog className="w-8 h-8" />}

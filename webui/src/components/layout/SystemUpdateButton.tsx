@@ -1,3 +1,4 @@
+import UtilityGlyph from '@/components/common/UtilityGlyph';
 import { useContext, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ArrowUpCircle, CheckCircle2, Download, ExternalLink, Loader2, RefreshCw, ShieldCheck, X } from 'lucide-react';
@@ -77,7 +78,7 @@ export default function SystemUpdateButton({ className }: { className: string })
   function close() { setOpen(false); window.setTimeout(() => trigger.current?.focus(), 0); }
   if (auth?.user?.role !== 'admin') return null;
   return <>
-    <button ref={trigger} type="button" title="在线更新" aria-label="在线更新" className={className} onClick={() => setOpen(true)}><ArrowUpCircle className="h-[18px] w-[18px]" /></button>
+    <button ref={trigger} type="button" title="在线更新" aria-label="在线更新" className={className} onClick={() => setOpen(true)}><UtilityGlyph kind="update" /></button>
     {open && createPortal(<dialog ref={dialog} className="aegis-update-dialog" aria-labelledby="system-update-title" onCancel={e => { e.preventDefault(); close(); }} onClose={close}>
       <header><span className="update-emblem"><ArrowUpCircle /></span><div><p>AEGISOPS / SYSTEM UPDATE</p><h2 id="system-update-title">在线更新</h2></div><button type="button" aria-label="关闭更新窗口" onClick={close}><X size={20}/></button></header>
       <div className="update-content">

@@ -18,6 +18,27 @@
 
 ![AegisOps 运营首页](docs/images/pages/home.png)
 
+## 2026.11.11 更新
+
+应急响应从采集到复核形成完整流程：设备来源绑定 → Atlas 只读追查 → 文件取证 → REA 静态逆向 / 外部分析 → 报告与事件归档。
+
+[完整更新说明](docs/CHANGELOG-2026.11.11.md) · [REA 部署与限制](docs/REA.md) · [发行验证](docs/RELEASE-VERIFICATION.md)
+
+| 新增与完善 | 使用方式 |
+| --- | --- |
+| 事件状态流转 | 更新状态填写说明，复核后归档，支持重新打开 |
+| 设备来源绑定 | 告警自动携带来源，手工事件明确选择，禁止改查默认设备 |
+| REA / Ghidra | 真实反编译、AI 选择函数、归档工具证据；Linux/WSL2 可选环境 |
+| 微步与 VirusTotal | 哈希查询、明确确认上传、报告详情、官网手动上传 |
+| 证据分类与报告弹窗 | 样本/主机/设备/报告/资料/过程，搜索和 Markdown 详情 |
+| 漏洞复测归档 | 管理员复测、历史漏洞归档，合并重复视图 |
+
+![来源设备品牌选择](docs/images/updates/source-devices.png)
+![样本分类与逆向](docs/images/updates/evidence.png)
+![REA 真实逆向报告](docs/images/updates/rea-report.png)
+![微步样本分析](docs/images/updates/threatbook.png)
+![VirusTotal 样本分析](docs/images/updates/virustotal.png)
+
 ## 为什么做这个工作台
 
 日常安全运营常常需要在告警设备、日志查询、主机排查、威胁情报和漏洞台账之间切换。AegisOps 将这些入口放入一套统一界面：Atlas 负责对话与能力调度，工作流约束重复步骤，业务场景承接实际处置与记录。
@@ -39,15 +60,15 @@ flowchart LR
 
 ## 下载哪个版本
 
-Release 仅提供三个文件，按部署方式选择：
+Release 提供 Linux、Windows、源码三个主包，另附 SHA-256 校验清单，按部署方式选择：
 
 | 下载 | 适用环境 | 启动方式 |
 | --- | --- | --- |
-| [Windows x64](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.08-Windows-x64.zip) | Windows 10/11 x64，附 Python、Node、Git 运行环境 | 解压后双击 `start.cmd` |
-| [Linux](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.08-Linux.zip) | Linux 原生安装或 Docker Compose | `bash install.sh` 或 `docker compose up -d --build` |
-| [Source](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.08-Source.zip) | 二次开发、源码审阅与自定义构建 | 参见部署手册 |
+| [Windows x64](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.11-Windows-x64.zip) | Windows 10/11 x64，附 Python、Node、Git 运行环境 | 解压后双击 `start.cmd` |
+| [Linux](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.11-Linux.zip) | Linux / WSL2 或 Docker Compose；REA 另需主机权限 | `bash install.sh` 或 `docker compose up -d --build` |
+| [Source](https://github.com/knot07/AegisOps/releases/latest/download/AegisOps-2026.11.11-Source.zip) | 二次开发、源码审阅与自定义构建 | 参见部署手册 |
 
-Linux 包和源码包使用同一份完整代码及已构建前端，Linux 包突出部署入口；Windows 包另外附带本机运行环境。首次登录在页面自行设置管理员账号和密码，**没有默认口令**。模型 API Key、设备凭据、业务记录均需自行配置。
+Linux 与源码包使用相同核心代码及已构建前端，Linux 包额外附可选 REA 离线环境；Windows 包另外附带本机运行环境。首次登录在页面自行设置管理员账号和密码，**没有默认口令**。模型 API Key、设备凭据、业务记录均需自行配置。
 
 ## 能力与使用边界
 
@@ -211,12 +232,11 @@ docker compose up -d --build
 ![漏洞运营：漏洞台账](docs/images/pages/vuln-ledger.png)
 
 
-### 19. 漏洞运营：整改工作台
+### 19. 漏洞运营：整改与历史归档
 
-跟踪分派、修复、提交复测和关闭过程，保持漏洞状态与操作记录关联。
+整改操作合并在漏洞台账，管理员可复测并归档，普通安全成员不允许自审。已整改漏洞进入历史记录，保留证据与时间线。
 
-![漏洞运营：整改工作台](docs/images/pages/vuln-remediation.png)
-
+![管理员复测归档](docs/images/updates/admin-retest.png)
 
 ### 20. 漏洞运营：资产目录
 

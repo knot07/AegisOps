@@ -1,3 +1,6 @@
+import UtilityGlyph, { IdentityAvatar } from '@/components/common/UtilityGlyph';
+import ModuleEmblem from '@/components/common/ModuleEmblem';
+import SceneWorkspacePicker from './SceneWorkspacePicker';
 import NavSelection from './NavSelection';
 import { preloadContentRoute } from '@/routes/contentRoutes';
 import { Link, useLocation, useNavigate, type RouteObject } from 'react-router-dom';
@@ -659,6 +662,10 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     const iconClass = `h-5 w-5 shrink-0 stroke-[1.75] ${
       item.accent ? 'text-ui-secondary' : 'text-ui-secondary'
     }`;
+    const emblems: Record<string,string> = {'/':'home','/sessions':'chat','/tasks':'task','/agents':'agent','/skills':'skill','/workflows':'workflow','/workspace':'workspace','/tools':'tools','/devices':'device','/models':'model','/channels':'channel','/hub':'hub','/scenes':'scenes','/settings/preferences':'preferences','/settings/account':'accounts','/settings/system-logs':'logs','/settings/archived-data':'archive','#logout':'logout'};
+    const path = item.href.split('?')[0];
+    const kind = emblems[path] || (path.includes('/tdp_ai/') ? 'review' : path.includes('/vuln_ops/') ? 'vulnops' : path.includes('/incident_response/') ? 'incident' : null);
+    const navIcon = kind ? <ModuleEmblem kind={kind} size="nav" /> : <item.icon aria-hidden="true" className={iconClass} />;
     if (item.action) {
       return (
         <button
@@ -673,7 +680,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
           data-tip={collapsed ? item.name : undefined}
           className={`w-full ${navLinkClass(false)} ${item.accent ? 'text-red-600 dark:text-red-400' : ''}`}
         >
-          <item.icon aria-hidden="true" className={iconClass} />
+          {navIcon}
           {!collapsed && <span className="min-w-0 flex-1 truncate text-left">{item.name}</span>}
         </button>
       );
@@ -690,7 +697,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         data-tip={collapsed ? item.name : undefined}
         className={navLinkClass(active)}
       >
-        <item.icon aria-hidden="true" className={iconClass} />
+        {navIcon}
         {!collapsed && (
           <>
             <span className="min-w-0 flex-1 truncate">{item.name}</span>
@@ -739,11 +746,16 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         {!collapsed && <span className="min-w-0"><span className="block truncate text-base font-semibold tracking-tight">{productName}</span><span className="mt-0.5 block text-[10px] tracking-[0.16em] text-ui-muted">AEGISOPS</span></span>}
       </Link>
         <button type="button" onClick={toggleCollapsed} className="aegis-sidebar-toggle hidden h-7 w-7 shrink-0 items-center justify-center rounded-lg text-ui-muted transition-colors hover:bg-ui-hover hover:text-ui-text focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus lg:flex" aria-controls="layout-sidebar" aria-expanded={!collapsed} aria-label={collapsed ? t('expandNav') : t('collapseNav')} title={collapsed ? t('expandNav') : t('collapseNav')}>
-          {collapsed ? <PanelLeftOpen aria-hidden="true" className="h-4 w-4" /> : <PanelLeftClose aria-hidden="true" className="h-4 w-4" />}
+          <UtilityGlyph kind={collapsed ? "expand" : "collapse"} />
         </button>
       </div>
       <button type="button" onClick={() => setSidebarOpen(false)} aria-label={t('close')} className="absolute right-2 top-2 rounded p-1 text-ui-secondary lg:hidden"><X className="h-4 w-4" /></button>
-      {!collapsed && openSceneWorkspaces.length > 0 && <div className="aegis-scene-switcher"><label htmlFor="aegis-scene-select">{i18n.language.startsWith('zh') ? '场景中心·切换工作空间' : 'Scene Center · Workspace'}</label><select id="aegis-scene-select" aria-label="场景中心·切换工作空间" value={workspaceIdFromPath(location.pathname) || 'agent'} onChange={event => selectWorkspace(event.target.value === 'agent' ? AGENT_WORKSPACE : sceneNavWorkspace(event.target.value))}><option value="agent">御枢工作台</option>{openSceneWorkspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{getLocalizedWebUIContractTitle(workspace, i18n.language)}</option>)}</select></div>}
+      {!collapsed && openSceneWorkspaces.length > 0 && <SceneWorkspacePicker
+        label={i18n.language.startsWith('zh') ? '场景中心·切换工作空间' : 'Scene Center · Workspace'}
+        value={workspaceIdFromPath(location.pathname) || 'agent'}
+        options={[{id:'agent',name:i18n.language.startsWith('zh') ? '御枢工作台' : 'AegisOps'},...openSceneWorkspaces.map(workspace => ({id:workspace.id,name:getLocalizedWebUIContractTitle(workspace, i18n.language)}))]}
+        onChange={id => selectWorkspace(id === 'agent' ? AGENT_WORKSPACE : sceneNavWorkspace(id))}
+      />}
       {navigation}
       <div className={`shrink-0 border-t border-ui-border ${collapsed ? 'p-2' : 'p-3'}`}>
       <WorkspaceHeader
@@ -763,7 +775,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       />
 
         <div className={`yushu-account-summary flex items-center ${collapsed ? 'justify-center py-2' : 'gap-2.5 px-2 py-3'}`} title={`${user?.username || productName} · ${accountRoleLabel}`}>
-          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-ui-subtle text-xs font-medium text-ui-secondary">{accountInitial}</span>
+          <IdentityAvatar admin={user?.role === "admin"} />
           {!collapsed && <div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className="truncate text-sm font-medium">{user?.username || productName}</span><span className="text-xs text-ui-muted">{accountRoleLabel}</span></div></div>}
         </div>
       </div>

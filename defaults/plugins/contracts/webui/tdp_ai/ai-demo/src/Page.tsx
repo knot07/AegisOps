@@ -1037,6 +1037,18 @@ export default function Page() {
       [data-layout="mobile"] header { padding: 16px 12px !important; }
       [data-layout="mobile"] h1 { font-size: 18px !important; }
       @media (prefers-reduced-motion: reduce) { [data-aegisops-theme] * { transition: none !important; } }
+
+ .review-atlas-entry,.review-refresh{background:linear-gradient(120deg,#b6e583,#9dd464)!important;color:#314e20!important;border:1px solid #9bc967!important;border-radius:10px!important;min-height:38px!important;font-size:13px!important;font-weight:600!important;box-shadow:0 3px 9px #648c351a!important;transition:background .18s,box-shadow .18s,transform .18s}
+ .review-atlas-entry:hover,.review-refresh:hover{background:linear-gradient(120deg,#a8dc71,#90c956)!important;box-shadow:0 4px 12px #648c3529!important;transform:translateY(-1px)}
+ .review-atlas-entry:active,.review-refresh:active{transform:translateY(0)}
+ .review-atlas-entry:focus-visible,.review-refresh:focus-visible{outline:3px solid #99c96766;outline-offset:3px}
+ .review-sync-chip{background:#f0f6e9!important;border-color:#dfe9d3!important;color:#6a844b!important;font-size:12px!important;font-weight:600;min-height:34px!important;border-radius:8px!important}
+ .review-time-chip{background:#f5f7f7!important;border-color:#e4e9e9!important;color:#7c898f!important;font-size:12px!important;font-weight:500;font-variant-numeric:tabular-nums;min-height:34px!important;border-radius:8px!important}
+ [data-tdp-stat]{min-height:48px!important;background:linear-gradient(115deg,#f2f7ec,#fff)!important;border-color:#e1ead9!important;border-radius:10px!important;box-shadow:none!important;padding:9px 13px!important}
+ [data-tdp-stat]>span:first-child{background:#e8f2dc!important;color:#6a9142!important;border-radius:9px!important;width:30px!important;height:30px!important}
+ [data-tdp-stat]>span:last-child>span{color:#4f5e57!important;font-size:13px!important;font-weight:600!important;line-height:1.4!important}
+ [data-tdp-stat] small{color:#839087!important;font-size:12px!important;font-weight:400!important;line-height:1.5!important}
+
     `}</style>
 <nav aria-label="研判环境切换" style={{display:"flex",gap:8,padding:"12px 24px",borderBottom:`1px solid ${C.border}`,background:C.panel}}><a href="/contracts/webui/workspaces/tdp_ai/ai" aria-current={undefined} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"transparent",color:C.textMuted}}>正式研判</a><a href="/contracts/webui/workspaces/tdp_ai/ai-demo" aria-current={"page"} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"#edf4e5",color:"#526e3d"}}>演示平台</a></nav>
     <header style={topbarStyle}>
@@ -1045,9 +1057,9 @@ export default function Page() {
         <div style={{ minWidth: 0 }}><h1 style={brandTitleStyle}><button type="button" onClick={renamePlatform} title="点击自定义平台名称" aria-label="修改平台名称" style={{ font: 'inherit', color: 'inherit', background: 'none', border: 0, padding: 0, cursor: 'pointer', textAlign: 'left' }}>{brandName} · 演示</button></h1><div style={{ marginTop: 4, color: C.textDim, fontSize: 12, fontWeight: 600 }}>固定样例数据 · 只读演示 · 不连接生产 TDP</div></div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: isMobile ? 'flex-start' : 'flex-end' }}>
-        <button type="button" onClick={()=>void askAlertAI()} style={{...secondaryButton,color:"#526d42",borderColor:"#d8e4cc",background:"#f3f7ee"}}><Icon name="spark" size={15}/>Atlas快速接入使用</button><span style={chipStyle}><span style={{ ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green }} />{syncText}</span>
-        <span style={chipStyle}><Icon name="clock" size={16} />{error || fmtTime(updatedAt)}</span>
-        <button type="button" title="立即刷新" onClick={() => void loadDashboard()} style={primaryButton}><Icon name="refresh" size={16} />{loading ? '刷新中' : '刷新'}</button>
+        <button type="button" className="review-atlas-entry" onClick={()=>void askAlertAI()} style={{...secondaryButton,color:"#526d42",borderColor:"#d8e4cc",background:"#f3f7ee"}}><Icon name="spark" size={15}/>Atlas快速接入使用</button><span className="review-sync-chip" style={chipStyle}><span style={{ ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green }} />{syncText}</span>
+        <span className="review-time-chip" style={chipStyle}><Icon name="clock" size={16} />{error || fmtTime(updatedAt)}</span>
+        <button type="button" className="review-refresh" title="立即刷新" onClick={() => void loadDashboard()} style={primaryButton}><Icon name="refresh" size={16} />{loading ? '刷新中' : '刷新'}</button>
       </div>
     </header>
 

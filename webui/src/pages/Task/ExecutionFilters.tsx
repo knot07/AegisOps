@@ -1,3 +1,4 @@
+import DateTimeFilter from '@/components/common/DateTimeFilter';
 import { useState, type FormEvent } from 'react';
 import { Search, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -61,9 +62,9 @@ export default function ExecutionFilters({ onSearch, onReset }: {
         <fieldset className="min-w-0 flex-[2_1_400px]">
           <legend className="mb-1 text-sm text-gray-600">{t('queued.filterExecutionTime')}</legend>
           <div className="flex flex-wrap items-center gap-2">
-            <input type="datetime-local" aria-label={t('queued.filterStartTime')} aria-describedby="execution-time-hint" value={startedAfter} onChange={event => { setStartedAfter(event.target.value); setError(''); }} className={`${inputClass} flex-[1_1_180px]`} />
+            <DateTimeFilter label={t('queued.filterStartTime')} describedBy="execution-time-hint" value={startedAfter} onChange={value => { setStartedAfter(value); setError(''); }} />
             <span className="text-sm text-gray-400" aria-hidden="true">—</span>
-            <input type="datetime-local" aria-label={t('queued.filterEndTime')} aria-describedby="execution-time-hint" value={startedBefore} onChange={event => { setStartedBefore(event.target.value); setError(''); }} className={`${inputClass} flex-[1_1_180px]`} />
+            <DateTimeFilter label={t('queued.filterEndTime')} describedBy="execution-time-hint" value={startedBefore} onChange={value => { setStartedBefore(value); setError(''); }} />
           </div>
         </fieldset>
         <label className="min-w-[120px] flex-[0_1_140px] space-y-1 text-sm text-gray-600">

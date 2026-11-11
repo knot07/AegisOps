@@ -10,7 +10,7 @@ interface HeaderMenuProps {
   title?: string;
   align?: 'left' | 'right';
   /** Sidebar menus use a portal so their clipping container cannot hide them. */
-  placement?: 'below' | 'above' | 'beside';
+  placement?: 'below' | 'above' | 'beside' | 'dropdown';
   menuClassName?: string;
   children: (close: (restoreFocus?: boolean) => void) => ReactNode;
 }
@@ -48,6 +48,17 @@ export default function HeaderMenu({
     const place = () => {
       const anchor = rootRef.current?.getBoundingClientRect();
       if (!anchor) return;
+      if (placement === 'dropdown') {
+        const width = Math.min(anchor.width, window.innerWidth - 16);
+        const top = anchor.bottom + 6;
+        setPosition({
+          top,
+          left: Math.max(8, Math.min(anchor.left, window.innerWidth - width - 8)),
+          width,
+          maxHeight: Math.max(80, Math.min(6 * 44 + 16, window.innerHeight - top - 16)),
+        });
+        return;
+      }
       const width = menuRef.current?.offsetWidth || 256;
       const bottomEdge = placement === 'beside' ? anchor.bottom : anchor.top - 8;
       const left = placement === 'beside' ? anchor.right + 8 : anchor.left;
@@ -59,7 +70,8 @@ export default function HeaderMenu({
     };
     place();
     window.addEventListener('resize', place);
-    return () => window.removeEventListener('resize', place);
+    window.addEventListener('scroll', place, true);
+    return () => { window.removeEventListener('resize', place); window.removeEventListener('scroll', place, true); };
   }, [open, placement, portalled]);
 
   const close = useCallback((restoreFocus = false) => {

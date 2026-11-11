@@ -358,7 +358,7 @@ export default function SkillPage() {
 
   return (
     <div data-yushu-page="skill" className="yushu-resource-page h-full flex flex-col">
-      <PageHeader
+      <PageHeader emblem="skill"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<BookOpen className="w-8 h-8" />}

@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react';
-import { MessageSquare, ArrowUpRight, Sparkles } from 'lucide-react';
+import { ArrowUpRight, Sparkles } from 'lucide-react';
 import type { ChatGuideAction } from './ChatGuideDock';
 import GuideInfoIcon from './GuideInfoIcon';
 
@@ -50,7 +50,6 @@ interface GuidedCreatePanelProps {
 
 export default function GuidedCreatePanel({
   emptyTitle,
-  icon,
   title,
   description,
   groups,
@@ -67,7 +66,7 @@ export default function GuidedCreatePanel({
   return (
     <div className="yushu-create-guide" aria-label={emptyTitle || title}>
       <div className="yushu-guide-intro">
-        <div className="yushu-guide-symbol">{icon ?? <MessageSquare className="h-5 w-5" />}<span aria-hidden="true"><Sparkles /></span></div>
+        <div className="yushu-guide-symbol"><img className="atlas-guide-brand" src="/favicon.svg" alt="Atlas" /><span aria-hidden="true"><Sparkles /></span></div>
         <h3>{title}</h3><p>{description}</p>
       </div>
       <div data-testid={scrollTestId} className="yushu-guide-sections">

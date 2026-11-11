@@ -1,7 +1,7 @@
 {
   "id": "tdp_ai",
   "version": "1.0.0",
-  "title": "TDP AI 研判",
+  "title": "态势感知 AI 研判",
   "icon": "ShieldCheck",
   "order": 10,
   "enabled": true,

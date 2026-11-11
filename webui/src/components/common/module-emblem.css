@@ -1,0 +1,54 @@
+.yushu-page-icon:has(.aegis-module-emblem){width:48px!important;height:48px!important;background:transparent!important;border:0!important;border-radius:0!important;box-shadow:none!important;overflow:visible}
+.aegis-module-emblem{display:inline-flex;align-items:center;justify-content:center;width:48px;height:48px;flex-shrink:0;filter:drop-shadow(0 3px 3px color-mix(in srgb,var(--emblem-color) 15%,transparent));transition:filter .2s,transform .2s}
+.yushu-page-icon .aegis-module-emblem>svg,.aegis-module-emblem>svg{width:44px;height:44px;stroke:none!important;overflow:visible}
+.yushu-page-header:hover .aegis-module-emblem{transform:translateY(-1px);filter:drop-shadow(0 4px 5px color-mix(in srgb,var(--emblem-color) 22%,transparent))}
+.dark .aegis-module-emblem{filter:brightness(1.15) drop-shadow(0 2px 5px #0002)}
+@media(max-width:767px){.yushu-page-icon:has(.aegis-module-emblem),.aegis-module-emblem{width:40px!important;height:40px!important}.yushu-page-icon .aegis-module-emblem>svg,.aegis-module-emblem>svg{width:36px;height:36px}}
+@media(prefers-reduced-motion:reduce){.aegis-module-emblem{transition:none}.yushu-page-header:hover .aegis-module-emblem{transform:none}}
+
+.aegis-module-emblem.aegis-emblem-nav{width:20px!important;height:20px!important;filter:none;transition:transform .18s ease;flex-shrink:0}
+.aegis-module-emblem.aegis-emblem-nav>svg{width:20px!important;height:20px!important;stroke:none!important}
+.aegis-module-nav :is(a,button):hover>.aegis-emblem-nav{transform:translateY(-1px)}
+.aegis-module-nav [aria-current=page]>.aegis-emblem-nav{filter:drop-shadow(0 1px 2px color-mix(in srgb,var(--emblem-color) 22%,transparent))}
+.aegis-module-emblem.aegis-emblem-hero{width:80px!important;height:80px!important;filter:drop-shadow(0 8px 10px #437f5620)}
+.aegis-module-emblem.aegis-emblem-hero>svg{width:76px!important;height:76px!important}
+.aegis-welcome-emblem:hover .aegis-emblem-hero{transform:translateY(-2px)}
+.aegis-scene-label{display:block;color:rgb(var(--ui-muted));font-size:10px;margin-bottom:8px}
+.aegis-scene-trigger{display:flex;align-items:center;gap:8px;width:100%;min-height:40px;padding:8px 10px;border-radius:10px;border:1px solid rgb(var(--ui-border));background:rgb(var(--ui-surface));color:rgb(var(--ui-text));font-size:12px;text-align:left;transition:border-color .18s}
+.aegis-scene-trigger>span:nth-child(2){flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.aegis-scene-trigger>svg{color:rgb(var(--ui-muted));flex-shrink:0}
+.aegis-scene-trigger:hover{border-color:#a3bc89}
+.aegis-scene-menu{padding:7px!important;border-radius:14px!important;box-shadow:0 12px 40px #24341d20!important}
+.aegis-scene-menu-caption{font-size:10px;color:rgb(var(--ui-muted));padding:8px 10px 10px}
+.aegis-scene-option{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:10px;border:0;border-radius:9px;font-size:13px;color:rgb(var(--ui-secondary));text-align:left;transition:background .15s}
+.aegis-scene-option>span:nth-child(2){flex:1}.aegis-scene-option:hover,.aegis-scene-option:focus-visible{background:rgb(var(--ui-hover));outline:none}
+.aegis-scene-option[aria-checked=true]{color:#648c3c;font-weight:600;background:#f0f7e7}.aegis-scene-option[aria-checked=true]>svg{color:#84ad54}
+.dark .aegis-scene-option[aria-checked=true]{background:#2f3d26;color:#b9d59e}.dark .aegis-emblem-nav{filter:brightness(1.15)}
+@media(prefers-reduced-motion:reduce){.aegis-emblem-nav{transition:none!important}.aegis-module-nav :is(a,button):hover>.aegis-emblem-nav,.aegis-welcome-emblem:hover .aegis-emblem-hero{transform:none}}
+
+.aegis-scene-menu{scrollbar-width:thin;scrollbar-color:#c6d3ba transparent;border-color:rgb(var(--ui-border))!important;box-shadow:0 8px 24px #263b2114!important;background:rgb(var(--ui-surface))!important;animation:scene-menu-in .15s ease-out}
+.aegis-scene-menu .aegis-scene-option{height:44px;min-height:44px;gap:9px;font-size:12px;padding:9px 10px}
+.aegis-scene-menu .aegis-scene-option>span:nth-child(2){min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+@keyframes scene-menu-in{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.aegis-scene-menu{animation:none}}
+
+.aegis-utility-glyph{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;flex-shrink:0;color:#758678;transition:color .18s,transform .18s}
+.aegis-utility-glyph>svg{width:18px;height:18px;stroke:none!important}
+button:hover>.aegis-utility-glyph{color:#55764e;transform:translateY(-1px)}
+.aegis-sidebar-toggle .aegis-utility-glyph,.aegis-sidebar-toggle .aegis-utility-glyph>svg{width:16px;height:16px}
+.aegis-identity-avatar{display:inline-flex;width:36px;height:36px;flex-shrink:0;filter:drop-shadow(0 2px 3px #4866411c)}
+.aegis-identity-avatar>svg{width:100%;height:100%;stroke:none!important}
+.dark .aegis-utility-glyph{color:#a1b19c}.dark button:hover>.aegis-utility-glyph{color:#c7d8bb}
+@media(prefers-reduced-motion:reduce){.aegis-utility-glyph{transition:none}button:hover>.aegis-utility-glyph{transform:none}}
+
+[data-sidebar-utilities] .aegis-utility-glyph,[data-sidebar-utilities] .aegis-utility-glyph>svg{width:20px;height:20px}
+[data-sidebar-utilities] .aegis-utility-glyph{color:#718078}
+[data-sidebar-utilities] button:hover>.aegis-utility-glyph{color:#4f7357;transform:none}
+.dark [data-sidebar-utilities] .aegis-utility-glyph{color:#a6b4a9}
+
+.aegis-welcome-pair{width:fit-content;height:80px;gap:20px}
+.aegis-welcome-dot{font-size:30px;line-height:1;color:#a8b6af;font-weight:500}
+.aegis-welcome-pair .aegis-welcome-brand{display:block;width:76px;height:76px;object-fit:contain}
+.yushu-guide-symbol .atlas-guide-brand{display:block!important;width:35px!important;height:35px!important;object-fit:contain}
+.atlas-simple-welcome{display:grid;place-items:center;width:64px;height:64px;border-radius:20px;border:1px solid #deedcf;background:linear-gradient(135deg,#edf6df,#f7faf5);margin:0 auto 16px}
+.atlas-simple-welcome img{width:42px;height:42px}
+@media(max-width:600px){.aegis-welcome-pair{gap:14px}.aegis-welcome-pair .aegis-welcome-brand{width:64px;height:64px}}

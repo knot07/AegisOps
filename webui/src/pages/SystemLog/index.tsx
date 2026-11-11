@@ -62,7 +62,7 @@ export default function SystemLogPage() {
 
   return (
     <div data-yushu-page="systemlog" className="flex flex-col">
-      <PageHeader
+      <PageHeader emblem="logs"
         title={t('logs.title')}
         description={t('logs.description')}
         icon={<ScrollText className="w-8 h-8" />}

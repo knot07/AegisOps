@@ -1,3 +1,4 @@
+import ModuleEmblem from '@/components/common/ModuleEmblem';
 import ResourceDetailSummary from '@/components/common/ResourceDetailSummary';
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import ResourceOverview from '@/components/common/ResourceOverview';
@@ -612,7 +613,7 @@ export default function ToolPage() {
       <div className="flex items-center justify-between max-md:flex-wrap max-md:gap-3">
         <div className="flex items-center gap-3 max-md:min-w-0">
           <div className="text-red-600 max-md:shrink-0">
-            <Wrench className="w-8 h-8" />
+            <ModuleEmblem kind="tools" />
           </div>
           <div className="max-md:min-w-0">
             <h1 className="text-2xl font-bold text-gray-900 max-md:text-xl">{t('pageTitle')}</h1>
@@ -3394,7 +3395,7 @@ function ToolPageSkeleton() {
     <div className="min-w-0 space-y-6" aria-busy="true" data-testid="tool-page-skeleton">
       <div className="flex items-center gap-3">
         <div className="text-red-600">
-          <Wrench className="w-8 h-8" />
+          <ModuleEmblem kind="tools" />
         </div>
         <div>
           <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>

@@ -551,7 +551,7 @@ export default function ModelPage() {
   return (
     <div data-yushu-page="model" className="h-full flex flex-col overflow-y-auto" aria-busy={loading}>
       {/* Header */}
-      <PageHeader
+      <PageHeader emblem="model"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<Brain className="w-8 h-8" />}

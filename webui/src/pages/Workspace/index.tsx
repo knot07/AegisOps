@@ -119,7 +119,7 @@ export default function WorkspacePage() {
 
   return (
     <div data-yushu-page="workspace" className="flex h-[calc(100dvh-3.5rem)] min-h-[560px] flex-col">
-      <PageHeader
+      <PageHeader emblem={activeTab === "files" ? "workspace" : activeTab}
         title={activeTab === 'files' ? t('title') : t(`tabs.${activeTab}`)}
         description={t('description')}
         icon={<FolderOpen className="w-8 h-8" />}

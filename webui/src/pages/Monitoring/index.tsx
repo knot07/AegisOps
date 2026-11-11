@@ -136,7 +136,7 @@ export default function MonitoringPage() {
 
   return (
     <div data-yushu-page="monitoring" className="h-full flex flex-col overflow-y-auto">
-      <PageHeader
+      <PageHeader emblem="logs"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<BarChart3 className="w-8 h-8" />}

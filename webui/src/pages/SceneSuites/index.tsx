@@ -284,7 +284,7 @@ export default function SceneSuitesPage() {
           />
         </div>
       )}
-      <PageHeader title={text.title} description={text.description} action={<div className="flex items-center gap-2"><Link to="/hub?type=component" className="rounded-lg border border-ui-border px-3 py-2 text-xs text-ui-secondary">插件广场 →</Link><button
+      <PageHeader emblem="scenes" title={text.title} description={text.description} action={<div className="flex items-center gap-2"><Link to="/hub?type=component" className="rounded-lg border border-ui-border px-3 py-2 text-xs text-ui-secondary">插件广场 →</Link><button
           type="button"
           onClick={() => void refetch()}
           disabled={busyId !== null}

@@ -188,7 +188,7 @@ export default function WorkflowPage() {
 
   return (
     <div data-yushu-page="workflow" className="yushu-resource-page h-full flex flex-col">
-      <PageHeader
+      <PageHeader emblem="workflow"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<WorkflowIcon className="w-8 h-8" />}

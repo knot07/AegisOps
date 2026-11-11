@@ -1,4 +1,4 @@
-import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
+import {ModelBrandIcon, brandStyle, AgentIdentity, agentStyle} from '@/components/common/VisualIdentity';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bot, ChevronDown, Cpu, Info, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -376,8 +376,8 @@ export function ChatAgentPicker({
         <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="aegis-composer-popover absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-          <div className="flex items-center justify-between gap-2 border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
+        <div className="aegis-agent-picker aegis-composer-popover absolute left-0 bottom-full z-50 mb-2 w-[360px] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+          <div className="agent-picker-header flex items-center justify-between gap-2 border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
             <div className="min-w-0">
               <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('agentPicker.title')}</div>
               <div
@@ -392,12 +392,13 @@ export function ChatAgentPicker({
               </div>
             </div>
             {showSourceFilter && (
-              <div className="inline-flex shrink-0 items-center rounded-md border border-zinc-200 bg-white p-0.5 text-[10px] dark:border-zinc-800 dark:bg-zinc-950">
+              <div className="agent-picker-filters inline-flex shrink-0 items-center rounded-md border border-zinc-200 bg-white p-0.5 text-[10px] dark:border-zinc-800 dark:bg-zinc-950">
                 {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                   <button
                     key={filter}
                     type="button"
                     onClick={() => setSourceFilter(filter)}
+                    aria-pressed={sourceFilter === filter}
                     className={`rounded px-1.5 py-0.5 transition-colors ${
                       sourceFilter === filter
                         ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
@@ -410,7 +411,7 @@ export function ChatAgentPicker({
               </div>
             )}
           </div>
-          <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+          <div className="agent-picker-list h-80 overflow-y-auto p-2.5">
             {loading ? (
               <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
             ) : filteredAgents.length > 0 ? (
@@ -421,18 +422,17 @@ export function ChatAgentPicker({
                   <button
                     key={agent.name}
                     onClick={() => { onSelectAgent(agent.name); setOpen(false); }}
-                    className={`w-full min-w-0 rounded-md px-2 py-1.5 text-left transition-colors ${
-                      selectedAgent === agent.name
-                        ? 'bg-[#eef4e5] text-[#526e37] shadow-[inset_2px_0_0_#a2c67b] dark:bg-[#a2c67b]/12 dark:text-[#c5d9ac] dark:shadow-[inset_2px_0_0_#a2c67b]'
-                        : 'hover:bg-zinc-50 text-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                    }`}
+                    className="agent-picker-card"
+                    style={agentStyle(agent.name, displayName)}
+                    aria-pressed={selectedAgent === agent.name}
+                    data-agent-name={agent.name}
                   >
                     <div className="flex min-w-0 items-center gap-2">
-                      <Bot className={`h-3 w-3 shrink-0 ${selectedAgent === agent.name ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                      <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                      <AgentIdentity name={agent.name} label={displayName} />
+                      <span className="agent-picker-name min-w-0 flex-1">
                         {displayName}
                       </span>
-                      <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                      <span className={`agent-picker-badge shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
                         agent.mode === 'primary'
                           ? 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
                           : agent.native

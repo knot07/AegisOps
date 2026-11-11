@@ -116,3 +116,6 @@ def register():
     from aegisops.session.superagent_dispatch import install
     install()
     register_route_provider(router,name='aegis-vuln-ops-scene')
+
+    from aegis_rea import register as register_rea
+    register_rea()

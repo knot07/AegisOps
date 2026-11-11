@@ -269,7 +269,7 @@ function PreferencesPanel() {
 
   return (
     <div className="aegis-preferences aegis-module-section">
-      <PageHeader
+      <PageHeader emblem="preferences"
         title={t('settingsPreferences')}
         description={t('settingsPreferencesDescription')}
         icon={<Settings2 className="h-8 w-8" />}

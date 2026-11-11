@@ -1,3 +1,4 @@
+import UtilityGlyph from '@/components/common/UtilityGlyph';
 import SystemUpdateButton from "./SystemUpdateButton";
 import { useContext } from 'react';
 import { ThemeContext, type ThemeMode } from '@/contexts/ThemeContext';
@@ -74,7 +75,7 @@ export default function WorkspaceHeader({
   return (
     <div data-sidebar-utilities className="aegisops-sidebar-utilities mb-2 flex justify-center border-b border-ui-border pb-2">
       <div className="flex flex-wrap justify-center items-center gap-0.5">
-        <HeaderMenu placement="above" label={t('language')} align="right" menuClassName="yushu-utility-menu yushu-menu-language w-60" triggerClassName={ICON_BUTTON_CLASS} trigger={<Languages className="h-[18px] w-[18px]" />}>
+        <HeaderMenu placement="above" label={t('language')} align="right" menuClassName="yushu-utility-menu yushu-menu-language w-60" triggerClassName={ICON_BUTTON_CLASS} trigger={<UtilityGlyph kind="language" />}>
           {(close) => (
             <>
               <div className={MENU_LABEL_CLASS}>{t('language')}</div>
@@ -92,7 +93,7 @@ export default function WorkspaceHeader({
           )}
         </HeaderMenu>
 
-        <HeaderMenu placement="above" label={t('theme')} align="right" menuClassName="yushu-utility-menu yushu-menu-theme w-72" triggerClassName={ICON_BUTTON_CLASS} trigger={<ThemeIcon className="h-[18px] w-[18px]" />}>
+        <HeaderMenu placement="above" label={t('theme')} align="right" menuClassName="yushu-utility-menu yushu-menu-theme w-72" triggerClassName={ICON_BUTTON_CLASS} trigger={<UtilityGlyph kind={mode === "system" ? "system" : mode === "dark" ? "moon" : "sun"} />}>
           {(close) => (
             <>
               <div className={MENU_LABEL_CLASS}>{t('theme')}</div>
@@ -118,7 +119,7 @@ export default function WorkspaceHeader({
           triggerClassName={ICON_BUTTON_CLASS}
           trigger={(
             <>
-              <Bell className="h-[18px] w-[18px]" />
+              <UtilityGlyph kind="bell" />
               {hasUnread && (
                 <span data-notification-dot className="absolute right-2 top-2 h-2 w-2 rounded-full bg-lime-500 ring-2 ring-ui-surface" />
               )}

@@ -187,6 +187,10 @@ async def apply(request: Request, payload: ApplyRequest):
         from aegisops.session.runner import SessionRunner
         import sys
         incident_module = sys.modules.get('aegis_scenes.incident')
+        if incident_module and getattr(incident_module, 'tasks', set()):
+            raise HTTPException(409, '应急调查正在执行，请等待调查任务结束后更新。')
+        import sys
+        incident_module = sys.modules.get('aegis_scenes.incident')
         if incident_module and (getattr(incident_module, 'tasks', set()) or getattr(incident_module, 'running', set())):
             raise HTTPException(409, '应急调查正在执行，请等待调查任务结束后更新。')
         if SessionRunner._active_sessions:

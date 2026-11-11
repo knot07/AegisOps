@@ -36,7 +36,7 @@ export default function TaskPage() {
 
   return (
     <div data-yushu-page="task" className="h-full flex flex-col">
-      <PageHeader
+      <PageHeader emblem="task"
         title={t('pageTitle')}
         description={t('pageDescription')}
         icon={<ListTodo className="w-8 h-8" />}

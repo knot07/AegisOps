@@ -413,3 +413,47 @@ button[data-chat-model-choice]:hover{border-color:color-mix(in srgb,var(--brand-
 .aegis-resource-detail .yushu-creation-tab[aria-pressed=true]{color:var(--resource-accent)!important;border-color:var(--resource-accent)!important;background:linear-gradient(135deg,#fff,var(--resource-soft))!important}
 .aegis-resource-detail .yushu-creation-footer{background:linear-gradient(110deg,#fff,color-mix(in srgb,var(--resource-soft) 50%,white))!important;border-color:color-mix(in srgb,var(--resource-accent) 15%,white)!important}
 .aegis-tool-detail button.bg-slate-700{background:var(--resource-accent)!important}
+
+/* Conversation agent menus share the identities used in the agent library. */
+.aegis-agent-picker{border-radius:18px!important;border-color:#dfe7d9!important;background:#fff!important;box-shadow:0 16px 48px #1e352521!important;overflow:hidden}
+.aegis-agent-picker .agent-picker-header{display:flex;flex-direction:column;align-items:stretch;gap:12px;padding:16px;background:linear-gradient(120deg,#fff,#f0f6e9);border-color:#e3ebdc}
+.aegis-agent-picker .agent-picker-header>div:first-child>div:first-child{font-size:14px;font-weight:650;line-height:1.5;color:#34452e}
+.aegis-agent-picker .agent-picker-header>div:first-child>div:nth-child(2){font-size:11px;line-height:1.6;margin-top:3px;white-space:normal}
+.aegis-agent-picker .agent-picker-filters{align-self:flex-start;gap:3px;padding:3px;background:#e9efE3;border:0;border-radius:10px}
+.aegis-agent-picker .agent-picker-filters button{min-height:28px;padding:4px 16px;border-radius:7px;font-size:12px;color:#7b8875;box-shadow:none}
+.aegis-agent-picker .agent-picker-filters button[aria-pressed=true]{background:#fff;color:#62823f;font-weight:650;box-shadow:0 1px 4px #364d2010}
+.aegis-agent-picker .agent-picker-list{display:flex;flex-direction:column;gap:8px;padding:10px;max-height:min(340px,48dvh);scrollbar-width:thin;scrollbar-color:#cbd8c1 transparent;scrollbar-gutter:stable;overscroll-behavior:contain}
+.aegis-agent-picker .agent-picker-card{width:100%;flex-shrink:0;padding:11px 12px;min-height:62px;border:1px solid color-mix(in srgb,var(--agent-accent) 18%,#fff);border-radius:12px;text-align:left;background:linear-gradient(112deg,color-mix(in srgb,var(--agent-accent) 11%,#fff),var(--agent-soft) 46%,#fff);transition:border-color .16s,box-shadow .16s,transform .16s}
+.aegis-agent-picker .agent-picker-card:hover{border-color:color-mix(in srgb,var(--agent-accent) 48%,#fff);box-shadow:0 3px 10px color-mix(in srgb,var(--agent-accent) 12%,transparent);transform:translateY(-1px)}
+.aegis-agent-picker .agent-picker-card[aria-pressed=true]{border-color:#91b366;box-shadow:inset 3px 0 #91b366;background:linear-gradient(112deg,#e6f0d7,#f3f8eb 65%,#fff)}
+.aegis-agent-picker .agent-picker-name{font-size:13px;line-height:1.55;font-weight:550;color:#354039;overflow-wrap:anywhere}
+.aegis-agent-picker .agent-picker-card[aria-pressed=true] .agent-picker-name{color:#5d7d3f;font-weight:650}
+.aegis-agent-picker .aegis-agent-identity{width:34px;height:34px;border-radius:10px;margin-right:3px;color:var(--agent-accent)}
+.aegis-agent-picker .aegis-agent-identity>svg{width:20px;height:20px;color:var(--agent-accent)}
+.aegis-agent-picker .agent-picker-badge{background:#ffffffb3;color:#869080;font-size:10px;font-weight:450;border:1px solid #e3e9dc}
+.aegis-agent-picker .agent-picker-card:focus-visible{outline:2px solid var(--agent-accent);outline-offset:-3px}
+.dark .aegis-agent-picker{background:#202820!important;border-color:#3c4937!important}
+.dark .aegis-agent-picker .agent-picker-header{background:linear-gradient(120deg,#222b23,#2c3827);border-color:#3d4b36}
+.dark .aegis-agent-picker .agent-picker-header>div:first-child>div:first-child{color:#d6e4cb}
+.dark .aegis-agent-picker .agent-picker-filters{background:#1e291d}.dark .aegis-agent-picker .agent-picker-filters button[aria-pressed=true]{background:#37482c;color:#c7dda9}
+.dark .aegis-agent-picker .agent-picker-card{background:linear-gradient(110deg,color-mix(in srgb,var(--agent-accent) 18%,#202720),#222a23);border-color:color-mix(in srgb,var(--agent-accent) 30%,#29312a)}
+.dark .aegis-agent-picker .agent-picker-name{color:#e0e8dc}.dark .aegis-agent-picker .agent-picker-card[aria-pressed=true]{border-color:#91b366;background:linear-gradient(112deg,#34452b,#263322)}
+.dark .aegis-agent-picker .agent-picker-card[aria-pressed=true] .agent-picker-name{color:#c5dda7}.dark .aegis-agent-picker .agent-picker-badge{background:#ffffff0a;border-color:#ffffff14;color:#a2af9a}
+@media(prefers-reduced-motion:reduce){.aegis-agent-picker .agent-picker-card{transition:none;transform:none}}
+
+/* One compact geometry for agent, skill and workflow menus. */
+.aegis-agent-picker{width:300px!important;max-width:calc(100vw - 2rem)}
+.aegis-agent-picker .agent-picker-header{height:56px;min-height:56px;flex-direction:row;align-items:center;justify-content:space-between;padding:10px 12px;gap:8px}
+.aegis-agent-picker .agent-picker-header>div:first-child>div:nth-child(2){display:none}
+.aegis-agent-picker .agent-picker-header>span:first-child,.aegis-agent-picker .agent-picker-header>div:first-child>div:first-child{font-size:13px;font-weight:650}
+.aegis-agent-picker .agent-picker-filters{align-self:center;flex-shrink:0}
+.aegis-agent-picker .agent-picker-filters button{padding:3px 8px;font-size:11px;min-height:26px}
+.aegis-agent-picker .agent-picker-list{height:256px;max-height:min(256px,48dvh);padding:8px;gap:6px}
+.aegis-agent-picker .agent-picker-card{min-height:46px;height:46px;padding:7px 9px;border-radius:10px}
+.aegis-agent-picker .agent-picker-name{font-size:12px;line-height:1.45;font-weight:550}
+.aegis-agent-picker .aegis-agent-identity,.aegis-agent-picker .aegis-resource-identity{width:28px;height:28px;border-radius:9px;margin-right:1px}
+.aegis-agent-picker .aegis-agent-identity>svg,.aegis-agent-picker .aegis-resource-identity>svg{width:18px;height:18px}
+.aegis-agent-picker .aegis-composer-resource{--agent-accent:var(--resource-accent);--agent-soft:var(--resource-soft);margin:0;background:linear-gradient(112deg,color-mix(in srgb,var(--resource-accent) 11%,#fff),var(--resource-soft) 46%,#fff)!important}
+.aegis-resource-picker .agent-picker-card>span:first-child{width:28px;height:28px;flex-shrink:0}
+.aegis-resource-picker .agent-picker-card>span:last-child:not(.agent-picker-badge):not(.agent-picker-name){display:none}
+.dark .aegis-agent-picker .aegis-composer-resource{background:linear-gradient(110deg,color-mix(in srgb,var(--resource-accent) 18%,#202720),#222a23)!important}

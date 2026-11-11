@@ -755,7 +755,7 @@ export default function EntitySheet({
                         />
                       ) : (
                         <div className="text-center max-w-md">
-                          <img src="/favicon.svg" alt="Atlas" className="w-14 h-14 mx-auto mb-4" />
+                          <div className="atlas-simple-welcome"><img src="/favicon.svg" alt="Atlas" /></div>
                           <h3 className="text-lg font-semibold text-gray-900 mb-2">{t('entity.rexAssist')}</h3>
                           <p className="text-sm text-gray-500">{t('entity.rexReady')}</p>
                         </div>

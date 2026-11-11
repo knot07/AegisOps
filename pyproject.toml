@@ -1,6 +1,6 @@
 [project]
 name = "aegisops"
-version = "2026.11.08"
+version = "2026.11.11"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "AegisOps Team", email = "team@example.com"}
@@ -115,7 +115,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["aegisops"]
+packages = ["aegisops", "aegis_rea"]
 artifacts = [
     "aegisops/channel/builtin/whatsapp/bridge/*.js",
     "aegisops/channel/builtin/whatsapp/bridge/package.json",
