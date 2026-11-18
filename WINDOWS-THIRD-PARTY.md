@@ -15,3 +15,8 @@ The portable distribution includes unmodified third-party runtimes and Python/np
 Pinned Python package versions are listed in `requirements.windows.lock`. The npm dependency tree is specified in `webui/package-lock.json`. Package-level license files and metadata accompany the installed dependencies.
 
 The included runtime copies do not contain the builder's personal accounts or configuration. User data is created separately in `runtime/` or the selected `--data-dir` on first launch.
+
+
+## 2026.11.18 轻量安装
+
+随包保留 Python 标准运行文件、Git for Windows、uv 安装引擎与 Microsoft VC++ x64 安装器。Node 和主要 Python/npm 运行依赖首次安装时获取，遵循各自许可证。uv 来自 Astral，采用 MIT/Apache-2.0 双许可证；官方仓库 https://github.com/astral-sh/uv 。已安装依赖的源与版本见 requirements.windows.lock（启动安装时排除开发测试依赖）。

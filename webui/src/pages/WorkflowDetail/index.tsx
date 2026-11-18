@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
-import { X, GitBranch, FileText, Code2, FileJson, Bot } from 'lucide-react';
+import { X, GitBranch, FileText, Code2, FileJson, } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
 import { sessionApi } from '@/api/session';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -23,9 +23,7 @@ import {
 } from '@/utils/textDiff';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import {
-  SIDE_PANEL_MIN_WIDTH,
   getInitialSidePanelWidth,
-  getMaxSidePanelWidth,
 } from '@/components/common/sidePanelSizing';
 
 type CanvasTab = 'flow' | 'md' | 'json';
@@ -87,40 +85,14 @@ export default function WorkflowDetail() {
   const chatLaunchSeqRef = useRef(0);
   const editDocWorkflowIdRef = useRef<string | null>(null);
   const missingMarkdownAutoLaunchRef = useRef<string | null>(null);
-  const dragging = useRef(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(0);
-
   // 视口尺寸变化时，若面板比例超出合理范围则自动修正
   useEffect(() => {
     const onResize = () => {
-      setPanelWidth((w) => Math.min(w, getMaxSidePanelWidth()));
+      setPanelWidth(getInitialSidePanelWidth());
     };
     window.addEventListener('resize', onResize);
     return () => window.removeEventListener('resize', onResize);
   }, []);
-
-  const onDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    dragging.current = true;
-    dragStartX.current = e.clientX;
-    dragStartWidth.current = panelWidth;
-
-    const panelMax = getMaxSidePanelWidth();
-
-    const onMove = (ev: MouseEvent) => {
-      if (!dragging.current) return;
-      const delta = dragStartX.current - ev.clientX;
-      setPanelWidth(Math.min(panelMax, Math.max(SIDE_PANEL_MIN_WIDTH, dragStartWidth.current + delta)));
-    };
-    const onUp = () => {
-      dragging.current = false;
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }, [panelWidth]);
 
   const loadWorkflow = useCallback(async (
     options?: { preserveExecution?: boolean; silent?: boolean }
@@ -714,7 +686,7 @@ export default function WorkflowDetail() {
                 className="absolute left-3 top-2 z-20 inline-flex max-w-[calc(100%-7rem)] items-center gap-2 truncate whitespace-nowrap rounded-lg border border-emerald-100 bg-white/90 px-3 py-1.5 text-xs font-medium text-slate-700 backdrop-blur transition-colors hover:border-emerald-200 hover:bg-emerald-50/80 hover:text-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-100"
                 title={t('detail.aegisopsHelpTitle')}
               >
-                <Bot className="h-4 w-4 flex-shrink-0 text-emerald-500" />
+                <img src="/favicon.svg" alt="" className="h-5 w-5 shrink-0 object-contain" />
                 <span className="truncate">{t('detail.aegisopsHelp')}</span>
               </button>
             </div>
@@ -789,17 +761,6 @@ export default function WorkflowDetail() {
               onSaved={(updated) => setWorkflow(updated)}
             />
           </>
-        )}
-
-        {/* 拖动分隔条 */}
-        {panelOpen && (
-          <div
-            onMouseDown={onDragStart}
-            className="relative z-20 w-1 flex-shrink-0 bg-gray-200 hover:bg-red-400 active:bg-red-500 cursor-col-resize transition-colors duration-150 group max-md:hidden"
-            title={t('detail.dragAdjust')}
-          >
-            <div className="absolute inset-y-0 -left-1.5 -right-1.5" />
-          </div>
         )}
 
         {/* 右侧面板（对话 + 概览），节点引用 chip 在对话输入框上方 */}

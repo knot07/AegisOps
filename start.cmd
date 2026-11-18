@@ -3,7 +3,7 @@ setlocal
 chcp 65001 >nul
 cd /d "%~dp0"
 if not exist "_runtime\python\python.exe" (
-  echo Missing bundled Python. Extract the complete Windows portable ZIP first.
+  echo Missing bundled Python. Extract the complete Windows ZIP first.
   pause
   exit /b 1
 )

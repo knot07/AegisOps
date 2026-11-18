@@ -1,9 +1,7 @@
 """REA/Ghidra evidence adapter. The AI chooses bounded, read-only native queries."""
-import asyncio,hashlib,json,os,re,threading,uuid
-try:
- import pwd
-except ImportError:
- pwd=None
+import asyncio,hashlib,json,os,re,threading,uuid,sys
+try:import pwd
+except ImportError:pwd=None
 from datetime import timedelta
 from pathlib import Path
 from mcp import ClientSession,StdioServerParameters
@@ -19,8 +17,9 @@ def ensure():
  ir=ir_module()
  with ir.db() as c:c.execute('CREATE TABLE IF NOT EXISTS rea_jobs(sample_id TEXT PRIMARY KEY,case_id TEXT NOT NULL,result TEXT NOT NULL,updated TEXT NOT NULL)')
 def status():
- root=home();ready=pwd is not None and os.geteuid()==0 and all((root/p).exists() for p in ['runtime/node/bin/node','runtime/jdk/bin/java','runtime/ghidra/support/analyzeHeadless','runtime/rea/node_modules/rea-agents/scripts/rea.mjs']) and Path('/run/netns/aegis-rea-analysis').exists()
- return {'installed':True,'ready':ready,'name':'REA 恶意样本逆向','rea_version':'6.8.0','provider':'Ghidra 12.1.4','runtime':'Linux x64 / WSL2','network':'loopback-only','sample_execution':False,'auto_binary':True,'message':'引擎可用' if ready else '缺少打包运行时或隔离工作环境，请运行插件安装脚本'}
+ root=home();installed=all((root/p).exists() for p in ['runtime/node/bin/node','runtime/jdk/bin/java','runtime/ghidra/support/analyzeHeadless','runtime/rea/node_modules/rea-agents/scripts/rea.mjs'])
+ ready=installed and sys.platform=='linux' and os.geteuid()==0 and Path('/run/netns/aegis-rea-analysis').exists()
+ return {'installed':installed,'ready':ready,'name':'REA 恶意样本逆向','rea_version':'6.8.0','provider':'Ghidra 12.1.4','runtime':'Linux x64 / WSL2','network':'loopback-only','sample_execution':False,'auto_binary':True,'message':'引擎可用' if ready else '尚未安装或隔离环境未就绪，可点击安装 REA，由 Atlas 协助下载并配置'}
 def saved(cid):
  ensure();ir=ir_module()
  with ir.db() as c:rows=c.execute('SELECT sample_id,result FROM rea_jobs WHERE case_id=?',(cid,)).fetchall()

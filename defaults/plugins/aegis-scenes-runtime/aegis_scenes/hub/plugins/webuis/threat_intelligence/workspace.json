@@ -1,0 +1,23 @@
+{
+  "id": "threat_intelligence",
+  "version": "1.0.0",
+  "title": "威胁情报",
+  "icon": "Radar",
+  "order": 40,
+  "enabled": true,
+  "placement": "sceneWorkspace",
+  "defaultPageId": "intelligence",
+  "sections": [
+    {
+      "id": "overview",
+      "label": "情报工作台",
+      "pageIds": [
+        "intelligence"
+      ],
+      "defaultPageId": "intelligence",
+      "contentPadding": "none",
+      "flat": true,
+      "icon": "Radar"
+    }
+  ]
+}

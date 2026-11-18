@@ -22,6 +22,8 @@ def register():
     import httpx
     os.environ['VULNOPS_DATA']=str(get_user_plugins_root().parent/'data/vuln-ops')
     from .vulnops import app as native
+    from .threat_intelligence import register as register_threat_intelligence
+    register_threat_intelligence(native)
     register_hub_root('aegis-local-scenes',ROOT/'hub')
     with native.db() as con:
         con.execute('CREATE TABLE IF NOT EXISTS aegis_users (host_id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), host_admin INTEGER NOT NULL DEFAULT 0)')
@@ -111,11 +113,14 @@ def register():
     register_import_routes(router,native,scene_user,identity,require_user)
     from .incident import register as register_incident
     register_incident(router)
+    from .incident_optional import register as register_optional
+    register_optional(router)
+    from .incident_solar import register as register_solar
+    register_solar(router)
     from .scene_assist import register as register_scene_assist
     register_scene_assist(router)
+    from .scene_assist import register_scene_logos
+    register_scene_logos(router)
     from aegisops.session.superagent_dispatch import install
     install()
     register_route_provider(router,name='aegis-vuln-ops-scene')
-
-    from aegis_rea import register as register_rea
-    register_rea()

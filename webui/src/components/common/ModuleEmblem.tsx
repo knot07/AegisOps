@@ -24,6 +24,7 @@ const designs: Record<string, { color: string; light: string; art: ReactNode }> 
   home: { color: '#478D75', light: '#91C5A3', art: <><path d="M4 29 32 4l28 25-6 7-22-20-22 20z"/><path d="M12 34 32 17l20 17v25H37V42H27v17H12z"/><path d="m16 36 16-13v7L16 43z" fill="white" fillOpacity=".5"/></> },
   chat: { color: '#418CA0', light: '#88C6CF', art: <><path d="M5 8h54v36H29L11 59V44H5zm8 8v20h6v7l8-7h24V16z" fillRule="evenodd"/><path d="m32 18 3 7 8 3-8 3-3 7-3-7-8-3 8-3z"/></> },
   logout: { color: '#A2706D', light: '#D7A79B', art: <><path d="M8 5h28v14h-7v-7H16v40h13v-7h7v14H8zM29 28h18L37 18h10l15 14-15 14H37l10-10H29z"/></> },
+  intelligence: { color: '#438875', light: '#86c6a0', art: <><path d="M32 3 59 18v28L32 61 5 46V18Zm0 10L14 23v18l18 10 18-10V23Z" fillRule="evenodd"/><path d="m19 24 13-7 13 7-13 8Z"/><path d="M19 33v9l10 6v-9Zm26 0v9l-10 6v-9Z" fill="#40a89d"/><circle cx="32" cy="25" r="3" fill="#fff"/></> },
   review: { color: '#307DC2', light: '#79BCE6', art: <><path d="M31 4a27 27 0 1 0 29 29H48a15 15 0 1 1-17-17Z"/><path d="M36 4v25h25C59 16 49 6 36 4Z" fill="#39bada"/><path d="m31 32 18-17 5 5-18 18Z" fill="#173e80"/><circle cx="31" cy="33" r="6" fill="white"/></> },
   vulnops: { color: '#C57333', light: '#EAC26F', art: <><path d="M14 9C27-1 46 3 54 16l-9 7C39 13 27 11 19 18l6 5H5V3Z"/><path d="M50 55C37 65 18 61 10 48l9-7c6 10 18 12 26 5l-6-5h20v20Z" fill="#df9c28"/><path d="m32 20 12 12-12 12-12-12Z" fill="#9c561c"/><path d="m32 27 5 5-5 5-5-5Z" fill="#fff"/></> },
   incident: { color: '#CD5363', light: '#F2A078', art: <><path d="M33 2C47 12 58 23 55 39 52 53 40 62 27 59 10 57 3 43 9 30c1 12 7 17 13 17C15 32 33 25 33 2Z"/><path d="m36 20-17 21h12l-4 19 22-30H36l6-10Z" fill="#ffcf79"/></> },
@@ -31,7 +32,7 @@ const designs: Record<string, { color: string; light: string; art: ReactNode }> 
 };
 
 export function sceneEmblemKind(id: string): string {
-  return ({agent:'atlas',tdp_ai:'review',vuln_ops:'vulnops',incident_response:'incident'} as Record<string,string>)[id] || 'scenes';
+  return ({agent:'atlas',tdp_ai:'review',vuln_ops:'vulnops',incident_response:'incident',threat_intelligence:'intelligence'} as Record<string,string>)[id] || 'scenes';
 }
 
 export default function ModuleEmblem({ kind, size = 'page' }: { kind: string; size?: 'page' | 'nav' | 'hero' }) {

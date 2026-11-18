@@ -121,6 +121,53 @@ function StageIcon({ stage }) {
   };
   return /* @__PURE__ */ jsx("svg", { "data-stage-icon": stage, viewBox: "0 0 32 32", fill: "none", stroke: "currentColor", strokeWidth: "1.65", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: shapes[stage] });
 }
+function ActivityTimeline({ events, compact = false }) {
+  const [expanded, setExpanded] = useState(false);
+  const grouped = [];
+  for (const e of events.slice().reverse()) {
+    const message = eventMessage(e), last = grouped[grouped.length - 1];
+    if (last && last.stage === e.stage && last.status === e.status && last.message === message) {
+      last.count++;
+      continue;
+    }
+    grouped.push({ ...e, message, count: 1 });
+  }
+  const shown = expanded ? grouped : grouped.slice(0, compact ? 4 : 8);
+  return /* @__PURE__ */ jsxs("div", { className: "activity-digest", children: [
+    /* @__PURE__ */ jsxs("div", { className: "activity-summary", children: [
+      /* @__PURE__ */ jsxs("span", { children: [
+        events.length,
+        " \u6761\u8BB0\u5F55"
+      ] }),
+      /* @__PURE__ */ jsx("small", { children: "\u6309\u65F6\u95F4\u5012\u5E8F \xB7 \u76F8\u90BB\u91CD\u590D\u8BB0\u5F55\u5408\u5E76\u663E\u793A" })
+    ] }),
+    /* @__PURE__ */ jsx("div", { className: "compact-timeline", children: shown.map((e) => /* @__PURE__ */ jsxs("article", { className: "activity-entry", "data-status": e.status, children: [
+      /* @__PURE__ */ jsxs("div", { className: "activity-stamp", children: [
+        /* @__PURE__ */ jsx("time", { children: new Date(e.at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) }),
+        /* @__PURE__ */ jsx("b", { children: labels[e.status] || e.status })
+      ] }),
+      /* @__PURE__ */ jsxs("details", { children: [
+        /* @__PURE__ */ jsxs("summary", { children: [
+          /* @__PURE__ */ jsx("span", { children: e.message }),
+          e.count > 1 && /* @__PURE__ */ jsxs("i", { children: [
+            "\xD7",
+            e.count
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxs("div", { className: "activity-full", children: [
+          e.message,
+          /* @__PURE__ */ jsxs("small", { children: [
+            "\u64CD\u4F5C\u4EBA\uFF1A",
+            e.actor || "\u7CFB\u7EDF",
+            " \xB7 ",
+            new Date(e.at).toLocaleString()
+          ] })
+        ] })
+      ] })
+    ] }, e.id)) }),
+    grouped.length > (compact ? 4 : 8) && /* @__PURE__ */ jsx("button", { className: "activity-expand", onClick: () => setExpanded(!expanded), children: expanded ? "\u6536\u8D77\u8BB0\u5F55" : `\u5C55\u5F00\u5168\u90E8 ${grouped.length} \u7EC4\u8BB0\u5F55` })
+  ] });
+}
 var attackThemes = [
   { id: "ransomware", label: "\u52D2\u7D22\u653B\u51FB", accent: "#ad567d", soft: "#fbeef4", pattern: /勒索|ransomware/i },
   { id: "malware", label: "\u6076\u610F\u7A0B\u5E8F", accent: "#8c68b6", soft: "#f4effb", pattern: /木马|恶意文件|恶意程序|挖矿|webshell|malware|trojan|miner|backdoor|后门/i },
@@ -358,8 +405,17 @@ function IncidentPage() {
   const [statusOpen, setStatusOpen] = useState(false), [statusAction, setStatusAction] = useState(""), [statusNote, setStatusNote] = useState(""), [caseStatusFilter, setCaseStatusFilter] = useState("");
   const [evidenceFilter, setEvidenceFilter] = useState("samples"), [evidenceQuery, setEvidenceQuery] = useState("");
   const [reverseResults, setReverseResults] = useState({}), [reverseReview, setReverseReview] = useState(""), [reaStatus, setReaStatus] = useState(null);
+  const [optionalJobs, setOptionalJobs] = useState([]), [optionalLog, setOptionalLog] = useState("");
   const [reportOpen, setReportOpen] = useState(false), [sampleReview, setSampleReview] = useState("");
   const evidenceItems = (detail?.evidence || []).filter((e) => (evidenceFilter === "all" || evidenceCategory(e) === evidenceFilter) && (!evidenceQuery.trim() || [e.label, e.sha256, e.id, evidenceKindNames[e.kind] || e.kind].join(" ").toLowerCase().includes(evidenceQuery.trim().toLowerCase()))).slice().reverse();
+  useEffect(() => {
+    if (!document.querySelector("script[data-scene-controls]")) {
+      const script = document.createElement("script");
+      script.src = "/api/scenes/vulnops/static/control-icons.js?v=20261118-1";
+      script.dataset.sceneControls = "true";
+      document.head.append(script);
+    }
+  }, []);
   const [eventModal, setEventModal] = useState(false), [deleteOpen, setDeleteOpen] = useState(false);
   const initialEvent = () => ({ title: "", source: "", target: "", source_device_id: "", description: "", occurred_at: new Date(Date.now() - (/* @__PURE__ */ new Date()).getTimezoneOffset() * 6e4).toISOString().slice(0, 16), start_investigation: true });
   const [newEvent, setNewEvent] = useState(initialEvent);
@@ -399,6 +455,33 @@ function IncidentPage() {
     } finally {
       setBusy("");
     }
+  }
+  useEffect(() => {
+    let gone = false;
+    const load = () => req("/optional/jobs").then((j) => {
+      if (!gone) setOptionalJobs(j);
+    }).catch(() => {
+    });
+    load();
+    const timer = setInterval(load, 5e3);
+    return () => {
+      gone = true;
+      clearInterval(timer);
+    };
+  }, []);
+  async function openOptional(operation) {
+    if (!confirm(operation === "rea_install" ? "\u6388\u6743\u4E0B\u8F7D\u5E76\u5B89\u88C5\u53EF\u9009 REA \u9759\u6001\u9006\u5411\u73AF\u5883\uFF1F\u5C06\u6309\u9700\u4E0B\u8F7D\u7EA61GB\u4F9D\u8D56\uFF0C\u4EC5\u652F\u6301\u6B64\u5E73\u53F0\u7684 Linux x64 / WSL2 \u9694\u79BB worker\u3002" : "\u6388\u6743 Solar \u5B98\u65B9\u5DE5\u5177\u5BF9\u672C\u4E8B\u4EF6\u4E3B\u673A\u5F00\u5C55\u5168\u9762\u53EA\u8BFB\u53D6\u8BC1\uFF1F\u4F1A\u521B\u5EFA\u4E34\u65F6\u62A5\u544A\u76EE\u5F55\u5E76\u8BFB\u53D6\u7CFB\u7EDF\u65E5\u5FD7\u3001\u8FDB\u7A0B\u3001\u6587\u4EF6\u4FE1\u606F\uFF1B\u4E0D\u6267\u884C\u6837\u672C\u3001\u4E0D\u5916\u53D1\u8BC1\u636E\u3002")) return;
+    await action("\u51C6\u5907 Atlas \u534F\u4F5C", async () => {
+      const grant = await req("/optional/authorize", { operation, confirmed: true, case_id: detail?.id || "", host_id: remote });
+      if (!window.AegisSceneAI) await new Promise((resolve, reject) => {
+        const script = document.createElement("script");
+        script.src = "/api/scenes/assistant/widget.js";
+        script.onload = () => resolve();
+        script.onerror = () => reject(Error("Atlas \u52A0\u8F7D\u5931\u8D25"));
+        document.head.append(script);
+      });
+      window.AegisSceneAI.open({ kind: operation === "rea_install" ? "rea-install" : "forensics", context: { ...grant, target: detail?.target, task_tool: "incident_optional_operations", instructions: "\u4F7F\u7528\u672C\u6B21\u7531\u7BA1\u7406\u5458\u660E\u786E\u786E\u8BA4\u7684\u6388\u6743\u542F\u52A8\u56FA\u5B9A\u5DE5\u5177\u4EFB\u52A1\uFF1B\u968F\u540E\u67E5\u8BE2\u771F\u5B9E\u8FDB\u5EA6\u3002\u4E0D\u53EF\u5728\u672A\u6210\u529F\u81EA\u68C0\u65F6\u58F0\u79F0\u5B8C\u6210\u3002" } });
+    });
   }
   function choose(id) {
     setExternalReport(null);
@@ -532,7 +615,8 @@ function IncidentPage() {
   const selectedStatusAction = detail?.status_actions?.find((a) => a.action === statusAction);
   const matching = settings.hosts.filter((h) => h.address === detail?.target);
   const stages = [["intake", "\u4E8B\u4EF6\u786E\u8BA4"], ["logs", "\u8BBE\u5907\u5173\u8054"], ["host", "\u4E3B\u673A\u6392\u67E5"], ["sample", "\u6837\u672C\u53D6\u8BC1"], ["sandbox", "\u6C99\u7BB1\u5206\u6790"], ["report", "\u62A5\u544A\u590D\u6838"]];
-  return /* @__PURE__ */ jsxs("div", { className: "ir", children: [
+  return /* @__PURE__ */ jsxs("div", { className: "ir", "data-aegis-scene": "incident", children: [
+    /* @__PURE__ */ jsx("link", { rel: "stylesheet", href: "/api/scenes/vulnops/static/workspace-controls.css?v=20261118-1" }),
     /* @__PURE__ */ jsx("style", { children: `
 
  .ir{--green:#a2c67b;--green-hover:#b1d28e;--green-ink:#496b35;--soft:#f0f6e9;--ink:#26382c;--dim:#839080;--line:#e2e8df;color:var(--ink);background:radial-gradient(ellipse at 4% 0,#eaf5df80,transparent 42%),#f6f8f5;min-height:100dvh;padding:32px;font:14px/1.75 system-ui,-apple-system,'Segoe UI','Microsoft YaHei',sans-serif}
@@ -540,7 +624,9 @@ function IncidentPage() {
  .ir button{cursor:pointer;min-height:40px;border:1px solid var(--line);border-radius:11px;background:#fff;padding:9px 16px;color:#586b4f;font-weight:500}.ir button:hover{background:#f2f7ed;border-color:#c8d9b9;transform:translateY(-1px)}.ir button:disabled{opacity:.45;cursor:not-allowed;transform:none}.ir button:focus-visible,.ir a:focus-visible{outline:2px solid #9cba74;outline-offset:3px}
  .ir .danger{color:#b47d6b;background:#fff9f5;border-color:#eedfd5}.ir .danger:hover{background:#fcf0e8;border-color:#dfbfae}.ir .confirm-dialog{width:min(520px,94vw)}.ir .check-line{display:flex;align-items:center;gap:10px;color:#7b8c6c;font-size:12px;margin:20px 0}.ir .check-line input{width:16px;height:16px;min-height:0;accent-color:#a2c67b}.ir .form-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}.ir .dialog h2{font-size:20px}
  .ir .primary{background:var(--green);color:#24371d;border-color:transparent;box-shadow:0 3px 10px #536f3310}.ir .primary:hover{background:var(--green-hover);border-color:transparent}
- .ir h1{font-size:28px;letter-spacing:-.6px;font-weight:650;margin:0;line-height:1.45}.ir h2{font-size:20px;font-weight:600;margin:0;line-height:1.55}.ir h3{font-size:17px;font-weight:600;margin:0 0 13px}.ir p{color:var(--dim);margin:8px 0;line-height:1.8}
+
+ .ir .work-section-head{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:18px}.ir .work-section-head h3{margin:0 0 4px}.ir .work-section-head small{font-size:12px;color:#819075}.ir .activity-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#75816e;margin:0 0 12px}.ir .activity-summary small{font-size:11px;color:#94a08a}.ir .compact-timeline{border:1px solid #e3eadc;border-radius:12px;overflow:hidden}.ir .activity-entry{display:grid;grid-template-columns:130px minmax(0,1fr);gap:14px;padding:13px 15px;background:#fff;border-bottom:1px solid #edf1e8;align-items:start}.ir .activity-entry:last-child{border-bottom:0}.ir .activity-stamp time{display:block;font-size:11px;color:#839079;line-height:1.6;font-variant-numeric:tabular-nums}.ir .activity-stamp b{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:5px;background:#eef5e5;color:#6d8a4d;font-size:10px;font-weight:550}.ir .activity-entry[data-status=blocked] b,.ir .activity-entry[data-status=partial] b{background:#fff6df;color:#a78837}.ir .activity-entry[data-status=failed] b{background:#fbedeb;color:#b26455}.ir .activity-entry summary{display:flex;gap:8px;align-items:start;cursor:pointer;list-style:none;font-size:13px;line-height:1.8;color:#566353;min-height:40px}.ir .activity-entry summary::-webkit-details-marker{display:none}.ir .activity-entry summary>span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.ir .activity-entry summary:after{content:'\u2304';color:#9caa92;margin-left:auto;flex:none}.ir .activity-entry summary i{font-size:10px;background:#f1f6ea;padding:0 5px;border-radius:4px;font-style:normal;flex:none}.ir .activity-full{font-size:12px;line-height:1.85;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#f7faf3;border-radius:9px;margin-top:8px}.ir .activity-full small{display:block;color:#94a087;margin-top:8px}.ir .activity-expand{display:block;margin:14px auto 0;padding:7px 16px;font-size:12px;color:#6f8e4e}.ir .compact-log{display:flex;align-items:center;margin:10px 0;padding:14px}.ir .compact-log small{display:block;margin-top:5px;font-size:11px;color:#87937e}.ir .compact-log a{margin-left:auto;font-size:12px;white-space:nowrap}.ir .compact-empty{padding:32px 16px;border:1px dashed #dce7d2;border-radius:12px;color:#8b997f;text-align:center;font-size:13px}.ir .work-help{margin-top:14px;border:1px solid #e4ebdc;border-radius:10px;background:#fafcf7;padding:12px 14px}.ir .work-help>summary{font-size:12px;color:#788d61;cursor:pointer;font-weight:550}.ir .work-help p{font-size:12px;line-height:1.9;margin:12px 0 0}.ir .work-help .activity-digest{margin-top:16px}.ir .host-operation{display:flex;gap:16px;padding:20px 0;border-top:1px solid #e7eddf}.ir .host-operation:first-of-type{border-top:0;padding-top:5px}.ir .operation-number{flex:none;width:31px;height:31px;display:grid;place-items:center;background:#e8f2d8;color:#6d9349;border-radius:9px;font-size:12px;font-weight:650}.ir .operation-body{flex:1;min-width:0}.ir .operation-body h4{font-size:14px;font-weight:650;color:#3c5134;margin:4px 0 12px}.ir .operation-body>p{font-size:12px;margin:0 0 15px}.ir .operation-body .field{margin:0;max-width:600px}.ir .operation-body .field>span{font-size:12px;color:#89997c;font-weight:400}.ir .operation-body>small{display:block;color:#a18b53;margin-top:9px;font-size:12px}.ir .file-collect-line{display:flex;gap:10px}.ir .file-collect-line input{min-width:0;flex:1}.ir .file-collect-line button{flex:none}@media(max-width:700px){.ir .activity-entry{grid-template-columns:105px minmax(0,1fr);gap:8px;padding:12px 10px}.ir .activity-summary small{display:none}.ir .file-collect-line{flex-wrap:wrap}.ir .host-operation{gap:11px}}
+ .ir .scene-page-brand{display:flex;align-items:center;gap:16px}.ir .scene-page-logo{width:54px;height:54px;flex:none;object-fit:contain;filter:drop-shadow(0 3px 4px #cd536320)}.ir h1{font-size:28px;letter-spacing:-.6px;font-weight:650;margin:0;line-height:1.45}.ir h2{font-size:20px;font-weight:600;margin:0;line-height:1.55}.ir h3{font-size:17px;font-weight:600;margin:0 0 13px}.ir p{color:var(--dim);margin:8px 0;line-height:1.8}
  .ir .head{display:flex;justify-content:space-between;align-items:center;gap:22px;margin-bottom:28px}.ir .overline{letter-spacing:2.5px;color:#92a282;font-size:10px;margin-bottom:8px}.ir .tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.ir .tools button{display:inline-flex;align-items:center;justify-content:center;gap:8px}
  .ir .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px;margin-bottom:26px}.ir .stat,.ir .panel{background:#fff;border:1px solid var(--line);border-radius:21px;box-shadow:0 4px 18px #20321a03}.ir .stat{padding:25px 27px;min-height:155px;position:relative;overflow:hidden}.ir .stat:first-child{background:radial-gradient(ellipse at 0 0,#e9f5db,transparent 85%),#fff}.ir .stat b{font-size:39px;font-weight:600;letter-spacing:-1px;display:block;margin-top:13px;line-height:1.2}.ir .stat span{color:#809076;font-size:13px}.ir .stat:after{content:'';position:absolute;width:7px;height:7px;border-radius:50%;right:26px;top:30px;background:#c4d7b2}
  .ir .layout{display:grid;grid-template-columns:310px minmax(0,1fr);gap:0;align-items:stretch;height:clamp(920px,calc(100dvh - 60px),1600px);overflow:hidden;background:#fff;border:1px solid var(--line);border-radius:22px;box-shadow:0 4px 20px #20321a03}.ir .list{padding:20px 18px;border:0;border-right:1px solid #e5ebdf;border-radius:0;background:#fafcf8;box-shadow:none;min-height:0;max-height:none;overflow:hidden;display:flex;flex-direction:column}.ir .list-heading{display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;padding:0 4px}.ir .list-heading h3{font-size:14px;margin:0;color:#61764f}.ir .list-heading span{font-size:11px;color:#9baa8d}.ir .list-search{padding-bottom:13px}.ir .case-scroll{overflow:auto;min-height:0;flex:1;scrollbar-width:thin;scrollbar-color:#d5dfcb transparent}.ir .case{width:100%;display:block;text-align:left;min-height:108px;padding:16px 14px;margin:0 0 9px;border-radius:12px;background:transparent}.ir .case.active{box-shadow:none}.ir .case small{font-size:10px}.ir .case .addr{font-size:11px}.ir .case strong{font-size:13px}
@@ -783,17 +869,20 @@ function IncidentPage() {
  .ir .investigation-body .external-analysis .sample-actions button:not(.primary),.ir .investigation-body .external-analysis .sample-actions a{color:var(--analysis-ink);border-color:var(--analysis-border);background:#ffffffd9}.ir .investigation-body .external-analysis .sample-actions button:not(.primary):hover:not(:disabled){color:var(--analysis-ink);border-color:color-mix(in srgb,var(--analysis-accent) 48%,white);background:var(--analysis-soft)}.ir .investigation-body .external-analysis .sample-actions button.analysis-submit:not(.primary){background:linear-gradient(120deg,var(--analysis-fill),var(--analysis-soft));border-color:color-mix(in srgb,var(--analysis-accent) 25%,white);color:var(--analysis-ink);box-shadow:none}.ir .investigation-body .external-analysis .sample-actions button.analysis-submit:not(.primary):hover:not(:disabled){background:linear-gradient(120deg,color-mix(in srgb,var(--analysis-accent) 24%,white),var(--analysis-fill));color:var(--analysis-ink)}.ir .external-analysis .analysis-official-link{background:#fff;border-color:var(--analysis-border);color:var(--analysis-ink);box-shadow:none}
 ` }),
     /* @__PURE__ */ jsxs("div", { className: "head", children: [
-      /* @__PURE__ */ jsxs("div", { children: [
-        /* @__PURE__ */ jsx("div", { className: "overline", children: "INCIDENT RESPONSE / EVIDENCE INTO ACTION" }),
-        /* @__PURE__ */ jsx("h1", { children: "\u5E94\u6025\u54CD\u5E94\u5DE5\u4F5C\u53F0" }),
-        /* @__PURE__ */ jsx("p", { children: "\u4ECE\u786E\u8BA4\u544A\u8B66\u5230\u8BC1\u636E\u94FE\uFF0C\u8BA9\u6BCF\u4E00\u6B65\u8C03\u67E5\u90FD\u6709\u4F9D\u636E\u3002" })
+      /* @__PURE__ */ jsxs("div", { className: "scene-page-brand", children: [
+        /* @__PURE__ */ jsx("img", { "data-scene-logo": "incident", className: "scene-page-logo", src: "/api/scenes/assistant/logos/incident.svg", alt: "\u5E94\u6025\u54CD\u5E94 Logo" }),
+        /* @__PURE__ */ jsxs("div", { children: [
+          /* @__PURE__ */ jsx("div", { className: "overline", children: "INCIDENT RESPONSE / EVIDENCE INTO ACTION" }),
+          /* @__PURE__ */ jsx("h1", { children: "\u5E94\u6025\u54CD\u5E94\u5DE5\u4F5C\u53F0" }),
+          /* @__PURE__ */ jsx("p", { children: "\u4ECE\u786E\u8BA4\u544A\u8B66\u5230\u8BC1\u636E\u94FE\uFF0C\u8BA9\u6BCF\u4E00\u6B65\u8C03\u67E5\u90FD\u6709\u4F9D\u636E\u3002" })
+        ] })
       ] }),
       /* @__PURE__ */ jsxs("div", { className: "tools", children: [
         /* @__PURE__ */ jsx("span", { className: "badge", children: "\u5DE5\u4F5C\u6D41 + AI \u5206\u6790" }),
         /* @__PURE__ */ jsx("button", { className: "primary", onClick: () => {
           setNewEvent(initialEvent());
           setEventModal(true);
-        }, children: "\uFF0B \u65B0\u589E\u4E8B\u4EF6" }),
+        }, children: "\u65B0\u589E\u4E8B\u4EF6" }),
         /* @__PURE__ */ jsxs("button", { onClick: () => {
           setTab("settings");
           setSelected("");
@@ -854,9 +943,12 @@ function IncidentPage() {
             /* @__PURE__ */ jsx("h2", { children: "\u4E3B\u673A\u4E0E\u8C03\u67E5\u8FDE\u63A5" }),
             /* @__PURE__ */ jsx("p", { children: "\u4EC5\u767B\u8BB0\u53D7\u7BA1\u4E3B\u673A\uFF0C\u51ED\u636E\u4F7F\u7528\u5E73\u53F0 Secret Manager \u4FDD\u5B58\u3002" })
           ] }),
-          /* @__PURE__ */ jsx("button", { className: "primary", onClick: () => setModal(true), children: "\uFF0B \u767B\u8BB0\u4E3B\u673A" })
+          /* @__PURE__ */ jsx("button", { className: "primary", onClick: () => setModal(true), children: "\u767B\u8BB0\u4E3B\u673A" })
         ] }),
-        /* @__PURE__ */ jsx("div", { className: "notice", children: "\u5F53\u524D\u7248\u672C\u4EC5\u7CFB\u7EDF\u7BA1\u7406\u5458\u53EF\u8BBF\u95EE\u5E94\u6025\u4E8B\u4EF6\u4E0E\u8BC1\u636E\u3002SSH \u6821\u9A8C\u4E3B\u673A\u516C\u94A5\uFF1BWindows WinRM \u4F7F\u7528 HTTPS \u548C\u53EF\u4FE1\u8BC1\u4E66\u3002\u4E3B\u673A\u5FC5\u987B\u4E0E\u4E8B\u4EF6\u76EE\u6807 IP \u4E00\u81F4\u3002" }),
+        /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
+          /* @__PURE__ */ jsx("summary", { children: "\u4E3B\u673A\u63A5\u5165\u4E0E\u6743\u9650\u8BF4\u660E" }),
+          /* @__PURE__ */ jsx("p", { children: "\u4EC5\u7BA1\u7406\u5458\u53EF\u8BBF\u95EE\u4E8B\u4EF6\u8BC1\u636E\u3002SSH \u6821\u9A8C\u4E3B\u673A\u516C\u94A5\uFF1BWinRM \u4F7F\u7528 HTTPS \u548C\u53EF\u4FE1\u8BC1\u4E66\uFF1B\u4E3B\u673A\u987B\u4E0E\u4E8B\u4EF6\u76EE\u6807\u4E00\u81F4\u3002" })
+        ] }),
         settings.hosts.map((h) => /* @__PURE__ */ jsxs("div", { className: "hostitem", children: [
           /* @__PURE__ */ jsx(Icon, { type: "host" }),
           /* @__PURE__ */ jsxs("div", { children: [
@@ -952,60 +1044,72 @@ function IncidentPage() {
           }) })
         ] }),
         /* @__PURE__ */ jsxs("div", { className: "investigation-body", children: [
+          optionalJobs.length > 0 && ["host", "evidence"].includes(tab) && /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
+            /* @__PURE__ */ jsxs("summary", { children: [
+              "\u53D6\u8BC1\u4E0E\u73AF\u5883\u4EFB\u52A1 \xB7 ",
+              optionalJobs.filter((j) => ["running", "queued"].includes(j.status)).length,
+              " \u9879\u6267\u884C\u4E2D"
+            ] }),
+            optionalJobs.slice(0, 5).map((j) => /* @__PURE__ */ jsxs("div", { className: "optional-job", children: [
+              /* @__PURE__ */ jsxs("strong", { children: [
+                j.kind === "rea_install" ? "REA \u5B89\u88C5" : "Solar \u53D6\u8BC1",
+                " \xB7 ",
+                labels[j.status] || j.status
+              ] }),
+              /* @__PURE__ */ jsx("p", { children: j.result?.message }),
+              j.kind === "rea_install" && /* @__PURE__ */ jsx("button", { onClick: () => req("/optional/jobs/" + j.id + "/log").then((r) => setOptionalLog(r.text)), children: "\u67E5\u770B\u65E5\u5FD7" })
+            ] }, j.id))
+          ] }),
+          optionalLog && /* @__PURE__ */ jsx("div", { className: "modal", onClick: () => setOptionalLog(""), children: /* @__PURE__ */ jsxs("div", { className: "dialog", onClick: (e) => e.stopPropagation(), children: [
+            /* @__PURE__ */ jsx("button", { onClick: () => setOptionalLog(""), children: "\u5173\u95ED" }),
+            /* @__PURE__ */ jsx("h3", { children: "\u5B89\u88C5\u65E5\u5FD7" }),
+            /* @__PURE__ */ jsx("pre", { style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }, children: optionalLog })
+          ] }) }),
           busy && /* @__PURE__ */ jsxs("p", { className: "busy", role: "status", children: [
             busy,
             "\uFF0C\u8BF7\u7A0D\u5019\u2026"
           ] }),
           tab === "overview" && /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsxs("div", { className: "timeline-head", children: [
-              /* @__PURE__ */ jsxs("div", { children: [
-                /* @__PURE__ */ jsx("h3", { children: "\u8C03\u67E5\u52A8\u6001" }),
-                /* @__PURE__ */ jsxs("p", { children: [
-                  detail.events.length,
-                  " \u6761\u8BB0\u5F55 \xB7 \u91C7\u96C6\u7ED3\u679C\u4E0E\u64CD\u4F5C\u8FC7\u7A0B"
-                ] })
-              ] }),
-              /* @__PURE__ */ jsx("button", { disabled: !!busy || locked, onClick: () => action("\u91CD\u65B0\u5173\u8054\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: "\u91CD\u65B0\u5173\u8054\u65E5\u5FD7" })
+            /* @__PURE__ */ jsxs("div", { className: "work-section-head", children: [
+              /* @__PURE__ */ jsx("h3", { children: "\u8C03\u67E5\u52A8\u6001" }),
+              /* @__PURE__ */ jsx("button", { disabled: !!busy || locked, onClick: () => action("\u91CD\u65B0\u5173\u8054\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: "\u5237\u65B0\u5173\u8054\u65E5\u5FD7" })
             ] }),
-            /* @__PURE__ */ jsx("div", { className: "timeline", children: detail.events.slice().reverse().map((e) => /* @__PURE__ */ jsxs("div", { className: "event", children: [
-              /* @__PURE__ */ jsx("time", { children: new Date(e.at).toLocaleString() }),
-              /* @__PURE__ */ jsx("b", { children: labels[e.status] || e.status }),
-              /* @__PURE__ */ jsx("p", { children: eventMessage(e) })
-            ] }, e.id)) })
+            /* @__PURE__ */ jsx(ActivityTimeline, { events: detail.events })
           ] }),
           tab === "logs" && /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsxs("div", { className: "notice source-query-notice", children: [
-              caseSource(detail) ? /* @__PURE__ */ jsxs(Fragment2, { children: [
-                "\u672C\u6B21\u4EC5\u67E5\u8BE2\u5DF2\u7ED1\u5B9A\u8BBE\u5907\uFF1A",
-                /* @__PURE__ */ jsx("strong", { children: caseSource(detail).name }),
-                "\u3002\u4E0D\u4F1A\u6539\u7528\u5176\u4ED6\u8BBE\u5907\u3002"
-              ] }) : /* @__PURE__ */ jsx(Fragment2, { children: "\u5C1A\u672A\u660E\u786E\u6765\u6E90\u8BBE\u5907\u3002\u8BF7\u9009\u62E9\u5B9E\u9645\u4EA7\u751F\u544A\u8B66\u6216\u65E5\u5FD7\u7684\u8BBE\u5907\uFF0C\u518D\u542F\u52A8\u5173\u8054\u67E5\u8BE2\u3002" }),
-              /* @__PURE__ */ jsx("button", { disabled: locked, onClick: openSource, children: caseSource(detail) ? "\u6838\u5BF9\u6765\u6E90\u8BBE\u5907" : "\u9009\u62E9\u6765\u6E90\u8BBE\u5907" })
-            ] }),
-            /* @__PURE__ */ jsxs("div", { className: "timeline-head", children: [
+            /* @__PURE__ */ jsxs("div", { className: "work-section-head", children: [
               /* @__PURE__ */ jsxs("div", { children: [
-                /* @__PURE__ */ jsx("h3", { children: "\u5173\u8054\u8BBE\u5907\u65E5\u5FD7" }),
-                /* @__PURE__ */ jsx("p", { children: "\u6309\u5F53\u524D\u4E8B\u4EF6\u7684\u65F6\u95F4\u7A97\u53E3\u548C\u5173\u8054 IP \u67E5\u8BE2\u5DF2\u63A5\u5165\u8BBE\u5907\uFF0C\u539F\u59CB\u7ED3\u679C\u8FDB\u5165\u8BC1\u636E\u5E93\u3002" })
+                /* @__PURE__ */ jsx("h3", { children: "\u8BBE\u5907\u5173\u8054" }),
+                /* @__PURE__ */ jsx("small", { children: caseSource(detail)?.name || "\u5C1A\u672A\u7ED1\u5B9A\u6765\u6E90\u8BBE\u5907" })
               ] }),
-              /* @__PURE__ */ jsx("button", { className: "primary", disabled: !!busy || locked, onClick: () => action("\u5173\u8054\u8BBE\u5907\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: "\u67E5\u8BE2\u5173\u8054\u65E5\u5FD7" })
-            ] }),
-            detail.events.filter((e) => e.stage === "logs").slice().reverse().map((e) => /* @__PURE__ */ jsxs("div", { className: "event", children: [
-              /* @__PURE__ */ jsx("b", { children: labels[e.status] || e.status }),
-              /* @__PURE__ */ jsx("p", { children: eventMessage(e) })
-            ] }, e.id)),
-            detail.evidence.filter((e) => e.kind === "device_logs").map((e) => /* @__PURE__ */ jsxs("div", { className: "evidence", children: [
-              /* @__PURE__ */ jsx(Icon, { type: "file" }),
-              /* @__PURE__ */ jsxs("div", { children: [
-                /* @__PURE__ */ jsx("strong", { children: e.label }),
-                /* @__PURE__ */ jsxs("p", { children: [
-                  (e.size / 1024).toFixed(1),
-                  " KB \xB7 SHA-256 ",
-                  e.sha256
-                ] }),
-                /* @__PURE__ */ jsx("a", { href: BASE + "/cases/" + detail.id + "/evidence/" + e.id, children: "\u4E0B\u8F7D\u539F\u59CB\u65E5\u5FD7" })
+              /* @__PURE__ */ jsxs("div", { className: "tools", children: [
+                /* @__PURE__ */ jsx("button", { disabled: locked, onClick: openSource, children: caseSource(detail) ? "\u66F4\u6362\u8BBE\u5907" : "\u9009\u62E9\u8BBE\u5907" }),
+                /* @__PURE__ */ jsx("button", { className: "primary", disabled: !!busy || locked || !caseSource(detail), onClick: () => action("\u5173\u8054\u8BBE\u5907\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: "\u67E5\u8BE2\u5173\u8054\u65E5\u5FD7" })
               ] })
-            ] }, e.id)),
-            !detail.events.some((e) => e.stage === "logs") && /* @__PURE__ */ jsx("div", { className: "notice", children: "\u5C1A\u672A\u67E5\u8BE2\u8BBE\u5907\u65E5\u5FD7\u3002\u67E5\u8BE2\u5931\u8D25\u6216\u7F3A\u5C11\u8BBE\u5907\u914D\u7F6E\u4F1A\u660E\u786E\u663E\u793A\u5728\u8FD9\u91CC\u3002" })
+            ] }),
+            /* @__PURE__ */ jsxs("div", { className: "device-results", children: [
+              detail.evidence.filter((e) => e.kind === "device_logs").map((e) => /* @__PURE__ */ jsxs("div", { className: "evidence compact-log", children: [
+                /* @__PURE__ */ jsx(Icon, { type: "file" }),
+                /* @__PURE__ */ jsxs("div", { className: "body", children: [
+                  /* @__PURE__ */ jsx("strong", { children: e.label }),
+                  /* @__PURE__ */ jsxs("small", { children: [
+                    (e.size / 1024).toFixed(1),
+                    " KB \xB7 ",
+                    new Date(e.created).toLocaleString()
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsx("a", { href: BASE + "/cases/" + detail.id + "/evidence/" + e.id, children: "\u4E0B\u8F7D\u65E5\u5FD7" })
+              ] }, e.id)),
+              !detail.evidence.some((e) => e.kind === "device_logs") && /* @__PURE__ */ jsx("div", { className: "compact-empty", children: caseSource(detail) ? "\u6682\u65E0\u5173\u8054\u65E5\u5FD7\uFF0C\u70B9\u51FB\u67E5\u8BE2\u5F00\u59CB\u3002" : "\u8BF7\u5148\u9009\u62E9\u4EA7\u751F\u672C\u4E8B\u4EF6\u544A\u8B66\u7684\u8BBE\u5907\u3002" })
+            ] }),
+            detail.events.some((e) => e.stage === "logs") && /* @__PURE__ */ jsxs("details", { className: "work-help", open: detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "blocked" || detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "failed", children: [
+              /* @__PURE__ */ jsx("summary", { children: "\u67E5\u8BE2\u8BB0\u5F55\u4E0E\u5F02\u5E38" }),
+              /* @__PURE__ */ jsx(ActivityTimeline, { compact: true, events: detail.events.filter((e) => e.stage === "logs") })
+            ] }),
+            /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
+              /* @__PURE__ */ jsx("summary", { children: "\u67E5\u8BE2\u8303\u56F4\u8BF4\u660E" }),
+              /* @__PURE__ */ jsx("p", { children: "\u4EC5\u67E5\u8BE2\u5F53\u524D\u4E8B\u4EF6\u7ED1\u5B9A\u7684\u8BBE\u5907\u3001\u544A\u8B66\u65F6\u95F4\u7A97\u53E3\u53CA\u5173\u8054 IP\u3002\u539F\u59CB\u54CD\u5E94\u4FDD\u7559\u5728\u8BC1\u636E\u5E93\uFF0C\u5B8C\u6574\u6027\u4EE5\u8BC1\u636E SHA-256 \u6821\u9A8C\u3002" })
+            ] })
           ] }),
           tab === "sandbox" && /* @__PURE__ */ jsxs("section", { className: "external-analysis", "data-provider": analysisProvider, style: { "--analysis-accent": platform.accent, "--analysis-soft": platform.soft }, children: [
             /* @__PURE__ */ jsx("div", { className: "analysis-platform-tabs", role: "tablist", "aria-label": "\u6837\u672C\u5206\u6790\u5E73\u53F0", children: [["threatbook", "\u5FAE\u6B65\u4E91\u6C99\u7BB1", "threatbook-hd.svg", "\u52A8\u6001\u884C\u4E3A \xB7 \u4E91\u6C99\u7BB1"], ["virustotal", "VirusTotal", "virustotal.svg", "\u591A\u5F15\u64CE\u68C0\u6D4B \xB7 \u6587\u4EF6\u60C5\u62A5"]].map(([id, name, logo, desc]) => /* @__PURE__ */ jsxs("button", { role: "tab", "aria-selected": analysisProvider === id, onClick: () => setAnalysisProvider(id), style: { "--analysis-accent": id === "threatbook" ? "#b45f55" : "#586e9d", "--analysis-soft": id === "threatbook" ? "#fcf3f0" : "#f0f3fa" }, children: [
@@ -1072,37 +1176,64 @@ function IncidentPage() {
             !detail.evidence.some((e) => e.kind === "sandbox_report" && reportProvider(e) === analysisProvider) && /* @__PURE__ */ jsx("p", { className: "note", children: "\u5F53\u524D\u5E73\u53F0\u5C1A\u65E0\u5206\u6790\u7ED3\u679C\u3002\u67E5\u8BE2\u6216\u63D0\u4EA4\u6210\u529F\u540E\uFF0C\u539F\u59CB\u8FD4\u56DE\u4F1A\u4FDD\u5B58\u5728\u672C\u4E8B\u4EF6\u8BC1\u636E\u5E93\u3002" })
           ] }),
           tab === "host" && /* @__PURE__ */ jsxs(Fragment2, { children: [
-            /* @__PURE__ */ jsx("h3", { children: "AI \u81EA\u4E3B\u8C03\u67E5\u4E0E\u53D6\u8BC1" }),
-            /* @__PURE__ */ jsx("p", { children: "\u5148\u91C7\u96C6\u8FDB\u7A0B\u3001\u8FDE\u63A5\u3001\u767B\u5F55\u3001\u6301\u4E45\u5316\u4E0E\u6587\u4EF6\u7EBF\u7D22\uFF0C\u518D\u7531 Atlas \u8BFB\u53D6\u8BC1\u636E\u3001\u89C4\u5212\u8FFD\u67E5\u548C\u81EA\u52A8\u53D6\u8BC1\uFF0C\u6700\u540E\u751F\u6210\u8BC1\u636E\u62A5\u544A\u3002" }),
-            /* @__PURE__ */ jsxs("label", { className: "field", children: [
-              "\u4E8B\u4EF6\u76EE\u6807\u4E3B\u673A",
-              /* @__PURE__ */ jsxs("select", { value: remote, onChange: (e) => setRemote(e.target.value), children: [
-                /* @__PURE__ */ jsxs("option", { value: "", children: [
-                  "\u9009\u62E9 ",
-                  detail.target,
-                  " \u7684\u5DF2\u767B\u8BB0\u4E3B\u673A"
+            /* @__PURE__ */ jsxs("div", { className: "work-section-head", children: [
+              /* @__PURE__ */ jsx("h3", { children: "\u4E3B\u673A\u6392\u67E5" }),
+              /* @__PURE__ */ jsx("button", { onClick: () => {
+                setTab("settings");
+                setSelected("");
+              }, children: "\u7BA1\u7406\u4E3B\u673A" })
+            ] }),
+            /* @__PURE__ */ jsxs("section", { className: "host-operation", children: [
+              /* @__PURE__ */ jsx("div", { className: "operation-number", children: "01" }),
+              /* @__PURE__ */ jsxs("div", { className: "operation-body", children: [
+                /* @__PURE__ */ jsx("h4", { children: "\u9009\u62E9\u76EE\u6807\u4E3B\u673A" }),
+                /* @__PURE__ */ jsxs("label", { className: "field", children: [
+                  /* @__PURE__ */ jsxs("span", { children: [
+                    "\u4E8B\u4EF6\u76EE\u6807\uFF1A",
+                    detail.target
+                  ] }),
+                  /* @__PURE__ */ jsxs("select", { "aria-label": "\u8C03\u67E5\u76EE\u6807\u4E3B\u673A", value: remote, onChange: (e) => setRemote(e.target.value), children: [
+                    /* @__PURE__ */ jsx("option", { value: "", children: "\u9009\u62E9\u5DF2\u767B\u8BB0\u4E3B\u673A" }),
+                    matching.map((h) => /* @__PURE__ */ jsxs("option", { value: h.id, children: [
+                      h.name,
+                      " \xB7 ",
+                      h.protocol
+                    ] }, h.id))
+                  ] })
                 ] }),
-                matching.map((h) => /* @__PURE__ */ jsxs("option", { value: h.id, children: [
-                  h.name,
-                  " \xB7 ",
-                  h.protocol
-                ] }, h.id))
+                !matching.length && /* @__PURE__ */ jsx("small", { children: "\u8BF7\u5148\u767B\u8BB0\u76EE\u6807\u4E3B\u673A\u7684 SSH \u6216 WinRM \u8FDE\u63A5\u3002" })
               ] })
             ] }),
-            !matching.length && /* @__PURE__ */ jsx("p", { className: "note", children: "\u5C1A\u672A\u767B\u8BB0\u6B64\u76EE\u6807\uFF0C\u8BF7\u5728\u201C\u4E3B\u673A\u4E0E\u8FDE\u63A5\u201D\u4E2D\u6DFB\u52A0\u3002" }),
-            /* @__PURE__ */ jsx("button", { className: "primary", disabled: !remote || !!busy || locked, onClick: () => {
-              if (confirm("\u786E\u8BA4\u6388\u6743 Atlas \u5BF9\u5F53\u524D\u4E8B\u4EF6\u76EE\u6807\u6267\u884C\u53EA\u8BFB\u8C03\u67E5\u53CA\u5DF2\u53D1\u73B0\u53EF\u7591\u6587\u4EF6\u7684\u81EA\u52A8\u53D6\u8BC1\uFF1F\u6700\u591A3\u8F6E\u8FFD\u67E5\uFF0C\u4E0D\u6267\u884C\u6837\u672C\uFF0C\u4E0D\u505A\u5220\u9664\u3001\u4FEE\u590D\u6216\u5916\u90E8\u4E0A\u4F20\u3002")) action("\u8FDC\u7A0B\u8C03\u67E5", () => req("/cases/" + detail.id + "/run", { host_id: remote, remote_authorized: true, ai_autonomous: true }));
-            }, children: "\u6388\u6743\u5E76\u542F\u52A8 AI \u8C03\u67E5" }),
-            /* @__PURE__ */ jsx("div", { className: "notice", children: "Atlas \u6839\u636E\u5B9E\u9645\u8BC1\u636E\u9009\u62E9\u8FDB\u7A0B\u8FFD\u67E5\u548C\u6587\u4EF6\u53D6\u8BC1\u52A8\u4F5C\u3002\u76EE\u6807\u9650\u5B9A\u5F53\u524D\u4E8B\u4EF6\u4E3B\u673A\uFF0C\u6240\u6709\u52A8\u4F5C\u548C\u6A21\u578B\u51B3\u7B56\u5747\u5F52\u6863\uFF1B\u5916\u90E8\u6C99\u7BB1\u4E0A\u4F20\u4ECD\u9700\u5355\u72EC\u786E\u8BA4\u3002" }),
-            /* @__PURE__ */ jsx("h3", { children: "\u6307\u5B9A\u6587\u4EF6\u53D6\u8BC1" }),
-            /* @__PURE__ */ jsx("p", { children: "\u6839\u636E\u65E5\u5FD7\u53D1\u73B0\u586B\u5199\u5B9E\u9645\u8DEF\u5F84\u3002\u91C7\u96C6\u524D\u540E\u6838\u5BF9\u8FDC\u7AEF SHA-256\uFF0C\u5E76\u4E0E\u672C\u5730\u6821\u9A8C\u4E00\u81F4\u540E\u5165\u5E93\uFF0C\u6700\u5927 20 MB\u3002" }),
-            /* @__PURE__ */ jsxs("label", { className: "field", children: [
-              "\u8FDC\u7A0B\u6587\u4EF6\u7EDD\u5BF9\u8DEF\u5F84",
-              /* @__PURE__ */ jsx("input", { value: path, onChange: (e) => setPath(e.target.value), placeholder: "/var/www/html/suspicious.php \u6216 C:\\inetpub\\wwwroot\\file.aspx" })
+            /* @__PURE__ */ jsxs("section", { className: "host-operation", children: [
+              /* @__PURE__ */ jsx("div", { className: "operation-number", children: "02" }),
+              /* @__PURE__ */ jsxs("div", { className: "operation-body", children: [
+                /* @__PURE__ */ jsx("h4", { children: "\u542F\u52A8 AI \u8C03\u67E5" }),
+                /* @__PURE__ */ jsx("p", { children: "\u91C7\u96C6\u4E3B\u673A\u7EBF\u7D22\uFF0C\u5173\u8054\u8BC1\u636E\u5E76\u751F\u6210\u62A5\u544A\u3002" }),
+                /* @__PURE__ */ jsx("button", { className: "primary", disabled: !remote || !!busy || locked, onClick: () => {
+                  if (confirm("\u786E\u8BA4\u6388\u6743 Atlas \u5BF9\u5F53\u524D\u4E8B\u4EF6\u76EE\u6807\u6267\u884C\u53EA\u8BFB\u8C03\u67E5\u53CA\u5DF2\u53D1\u73B0\u53EF\u7591\u6587\u4EF6\u7684\u81EA\u52A8\u53D6\u8BC1\uFF1F\u6700\u591A3\u8F6E\u8FFD\u67E5\uFF0C\u4E0D\u6267\u884C\u6837\u672C\uFF0C\u4E0D\u505A\u5220\u9664\u3001\u4FEE\u590D\u6216\u5916\u90E8\u4E0A\u4F20\u3002")) action("\u8FDC\u7A0B\u8C03\u67E5", () => req("/cases/" + detail.id + "/run", { host_id: remote, remote_authorized: true, ai_autonomous: true }));
+                }, children: "\u6388\u6743\u5E76\u542F\u52A8 AI \u8C03\u67E5" }),
+                /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
+                  /* @__PURE__ */ jsx("summary", { children: "\u8C03\u67E5\u8303\u56F4\u4E0E\u6388\u6743\u8BF4\u660E" }),
+                  /* @__PURE__ */ jsx("p", { children: "\u4ECE\u8FDB\u7A0B\u3001\u8FDE\u63A5\u3001\u767B\u5F55\u548C\u6301\u4E45\u5316\u7EBF\u7D22\u51FA\u53D1\uFF0C\u6700\u591A3\u8F6E\u6309\u8BC1\u636E\u8FFD\u67E5\u53CA\u53D6\u8BC1\uFF1B\u6240\u6709\u52A8\u4F5C\u4E0E\u6A21\u578B\u51B3\u7B56\u5F52\u6863\u3002\u4E0D\u6267\u884C\u6837\u672C\u3001\u4E0D\u5220\u9664\u6216\u4FEE\u590D\u6587\u4EF6\uFF0C\u4E0D\u81EA\u52A8\u5916\u53D1\u3002" })
+                ] })
+              ] })
             ] }),
-            /* @__PURE__ */ jsx("button", { disabled: !path || !remote || !!busy, onClick: () => {
-              if (confirm("\u786E\u8BA4\u4ECE\u4E8B\u4EF6\u76EE\u6807\u91C7\u96C6\u8FD9\u4E2A\u6587\u4EF6\u5230\u5E73\u53F0\u9694\u79BB\u8BC1\u636E\u5E93\uFF1F\u6587\u4EF6\u4E0D\u4F1A\u88AB\u6267\u884C\u3002")) action("\u6587\u4EF6\u53D6\u8BC1", () => req("/cases/" + detail.id + "/files", { host_id: remote, path, confirmed: true }));
-            }, children: "\u91C7\u96C6\u6587\u4EF6\u5E76\u505A\u9759\u6001\u521D\u7B5B" })
+            /* @__PURE__ */ jsxs("section", { className: "host-operation", children: [
+              /* @__PURE__ */ jsx("div", { className: "operation-number", children: "03" }),
+              /* @__PURE__ */ jsxs("div", { className: "operation-body", children: [
+                /* @__PURE__ */ jsx("h4", { children: "\u8865\u5145\u6587\u4EF6\u53D6\u8BC1" }),
+                /* @__PURE__ */ jsxs("div", { className: "file-collect-line", children: [
+                  /* @__PURE__ */ jsx("input", { "aria-label": "\u53D6\u8BC1\u6587\u4EF6\u8DEF\u5F84", value: path, onChange: (e) => setPath(e.target.value), placeholder: "\u8F93\u5165\u8FDC\u7A0B\u6587\u4EF6\u7684\u7EDD\u5BF9\u8DEF\u5F84" }),
+                  /* @__PURE__ */ jsx("button", { disabled: !path || !remote || !!busy || locked, onClick: () => {
+                    if (confirm("\u786E\u8BA4\u4ECE\u4E8B\u4EF6\u76EE\u6807\u91C7\u96C6\u8FD9\u4E2A\u6587\u4EF6\u5230\u5E73\u53F0\u9694\u79BB\u8BC1\u636E\u5E93\uFF1F\u6587\u4EF6\u4E0D\u4F1A\u88AB\u6267\u884C\u3002")) action("\u6587\u4EF6\u53D6\u8BC1", () => req("/cases/" + detail.id + "/files", { host_id: remote, path, confirmed: true }));
+                  }, children: "\u91C7\u96C6\u5E76\u5206\u6790" })
+                ] }),
+                /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
+                  /* @__PURE__ */ jsx("summary", { children: "\u6587\u4EF6\u91C7\u96C6\u8BF4\u660E" }),
+                  /* @__PURE__ */ jsx("p", { children: "\u6309\u5B9E\u9645\u7EBF\u7D22\u586B\u5199\u5B8C\u6574\u8DEF\u5F84\u3002\u5355\u6587\u4EF6\u6700\u592720MB\uFF0C\u8FDC\u7AEF\u4E0E\u672C\u5730 SHA-256 \u4E00\u81F4\u540E\u5165\u5E93\uFF0C\u968F\u540E\u6267\u884C\u9759\u6001\u521D\u7B5B\u3002" })
+                ] })
+              ] })
+            ] })
           ] }),
           tab === "evidence" && /* @__PURE__ */ jsxs(Fragment2, { children: [
             /* @__PURE__ */ jsxs("div", { className: "rea-environment", children: [
@@ -1110,10 +1241,11 @@ function IncidentPage() {
               /* @__PURE__ */ jsxs("div", { children: [
                 /* @__PURE__ */ jsx("strong", { children: "REA \xB7 Ghidra \u6DF1\u5EA6\u9759\u6001\u9006\u5411" }),
                 /* @__PURE__ */ jsxs("p", { children: [
-                  reaStatus?.ready ? "\u5F15\u64CE\u5DF2\u5C31\u7EEA \xB7 Linux / WSL2 \xB7 AI \u6309\u8BC1\u636E\u9009\u62E9\u51FD\u6570\u4E0E\u8C03\u7528\u5173\u7CFB" : "\u9006\u5411\u5F15\u64CE\u5C1A\u672A\u5C31\u7EEA\uFF0C\u8BF7\u68C0\u67E5\u63D2\u4EF6\u8FD0\u884C\u73AF\u5883",
-                  "\u3002PE / ELF \u81EA\u52A8\u8C03\u7528\u53CD\u7F16\u8BD1\uFF0C\u811A\u672C\u4F7F\u7528\u6E90\u7801\u5206\u6790\u3002"
+                  reaStatus?.ready ? "\u5F15\u64CE\u5DF2\u5C31\u7EEA \xB7 Linux / WSL2 \xB7 AI \u6309\u8BC1\u636E\u9009\u62E9\u51FD\u6570\u4E0E\u8C03\u7528\u5173\u7CFB" : "\u5C1A\u672A\u5B89\u88C5\u6216\u73AF\u5883\u672A\u5C31\u7EEA",
+                  "\u3002PE / ELF \u4F7F\u7528\u9759\u6001\u53CD\u7F16\u8BD1\u3002"
                 ] })
-              ] })
+              ] }),
+              !reaStatus?.ready && /* @__PURE__ */ jsx("button", { className: "primary", disabled: !!busy, onClick: () => void openOptional("rea_install"), children: "\u5B89\u88C5 REA" })
             ] }),
             /* @__PURE__ */ jsx("div", { className: "notice", children: "\u8BC1\u636E\u4E3A\u539F\u59CB\u54CD\u5E94\u6216\u5B9E\u9645\u91C7\u96C6\u5185\u5BB9\uFF0C\u4E0B\u8F7D\u524D\u6821\u9A8C SHA-256\u3002\u6837\u672C\u4EE5 .bin \u9644\u4EF6\u4E0B\u8F7D\uFF0C\u8BF7\u5728\u9694\u79BB\u73AF\u5883\u4E2D\u5904\u7406\u3002\u4E0A\u4F20\u5916\u90E8\u6C99\u7BB1\u524D\u786E\u8BA4\u6587\u4EF6\u53EF\u5BF9\u5916\u5171\u4EAB\u3002" }),
             /* @__PURE__ */ jsxs("div", { className: "evidence-browser", children: [

@@ -14,6 +14,7 @@ import urllib.request
 import webbrowser
 
 BASE = Path(__file__).resolve().parent
+sys.path.insert(0,str(BASE))
 
 def main():
     parser = argparse.ArgumentParser(description="AegisOps Windows launcher")
@@ -23,13 +24,15 @@ def main():
     parser.add_argument('--no-browser', action='store_true')
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
+    from runtime_bootstrap import ensure_runtime
+    ensure_runtime()
     python = BASE / '_runtime/python/python.exe'
     node = BASE / '_runtime/node/node.exe'
     if not python.is_file() or not node.is_file():
-        raise RuntimeError('Bundled runtime is missing. Extract the complete Windows portable ZIP first.')
+        raise RuntimeError('Runtime setup is incomplete. Rerun start.cmd with an internet connection.')
     git = BASE / '_runtime/git/cmd/git.exe'
     if not git.is_file():
-        raise RuntimeError('Bundled Git is missing. Extract the complete Windows portable ZIP first.')
+        raise RuntimeError('Git setup is incomplete. Rerun start.cmd with an internet connection.')
     try:
         ctypes.WinDLL('msvcp140.dll')
         ctypes.WinDLL('concrt140.dll')

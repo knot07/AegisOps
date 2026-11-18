@@ -1,22 +1,25 @@
-# AegisOps Windows x64 部署
+# Windows 安装与运行
 
-版本 2026.11.08，下载 Releases 中唯一的 `Windows-x64.zip`。支持原生 Windows 10/11 x64；本次在 Windows 本机验证，无需 WSL 或 Docker。
 
-1. 完整解压至可写的较短目录，例如 `D:\Apps\AegisOps`，不要直接在压缩包内启动。
-2. 运行 `start.cmd --check`。若提示缺少 VC++ 运行库，运行 `_runtime\vc_redist.x64.exe` 后重试。
-3. 双击 `start.cmd`，等待 Service ready，并打开显示的地址。
-4. 首次访问自行设置管理员，没有默认账号。配置模型与设备后使用 AI 和真实研判功能。
+1. 将 Windows ZIP 完整解压到普通用户可写的目录，建议使用短路径。
+2. 双击 `start.cmd`。基础 Python 和 Git 随包提供，首次启动会下载 Node、Python 运行依赖和场景编译依赖；请保持网络可用并等待控制台提示。
+3. 缺少 Microsoft Visual C++ x64 运行库时，会调用随包的微软安装器，请完成系统安装提示。
+4. 安装中断后重新运行同一目录下的 `start.cmd`，已校验的下载可复用。完成后日常启动使用本地依赖。
+5. 浏览器打开 `http://127.0.0.1:5200`，设置自己的管理员账号密码，再配置模型和设备。
+
+可在命令行执行：
 
 ```bat
 start.cmd --check
-start.cmd --port 5200
-start.cmd --host 0.0.0.0 --port 5201 --data-dir D:\AegisOpsData --no-browser
+start.cmd --port 5201
+start.cmd --data-dir D:\AegisOpsData
 ```
 
-启动窗口需要保持运行，停止前等待任务结束。默认绑定本机地址；远程访问需配置防火墙和 HTTPS。日志位于数据目录 `logs/windows-server.log`。
+默认数据目录为项目内 `runtime`；日志为 `runtime\logs\windows-server.log`。保持启动窗口打开，使用 Ctrl+C 停止。依赖仅安装到项目的 `_runtime` 目录，不覆盖系统 Python。
 
-包内已附 Python 3.12、Node、Git、前端编译器与 Python 依赖，部署不需要全局安装 Python/npm。模型、设备、沙箱等外部服务仍需要网络及有效凭据；部分 AI/文档能力可能按需下载模型文件。本包不包含当前业务数据或任何账号密钥。
 
-管理员可在左侧底部打开在线更新。依赖变化时下载新 Windows 完整包，停止旧服务，备份原数据目录，在新目录解压新包并指定原 `--data-dir`。旧版首次手工迁移后才具备此更新入口。
+## 平台范围
 
-本次 Windows 验证包括启动依赖检查、首次管理员初始化、普通用户登录、更新权限、资产增改删、应急事件增删，以及六个主要界面加载。未连接真实业务主机或企业沙箱执行远程调查。完整说明见 [部署与操作手册](DEPLOY.md)。
+完整工作台可在 Windows 本机运行。REA 隔离 worker 使用 Linux/WSL2；Solar Windows 图形工具没有后台接入，Windows 主机调查使用 WinRM HTTPS 固定模板。
+
+[完整部署与操作手册](DEPLOY.md)

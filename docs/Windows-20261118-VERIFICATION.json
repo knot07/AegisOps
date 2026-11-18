@@ -1,0 +1,13 @@
+{
+  "platform": "Windows",
+  "version": "2026.11.18",
+  "bootstrap": true,
+  "memberLoginAndPermission": true,
+  "assetCRUD": true,
+  "noBundledCredentials": true,
+  "reaNotBundled": true,
+  "mergedLedger": true,
+  "browserRoutes": 9,
+  "browserErrors": [],
+  "verifiedAt": "2026-11-18T10:08:41.080Z"
+}

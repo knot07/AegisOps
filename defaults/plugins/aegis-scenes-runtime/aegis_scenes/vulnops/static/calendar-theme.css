@@ -1,0 +1,17 @@
+/* Calendar chrome shared by single date/time and date-range filters. */
+:is(.aegis-date-trigger,.date-range-trigger){box-sizing:border-box;height:36px!important;min-height:36px!important;border:1px solid #e2e6e4!important;border-radius:10px!important;background:#fff!important;color:#596368!important;font-size:13px!important;font-weight:400!important;line-height:20px!important;padding:7px 12px!important;gap:8px!important}
+:is(.aegis-date-trigger,.date-range-trigger) svg{width:16px;height:16px;color:#879680}
+:is(.aegis-date-trigger,.date-range-trigger):hover,:is(.aegis-date-trigger,.date-range-trigger)[aria-expanded=true]{border-color:#86aa67!important;box-shadow:0 0 0 3px #86aa671c!important}
+:is(.aegis-date-panel,.range-calendar){font-family:"SF Pro Display","SF Pro Text","PingFang SC",-apple-system,BlinkMacSystemFont,"Noto Sans SC","Microsoft YaHei",sans-serif;font-size:13px;border:1px solid #e2e6e4!important;border-radius:16px!important;background:#fff!important;color:#344238!important;box-shadow:0 14px 45px #23351e24!important}
+:is(.aegis-date-panel header,.calendar-title){font-size:13px!important;color:#53684a!important;background:linear-gradient(115deg,#f1f7e8,#fff)!important;border-bottom:1px solid #e7eddf}
+:is(.aegis-calendar-month,.calendar-months h3){font-size:13px!important;font-weight:600!important;color:#43583a!important}
+:is(.aegis-calendar-week,.calendar-week){font-size:11px!important;color:#87947d!important}
+:is(.aegis-calendar-grid button,.calendar-days button){height:32px!important;min-height:32px!important;padding:0!important;border-radius:8px!important;font-size:12px!important;line-height:20px!important;color:#596e4e;box-shadow:none!important}
+:is(.aegis-calendar-grid button[aria-selected=true],.calendar-days button.edge){background:linear-gradient(115deg,#c9e89c,#b4d77c)!important;border-color:#acca79!important;color:#365324!important;font-weight:600!important}
+:is(.aegis-calendar-grid button,.calendar-days button):hover{background:#edf5e1!important;color:#49683a!important}
+:is(.aegis-calendar-grid button[aria-current=date],.calendar-days button[aria-current=date]){border:1px solid #a9c486!important}
+:is(.aegis-calendar-grid button[data-outside=true]){color:#bec8b7!important}
+:is(.aegis-date-panel footer button,.calendar-footer button){height:32px!important;min-height:32px!important;border:1px solid #e2e6e4!important;border-radius:8px!important;padding:5px 12px!important;font-size:12px!important;line-height:20px!important;color:#66745d;background:#fff}
+:is(.aegis-date-panel footer .aegis-calendar-confirm,.calendar-footer button.primary){background:linear-gradient(115deg,#c9e89c,#b4d77c)!important;border-color:#acca79!important;color:#365324!important;font-weight:500!important}
+.aegis-calendar-time input{height:30px;border-radius:8px;border-color:#e2e6e4;background:#fff;color:#405736}
+.dark .aegis-date-panel{background:#263025!important;border-color:#435238!important;color:#c8d4bf!important}.dark .aegis-date-trigger{background:#293424!important;color:#bac7ad!important;border-color:#435238!important}

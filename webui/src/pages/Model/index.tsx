@@ -73,7 +73,6 @@ function isCatalogBaseUrlRequired(providerId: string): boolean {
 
 const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
 const THREATBOOK_LLM_PROVIDER_IDS = new Set(['threatbook-cn-llm', 'threatbook-io-llm']);
-const MODEL_USAGE_PORTAL_URL = 'https://portal.agentaegisops.com';
 const THREATBOOK_FREE_KEY_URL = 'https://portal.agentaegisops.com/';
 
 function isAzureProviderId(providerId: string): boolean {
@@ -140,7 +139,6 @@ export default function ModelPage() {
   const { providers, connectedIds, loading, error, refetch } = useProviders();
   const toast = useToast();
   const { t } = useTranslation('model');
-  const { t: tNav } = useTranslation('nav');
   // Members may run connection tests but change no model configuration: the
   // backend keeps credentials, providers, models and default models admin-only.
   const { user } = useAuth();
@@ -557,7 +555,6 @@ export default function ModelPage() {
         icon={<Brain className="w-8 h-8" />}
         action={
           <div className="flex items-center gap-2">
-            <a href={MODEL_USAGE_PORTAL_URL} target="_blank" rel="noopener noreferrer" className="yushu-usage-link flex items-center gap-2 rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-600" title={tNav('modelUsageHint')}><DollarSign className="h-4 w-4" />{tNav('modelUsage')}<ExternalLink className="h-3.5 w-3.5" /></a>
             {isAdmin && (
               <button
                 onClick={() => setShowAddProvider(true)}

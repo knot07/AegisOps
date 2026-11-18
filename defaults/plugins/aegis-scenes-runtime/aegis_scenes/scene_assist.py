@@ -84,3 +84,15 @@ def register(router):
         try:
             async with semaphore:return await asyncio.to_thread(answer,kind,turns,context)
         except Exception:raise HTTPException(502,'AI 暂时无法回答，请检查默认模型连接后重试；已填写内容保留')
+
+
+def register_scene_logos(router):
+    from fastapi import Request,HTTPException
+    from fastapi.responses import FileResponse
+    from aegisops.server.auth import require_user
+    from pathlib import Path
+    @router.get('/api/scenes/assistant/logos/{kind}.svg')
+    async def scene_logo(kind:str,request:Request):
+        require_user(request)
+        if kind not in {'review','vulnops','incident','intelligence'}:raise HTTPException(404,'图标不存在')
+        return FileResponse(Path(__file__).parent/'static/scene-logos'/(kind+'.svg'),media_type='image/svg+xml')

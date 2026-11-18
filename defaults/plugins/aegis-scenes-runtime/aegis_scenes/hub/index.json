@@ -114,6 +114,44 @@
       "trust": "community",
       "riskLevel": "high",
       "manifestPath": "plugins/components/incident-response-scene/manifest.json"
+    },
+    {
+      "id": "threat_intelligence",
+      "type": "webui",
+      "name": "威胁情报",
+      "nameCn": "威胁情报",
+      "description": "漏洞情报、资产影响与核实整改闭环",
+      "descriptionCn": "漏洞情报、资产影响与核实整改闭环",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "community",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/webuis/threat_intelligence/manifest.json"
+    },
+    {
+      "id": "threat-intelligence-scene",
+      "type": "component",
+      "name": "威胁情报",
+      "nameCn": "威胁情报",
+      "description": "漏洞情报、资产影响与核实整改闭环",
+      "descriptionCn": "漏洞情报、资产影响与核实整改闭环",
+      "version": "1.0.0",
+      "category": "workflow-automation",
+      "tags": [
+        "integration"
+      ],
+      "useCases": [
+        "security-reporting"
+      ],
+      "trust": "community",
+      "riskLevel": "medium",
+      "manifestPath": "plugins/components/threat-intelligence-scene/manifest.json"
     }
   ]
 }

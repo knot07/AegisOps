@@ -12,7 +12,7 @@ def context(cid):
     with ir.db() as c:rows=[dict(x) for x in c.execute('SELECT * FROM evidence WHERE case_id=? ORDER BY created',(cid,))]
     items=[]
     for row in rows:
-        if row['kind']=='sample':continue
+        if row['kind'] in {'sample','forensic_bundle'}:continue
         text=ir.verified_bytes(row).decode('utf-8','replace')
         # Preserve the beginning and end when a collector is verbose.
         if len(text)>14000:text=text[:10000]+'\n[...context truncated...]\n'+text[-4000:]

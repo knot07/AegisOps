@@ -52,6 +52,49 @@ var useLanguage = sdk.useLanguage;
 var usePaneActive = sdk.usePaneActive;
 var useServerEvents = sdk.useServerEvents;
 
+// src/model-brands.ts
+var brands = { "deepseek": { "id": "deepseek", "name": "DeepSeek", "accent": "#4267c7", "soft": "#edf2ff", "asset": "deepseek-color" }, "qwen": { "id": "qwen", "name": "\u901A\u4E49\u5343\u95EE", "accent": "#7754c6", "soft": "#f3effc", "asset": "qwen-color" }, "zhipu": { "id": "zhipu", "name": "\u667A\u8C31 GLM", "accent": "#496ec2", "soft": "#eff3fe", "asset": "zhipu-color" }, "minimax": { "id": "minimax", "name": "MiniMax", "accent": "#c16780", "soft": "#fcf0f3", "asset": "minimax-color" }, "stepfun": { "id": "stepfun", "name": "\u9636\u8DC3\u661F\u8FB0", "accent": "#497bd0", "soft": "#eff5ff", "asset": "stepfun-color" }, "doubao": { "id": "doubao", "name": "\u5B57\u8282\u8C46\u5305", "accent": "#4b82ce", "soft": "#edf4ff", "asset": "doubao-color" }, "wenxin": { "id": "wenxin", "name": "\u767E\u5EA6\u6587\u5FC3", "accent": "#426adb", "soft": "#edf1ff", "asset": "wenxin-color" }, "hunyuan": { "id": "hunyuan", "name": "\u817E\u8BAF\u6DF7\u5143", "accent": "#428bd4", "soft": "#edf6ff", "asset": "hunyuan-color" }, "spark": { "id": "spark", "name": "\u8BAF\u98DE\u661F\u706B", "accent": "#3989c4", "soft": "#eef7fc", "asset": "spark-color" }, "yi": { "id": "yi", "name": "\u96F6\u4E00\u4E07\u7269", "accent": "#548ac5", "soft": "#eef5fd", "asset": "yi-color" }, "baichuan": { "id": "baichuan", "name": "\u767E\u5DDD", "accent": "#c77d3b", "soft": "#fff4e8", "asset": "baichuan-color" }, "internlm": { "id": "internlm", "name": "\u4E66\u751F\u6D66\u8BED", "accent": "#5782cc", "soft": "#eef4ff", "asset": "internlm-color" }, "mistral": { "id": "mistral", "name": "Mistral", "accent": "#d17d31", "soft": "#fff2df", "asset": "mistral-color" }, "meta": { "id": "meta", "name": "Meta Llama", "accent": "#327ad3", "soft": "#edf4ff", "asset": "meta-color" }, "nvidia": { "id": "nvidia", "name": "NVIDIA", "accent": "#71a42e", "soft": "#f1f7e7", "asset": "nvidia-color" }, "perplexity": { "id": "perplexity", "name": "Perplexity", "accent": "#328a91", "soft": "#eaf7f7", "asset": "perplexity-color" }, "ai21": { "id": "ai21", "name": "AI21 Labs", "accent": "#91575d", "soft": "#faedef", "asset": "ai21-brand-color" }, "stability": { "id": "stability", "name": "Stability AI", "accent": "#7e55bf", "soft": "#f4effb", "asset": "stability-color" }, "xiaomi": { "id": "xiaomi", "name": "\u5C0F\u7C73 MiMo", "accent": "#d17b32", "soft": "#fff3e8", "asset": "xiaomimimo" }, "longcat": { "id": "longcat", "name": "\u7F8E\u56E2 LongCat", "accent": "#c29725", "soft": "#fff8df", "asset": "longcat-color" }, "huawei": { "id": "huawei", "name": "\u534E\u4E3A\u76D8\u53E4", "accent": "#be5c5a", "soft": "#fcf0ef", "asset": "huawei-color" }, "anthropic": { "id": "anthropic", "name": "Anthropic Claude", "accent": "#ad7354", "soft": "#fcf2e9", "asset": "anthropic" }, "google": { "id": "google", "name": "Google Gemini", "accent": "#4478c8", "soft": "#eff4fe", "asset": "google-color" }, "moonshot": { "id": "moonshot", "name": "\u6708\u4E4B\u6697\u9762 Kimi", "accent": "#546bb3", "soft": "#f0f3fd", "asset": "moonshot" }, "cohere": { "id": "cohere", "name": "Cohere", "accent": "#51876e", "soft": "#eff7ef", "asset": "cohere-color" }, "grok": { "id": "grok", "name": "xAI Grok", "accent": "#526075", "soft": "#f0f3f8", "asset": "grok" }, "openai": { "id": "openai", "name": "OpenAI", "accent": "#25846e", "soft": "#edf7f3", "asset": "openai" }, "azure": { "id": "azure", "name": "Microsoft Azure", "accent": "#258ec0", "soft": "#ebf7fd", "asset": "azure-color" }, "threatbook": { "id": "threatbook", "name": "\u5FAE\u6B65 ThreatBook", "accent": "#c86353", "soft": "#fcf0ec", "asset": "threatbook" }, "ollama": { "id": "ollama", "name": "Ollama", "accent": "#62726e", "soft": "#f1f6f3", "asset": "ollama" }, "openrouter": { "id": "openrouter", "name": "OpenRouter", "accent": "#67658d", "soft": "#f2f1fa", "asset": "openrouter-color" }, "siliconcloud": { "id": "siliconcloud", "name": "\u7845\u57FA\u6D41\u52A8", "accent": "#745fc0", "soft": "#f3effb", "asset": "siliconcloud-color" }, "volcengine": { "id": "volcengine", "name": "\u706B\u5C71\u5F15\u64CE", "accent": "#4186c4", "soft": "#edf5fd", "asset": "volcengine-color" }, "gitee": { "id": "gitee", "name": "Gitee AI", "accent": "#bb575d", "soft": "#fbf0ef", "asset": "giteeai" }, "compatible": { "id": "compatible", "name": "\u517C\u5BB9\u6A21\u578B\u670D\u52A1", "accent": "#8462bf", "soft": "#f4f0fc" }, "cherry": { "id": "cherry", "name": "Cherry", "accent": "#bf5772", "soft": "#fbf0f3" }, "custom": { "id": "custom", "name": "\u81EA\u5B9A\u4E49\u6A21\u578B\u670D\u52A1", "accent": "#738b53", "soft": "#f3f7ed" } };
+function modelBrand(value) {
+  const s = value.toLowerCase();
+  if (/deepseek/i.test(s)) return brands.deepseek;
+  if (/qwen|qwq|qvq|通义|百炼|dashscope/i.test(s)) return brands.qwen;
+  if (/glm|zhipu|智谱/i.test(s)) return brands.zhipu;
+  if (/minimax|abab|海螺/i.test(s)) return brands.minimax;
+  if (/stepfun|step[-_ ]|阶跃/i.test(s)) return brands.stepfun;
+  if (/doubao|豆包|seed[-_ ]/i.test(s)) return brands.doubao;
+  if (/ernie|wenxin|文心|千帆|qianfan/i.test(s)) return brands.wenxin;
+  if (/hunyuan|混元/i.test(s)) return brands.hunyuan;
+  if (/spark|星火|讯飞|iflytek/i.test(s)) return brands.spark;
+  if (/(^|[/ :])yi[-_ ]|零一万物|01ai/i.test(s)) return brands.yi;
+  if (/baichuan|百川/i.test(s)) return brands.baichuan;
+  if (/internlm|书生|浦语/i.test(s)) return brands.internlm;
+  if (/mistral|mixtral|codestral|ministral|devstral/i.test(s)) return brands.mistral;
+  if (/llama|meta[-_ ]/i.test(s)) return brands.meta;
+  if (/nemotron|nvidia/i.test(s)) return brands.nvidia;
+  if (/perplexity|sonar[-_ ]/i.test(s)) return brands.perplexity;
+  if (/ai21|jamba/i.test(s)) return brands.ai21;
+  if (/stability|stable[-_ ]/i.test(s)) return brands.stability;
+  if (/mimo|xiaomi|小米/i.test(s)) return brands.xiaomi;
+  if (/longcat|美团/i.test(s)) return brands.longcat;
+  if (/pangu|盘古|huawei/i.test(s)) return brands.huawei;
+  if (/anthropic|claude/i.test(s)) return brands.anthropic;
+  if (/google|gemini|gemma/i.test(s)) return brands.google;
+  if (/moonshot|kimi|月之暗面/i.test(s)) return brands.moonshot;
+  if (/cohere|command[-_ ]/i.test(s)) return brands.cohere;
+  if (/grok|xai/i.test(s)) return brands.grok;
+  if (/openai|gpt[-_ ]|(^|[/ :])o[1-9]([-_ :]|$)|chatgpt/i.test(s)) return brands.openai;
+  if (/azure/i.test(s)) return brands.azure;
+  if (/threatbook|微步/i.test(s)) return brands.threatbook;
+  if (/ollama/i.test(s)) return brands.ollama;
+  if (/openrouter/i.test(s)) return brands.openrouter;
+  if (/siliconflow|siliconcloud|硅基/i.test(s)) return brands.siliconcloud;
+  if (/volcengine|火山/i.test(s)) return brands.volcengine;
+  if (/gitee/i.test(s)) return brands.gitee;
+  if (/compatible/i.test(s)) return brands.compatible;
+  if (/cherry/i.test(s)) return brands.cherry;
+  return brands.custom;
+}
+
 // ../../../../../../projects/aegisops/aegisops/contracts/webui/shims/jsx-runtime.js
 var runtime = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__;
 if (!runtime?.jsx || !runtime?.jsxs) {
@@ -632,7 +675,7 @@ function downloadCsv(rows) {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `TDP_AI_${Date.now()}.csv`;
+  link.download = `AegisOps_AI_${Date.now()}.csv`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -1189,7 +1232,7 @@ function Page() {
   const detail = detailIp ? rows.find((r) => rowKey(r) === detailIp) : void 0;
   const cards = [
     ["\u6C47\u603B\u653B\u51FB", tdp.event_total ?? rows.reduce((s, r) => s + Number(r.count || 0), 0)],
-    ["\u6D41\u91CF\u68C0\u6D4B TDP", tdp.event_total ?? 0],
+    ["\u8BBE\u5907\u544A\u8B66", tdp.event_total ?? 0],
     ["\u653B\u51FB IP \u6570", rows.length],
     ["AI \u5DF2\u7814\u5224", done],
     ["AI \u7814\u5224\u4E2D", pending],
@@ -1197,7 +1240,7 @@ function Page() {
   ];
   const metricCards = [
     { label: "\u6C47\u603B\u653B\u51FB", value: cards[0][1], hint: "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u4E8B\u4EF6\u603B\u91CF", icon: "activity", accent: C.blue, soft: C.blueDark },
-    { label: "\u6D41\u91CF\u68C0\u6D4B TDP", value: cards[1][1], hint: "TDP \u544A\u8B66\u805A\u5408\u8F93\u51FA", icon: "shield", accent: C.cyan, soft: C.cyanDark },
+    { label: "\u8BBE\u5907\u544A\u8B66", value: cards[1][1], hint: "\u5DF2\u63A5\u5165\u8BBE\u5907\u544A\u8B66\u6C47\u603B", icon: "shield", accent: C.cyan, soft: C.cyanDark },
     { label: "\u653B\u51FB IP \u6570", value: cards[2][1], hint: "\u6309\u653B\u51FB\u6E90\u53BB\u91CD\u7EDF\u8BA1", icon: "chart", accent: C.red, soft: C.redDark },
     { label: "AI \u5DF2\u7814\u5224", value: cards[3][1], hint: "\u5DF2\u5F62\u6210\u5904\u7F6E\u5EFA\u8BAE", icon: "bot", accent: C.green, soft: C.greenDark },
     { label: "AI \u7814\u5224\u4E2D", value: cards[4][1], hint: "\u6B63\u5728\u6392\u961F\u6216\u8FD0\u884C", icon: "spark", accent: C.orange, soft: C.orangeDark },
@@ -1284,7 +1327,7 @@ function Page() {
     /* @__PURE__ */ jsxs("header", { style: topbarStyle, children: [
       /* @__PURE__ */ jsxs("div", { style: brandStyle, children: [
         /* @__PURE__ */ jsxs("div", { style: { position: "relative" }, children: [
-          /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u66F4\u6362 Logo", title: "\u70B9\u51FB\u66F4\u6362 Logo", onClick: brandLogo.chooseLogo, style: brandLogoStyle, children: brandLogo.logo ? /* @__PURE__ */ jsx("img", { src: brandLogo.logo, alt: "\u5DE5\u4F5C\u53F0 Logo", style: { maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: "contain" } }) : /* @__PURE__ */ jsx("span", { style: { color: C.textDim, fontSize: 12, fontWeight: 600 }, children: "\uFF0B \u4E0A\u4F20 Logo" }) }),
+          /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u66F4\u6362 Logo", title: "\u70B9\u51FB\u66F4\u6362 Logo", onClick: brandLogo.chooseLogo, style: brandLogoStyle, children: brandLogo.logo ? /* @__PURE__ */ jsx("img", { src: brandLogo.logo, alt: "\u5DE5\u4F5C\u53F0 Logo", style: { maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: "contain" } }) : /* @__PURE__ */ jsx("img", { "data-scene-logo": "review", src: "/api/scenes/assistant/logos/review.svg", alt: "\u6001\u52BF\u611F\u77E5 AI \u7814\u5224 Logo", style: { width: 48, height: 48, objectFit: "contain" } }) }),
           /* @__PURE__ */ jsx("input", { ref: brandLogo.inputRef, type: "file", accept: "image/png,image/jpeg,image/webp,image/svg+xml", onChange: brandLogo.onLogoChange, style: { display: "none" } }),
           brandLogo.logo && /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u6062\u590D\u9ED8\u8BA4 Logo", title: "\u6062\u590D\u9ED8\u8BA4 Logo", onClick: brandLogo.resetLogo, style: resetLogoButtonStyle, children: "\xD7" })
         ] }),
@@ -1375,11 +1418,7 @@ function Page() {
           ] }),
           /* @__PURE__ */ jsx("span", { style: { width: 48, height: 26, padding: 3, borderRadius: 999, background: autoJudge ? C.blue : C.borderLight, flex: "0 0 auto", display: "flex", justifyContent: autoJudge ? "flex-end" : "flex-start", transition: ".2s" }, children: /* @__PURE__ */ jsx("span", { style: { display: "block", width: 20, height: 20, borderRadius: "50%", background: "#fff", boxShadow: "0 3px 8px rgba(28,44,66,.18)" } }) })
         ] }),
-        /* @__PURE__ */ jsxs("div", { "aria-label": "\u5F53\u524DAI\u6A21\u578B", title: currentModel.modelId ? `${currentModel.providerId}/${currentModel.modelId}` : currentModel.error, style: syncFieldStyle, children: [
-          /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: "\u5F53\u524DAI\u6A21\u578B" }),
-          /* @__PURE__ */ jsx("span", { style: { display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: currentModel.modelId ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }, children: currentModel.modelId || currentModel.error || "\u8BFB\u53D6\u4E2D" }),
-          currentModel.providerId && /* @__PURE__ */ jsx("small", { style: { color: C.textMuted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: currentModel.providerId })
-        ] }),
+        /* @__PURE__ */ jsx(CurrentModelCard, { model: currentModel }),
         /* @__PURE__ */ jsxs("div", { style: { ...syncFieldStyle, borderColor: error ? C.red : C.border }, children: [
           /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: error ? "\u8FDE\u63A5\u5F02\u5E38" : "\u6700\u8FD1\u66F4\u65B0" }),
           /* @__PURE__ */ jsx("span", { style: { color: error ? C.redLight : C.textMid, fontSize: 14, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, children: error || fmtTime(updatedAt) })
@@ -1527,7 +1566,7 @@ function Page() {
 var topbarStyle = { minHeight: 80, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, padding: "18px 28px", background: C.panel, borderBottom: `1px solid ${C.border}`, position: "sticky", top: 0, zIndex: 10, flexWrap: "wrap" };
 var brandStyle = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 14, minWidth: 0 };
 var brandTitleStyle = { margin: 0, color: C.text, fontSize: 22, lineHeight: 1.3, fontWeight: 720, letterSpacing: 0 };
-var brandLogoStyle = { minWidth: 44, height: 40, display: "grid", placeItems: "center", borderRadius: 6, padding: "0 10px", background: C.panel, border: `1px solid ${C.borderLight}`, boxShadow: "0 4px 12px rgba(28,44,66,.06)" };
+var brandLogoStyle = { minWidth: 44, height: 52, display: "grid", placeItems: "center", borderRadius: 0, padding: 0, background: "transparent", border: 0, boxShadow: "none" };
 var resetLogoButtonStyle = { position: "absolute", top: -7, right: -7, width: 18, height: 18, display: "grid", placeItems: "center", padding: 0, border: `1px solid ${C.border}`, borderRadius: "50%", background: C.panel, color: C.textDim, cursor: "pointer", fontSize: 14, lineHeight: 1 };
 var chipStyle = { minHeight: 32, maxWidth: "100%", boxSizing: "border-box", padding: "6px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.panelSoft, display: "inline-flex", alignItems: "center", gap: 8, overflowWrap: "anywhere", color: C.textDim, fontSize: 12 };
 var statusDotStyle = { width: 7, height: 7, borderRadius: "50%", flex: "0 0 auto" };
@@ -1802,6 +1841,28 @@ function EvidenceSection({ title, items, tone }) {
       /* @__PURE__ */ jsx("span", { style: { ...checkStyle, color: C.textMuted, background: C.panelSoft }, children: index + 1 }),
       /* @__PURE__ */ jsx("span", { style: { minWidth: 0 }, children: evidenceText(item) })
     ] }, index)) : /* @__PURE__ */ jsx("div", { style: { color: C.textMuted, fontSize: 13 }, children: "\u65E0" }) })
+  ] });
+}
+function CurrentModelCard({ model }) {
+  const initial = modelBrand(model.modelId || ""), b = initial.id !== "custom" ? initial : modelBrand(model.providerId || "");
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [b.asset]);
+  return /* @__PURE__ */ jsxs("div", { "aria-label": "\u5F53\u524DAI\u6A21\u578B", "data-current-model-brand": b.id, title: model.modelId ? `${model.providerId}/${model.modelId}` : model.error, style: { ...syncFieldStyle, display: "flex", alignItems: "center", gap: 13, background: `linear-gradient(120deg,${b.soft},#fff)`, borderColor: `color-mix(in srgb, ${b.accent} 18%, white)` }, children: [
+    /* @__PURE__ */ jsx("span", { style: { width: 42, height: 42, display: "grid", placeItems: "center", flexShrink: 0, background: "#ffffffb0", borderRadius: 10, padding: 6 }, children: b.asset && !failed ? /* @__PURE__ */ jsx("img", { src: "/model-logos/" + b.asset + ".svg", alt: b.name + " Logo", onError: () => setFailed(true), style: { width: "100%", height: "100%", objectFit: "contain" } }) : /* @__PURE__ */ jsxs("svg", { viewBox: "0 0 32 32", fill: b.accent, width: "28", height: "28", children: [
+      /* @__PURE__ */ jsx("path", { d: "M16 2 29 9v14l-13 7L3 23V9Zm0 6-8 4v8l8 4 8-4v-8Z", fillRule: "evenodd" }),
+      /* @__PURE__ */ jsx("path", { d: "m16 11 5 3v5l-5 3-5-3v-5Z" })
+    ] }) }),
+    /* @__PURE__ */ jsxs("div", { style: { minWidth: 0 }, children: [
+      /* @__PURE__ */ jsxs("span", { style: { ...syncLabelStyle, fontSize: 11 }, children: [
+        "\u5F53\u524D AI \u6A21\u578B \xB7 ",
+        b.name
+      ] }),
+      /* @__PURE__ */ jsx("span", { style: { display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: b.accent, fontSize: 15, fontWeight: 650, marginTop: 3 }, children: model.modelId || model.error || "\u8BFB\u53D6\u4E2D" }),
+      model.providerId && /* @__PURE__ */ jsxs("small", { style: { display: "block", color: C.textMuted, fontSize: 11, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: [
+        "\u63A5\u5165\u6E20\u9053 \xB7 ",
+        model.providerId
+      ] })
+    ] })
   ] });
 }
 

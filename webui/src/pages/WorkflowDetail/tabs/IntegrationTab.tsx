@@ -14,7 +14,6 @@ import {
   Check,
   ChevronDown,
   ChevronRight,
-  Bot,
   Globe,
   Loader2,
   Play,
@@ -407,7 +406,7 @@ function CardGuidePanel({
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 items-start gap-2">
           <span className="mt-0.5 inline-flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-lg border border-gray-200 bg-white text-gray-600">
-            <Bot className="h-3.5 w-3.5" />
+            <img src="/favicon.svg" alt="Atlas" aria-hidden="true" className="h-5 w-5 shrink-0 object-contain" />
           </span>
           <div className="min-w-0">
             <div className="text-xs font-semibold text-zinc-800">{t('detail.run.cardGuideTitle')}</div>
@@ -419,7 +418,7 @@ function CardGuidePanel({
           onClick={() => onGuidePrompt(action.prompt, action.displayLabel)}
           className="inline-flex h-8 flex-shrink-0 items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 text-xs font-semibold text-gray-700 hover:border-gray-300 hover:bg-gray-50"
         >
-          <Bot className="h-3.5 w-3.5" />
+          <img src="/favicon.svg" alt="Atlas" aria-hidden="true" className="h-5 w-5 shrink-0 object-contain" />
           {action.label}
         </button>
       </div>
@@ -453,8 +452,8 @@ function PublishGuidePanel({
           ? 'mb-4 flex flex-col items-center gap-2'
           : 'mb-2 flex items-start gap-2'
       }>
-        <span className={`${isEmpty ? 'h-9 w-9' : 'mt-0.5 h-7 w-7'} inline-flex flex-shrink-0 items-center justify-center rounded-lg border border-rose-100 bg-rose-50 text-rose-500`}>
-          <Bot className="h-3.5 w-3.5" />
+        <span className={`${isEmpty ? 'h-9 w-9' : 'mt-0.5 h-7 w-7'} inline-flex flex-shrink-0 items-center justify-center rounded-lg border border-[#e0ead5] bg-[#f3f8ec] text-[#638447]`}>
+          <img src="/favicon.svg" alt="Atlas" aria-hidden="true" className="h-5 w-5 shrink-0 object-contain" />
         </span>
         <div className="min-w-0">
           <div className={`${isEmpty ? 'text-sm' : 'text-xs'} font-semibold text-zinc-800`}>

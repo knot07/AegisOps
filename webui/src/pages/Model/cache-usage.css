@@ -1,0 +1,23 @@
+
+.aegis-cache-popover{border-radius:18px;border-color:#e1e9d9;box-shadow:0 14px 48px #243e1c1a;animation:cache-reveal .16s ease-out;font-family:inherit}
+.aegis-cache-panel{padding:22px;color:#384631;font-size:13px;line-height:1.6}
+.aegis-cache-panel h2{font-size:15px;font-weight:600;color:#34442d;gap:9px}
+.aegis-cache-panel h2 svg{color:#73994e}
+.aegis-cache-panel p{font-size:12px;line-height:1.75;color:#839078}
+.aegis-cache-panel>div:first-child>button{height:32px;padding:0 10px;border-radius:9px;border-color:#dce6d2;font-size:12px;background:#f6faef;color:#648148;gap:6px}
+.aegis-cache-total{display:flex;align-items:center;justify-content:space-between;margin:18px 0 12px;padding:13px 15px;border:1px solid #e0ead5;border-radius:12px;background:linear-gradient(115deg,#f1f8e8,#fafcf6)}
+.aegis-cache-total>span:first-child{font-size:12px;color:#7c8a71}
+.aegis-cache-total>span:last-child{font-size:22px;font-weight:600;color:#486b2b;font-variant-numeric:tabular-nums}
+.aegis-cache-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:0}
+.aegis-cache-metrics>div{padding:13px 14px;border:1px solid #edf0e8;border-radius:11px;background:#fafbf8;min-width:0}
+.aegis-cache-metrics dt{font-size:12px;line-height:1.5;color:#7c8874}
+.aegis-cache-metrics dd{font-size:20px;line-height:1.5;font-weight:550;color:#3f5135;margin:6px 0 0;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.aegis-cache-metrics [data-testid=model-cache-rate]{color:#638d3f;font-size:24px;font-weight:600}
+.aegis-cache-metrics [data-testid=model-cache-unknown]{font-size:11px;font-weight:400;color:#929d89;margin-top:4px}
+.aegis-cache-method{border-top:1px solid #e9eee3;margin-top:14px;padding-top:12px;color:#7b8872}
+.aegis-cache-method summary{cursor:pointer;font-size:12px;font-weight:500;color:#6e835b}
+.aegis-cache-method p{font-size:11px;line-height:1.8;margin-top:10px}
+.dark .aegis-cache-panel{color:#d5dfcf}.dark .aegis-cache-panel h2,.dark .aegis-cache-metrics dd{color:#d5dfcf}.dark .aegis-cache-total,.dark .aegis-cache-metrics>div{background:#232b20;border-color:#384332}.dark .aegis-cache-total>span:last-child,.dark .aegis-cache-metrics [data-testid=model-cache-rate]{color:#b4d77c}
+@keyframes cache-reveal{from{opacity:0;transform:translateY(5px)}to{opacity:1;transform:translateY(0)}}
+@media(prefers-reduced-motion:reduce){.aegis-cache-popover{animation:none}}
+@media(max-width:420px){.aegis-cache-panel{padding:16px}.aegis-cache-metrics>div{padding:11px 10px}.aegis-cache-metrics dt{font-size:11px}}

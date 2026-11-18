@@ -1,6 +1,6 @@
 [project]
 name = "aegisops"
-version = "2026.11.11"
+version = "2026.11.18"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "AegisOps Team", email = "team@example.com"}
@@ -158,3 +158,6 @@ markers = [
     "slow: marks tests as slow running (>30s per test)",
     "live: marks tests as requiring live services; enable with AEGISOPS_LIVE_TEST=1 and running dev server",
 ]
+
+[project.entry-points."aegisops.plugins"]
+aegis-rea = "aegis_rea:register"

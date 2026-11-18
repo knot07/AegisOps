@@ -1,8 +1,8 @@
-import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ListTodo, Play, RotateCcw, XCircle, Trash2,
-  ChevronLeft, ChevronRight, GripVertical, X,
+  ChevronLeft, ChevronRight, X,
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
@@ -14,6 +14,8 @@ import { copyText } from '@/utils/clipboard';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 import { extractErrorMessage } from '@/utils/error';
+import ModuleEmblem from '@/components/common/ModuleEmblem';
+import './execution-detail.css';
 import ExecutionFilters, { type ExecutionSearchParams } from './ExecutionFilters';
 
 const DETAIL_POLL_INTERVAL_MS = 30000;
@@ -375,74 +377,45 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
   onAction: (action: string, taskId: string) => void;
   onRefresh?: () => void;
 }) {
-  const DRAWER_DEFAULT_WIDTH = 640;
-  const DRAWER_MIN_WIDTH = 480;
-  const DRAWER_MAX_WIDTH = 960;
   const { t } = useTranslation('task');
   const sessionId = task.sessionID;
   const isWorkflowExecution = task.executionMode === 'workflow';
   const shouldStreamSession = Boolean(sessionId);
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const panel = document.querySelector<HTMLElement>('.execution-drawer');
+    panel?.querySelector<HTMLElement>('button')?.focus();
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') { e.preventDefault(); onClose(); }
+      if (e.key === 'Tab' && panel) {
+        const items = Array.from(panel.querySelectorAll<HTMLElement>('button:not(:disabled),a[href],summary,input,textarea,[tabindex="0"]')).filter(el => el.getClientRects().length > 0);
+        const first=items[0], last=items[items.length-1];
+        if(e.shiftKey && document.activeElement===first){e.preventDefault();last?.focus();}
+        else if(!e.shiftKey && document.activeElement===last){e.preventDefault();first?.focus();}
+      }
+    };
+    document.addEventListener('keydown', handleKey);
+    return () => {document.removeEventListener('keydown',handleKey);previous?.focus();};
+  }, [onClose]);
   const emptyText = ['pending', 'queued'].includes(task.status)
     ? t('queued.detailWaiting')
     : t('queued.detailNoRecord');
-  const [drawerWidth, setDrawerWidth] = useState(DRAWER_DEFAULT_WIDTH);
-  const [isDragging, setIsDragging] = useState(false);
-  const dragStartX = useRef(0);
-  const dragStartWidth = useRef(DRAWER_DEFAULT_WIDTH);
-  const drawerWidthRef = useRef(drawerWidth);
-
-  drawerWidthRef.current = drawerWidth;
-
-  const handleDragStart = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    setIsDragging(true);
-    dragStartX.current = e.clientX;
-    dragStartWidth.current = drawerWidthRef.current;
-
-    const handleMouseMove = (ev: MouseEvent) => {
-      const delta = dragStartX.current - ev.clientX;
-      setDrawerWidth(Math.min(DRAWER_MAX_WIDTH, Math.max(DRAWER_MIN_WIDTH, dragStartWidth.current + delta)));
-    };
-
-    const handleMouseUp = () => {
-      setIsDragging(false);
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-  }, []);
-
   return (
     <>
-      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} />
+      <div className="execution-backdrop fixed inset-0 z-40" onClick={onClose} />
       <div data-yushu-drawer
-        className="fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl transition-colors max-md:!w-full"
-        style={{ width: drawerWidth, maxWidth: '100%' }}
+        role="dialog" aria-modal="true" aria-label={task.title} className="execution-drawer fixed right-0 top-0 bottom-0 z-50 flex flex-col bg-white shadow-2xl max-md:!w-full"
+        style={{ width: 720, maxWidth: '100%' }}
         onClick={(e) => e.stopPropagation()}
       >
-        <div
-          className={`absolute -left-1 top-0 bottom-0 z-10 w-3 cursor-ew-resize transition-colors max-md:hidden ${
-            isDragging ? 'bg-red-500/10' : 'hover:bg-red-400/10'
-          }`}
-          onMouseDown={handleDragStart}
-        >
-          <div className={`absolute inset-y-0 left-1/2 w-px -translate-x-1/2 ${
-            isDragging ? 'bg-red-500' : 'bg-gray-200'
-          }`} />
-          <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2">
-            <GripVertical className={`w-3 h-6 ${isDragging ? 'text-red-500' : 'text-gray-300 hover:text-gray-500'}`} />
-          </div>
-        </div>
-        <div className="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0 max-md:px-4">
-          <h3 className="font-semibold text-gray-900 truncate pr-2">{task.title}</h3>
-          <button onClick={onClose} className="p-1 rounded hover:bg-gray-100 flex-shrink-0">
+        <div className="execution-heading flex items-center justify-between px-6 py-4 border-b flex-shrink-0 max-md:px-4">
+          <div className="execution-title"><ModuleEmblem kind="task" size="nav"/><div><small>任务中心 · 执行详情</small><h3 className="font-semibold text-gray-900 pr-2">{task.title}</h3></div></div>
+          <button aria-label="关闭执行详情" onClick={onClose} className="execution-close p-1 rounded hover:bg-gray-100 flex-shrink-0">
             <X className="w-4 h-4 text-gray-400" />
           </button>
         </div>
 
-        <div className="px-6 py-4 border-b border-gray-100 flex-shrink-0 space-y-2.5">
+        <div className="execution-meta px-6 py-4 border-b border-gray-100 flex-shrink-0 space-y-2.5">
           <div className="flex items-center gap-2 flex-wrap">
             <StatusBadge status={task.status} />
             <PriorityBadge priority={task.priority} />
@@ -551,89 +524,53 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
     }
   }, [tCommon, toast]);
 
+  const match = parsedResult && typeof parsedResult === 'object' && 'match_result' in parsedResult
+    ? (parsedResult as Record<string, unknown>).match_result : null;
+  const metrics = match && typeof match === 'object' ? match as Record<string, unknown> : null;
   return (
-    <div className="flex-1 min-h-0 overflow-hidden">
-      <div className="h-full overflow-y-auto px-6 py-4">
-        <div className="space-y-4 pb-10">
-          <div className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-            <div className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              {t('queued.workflowId')}
-            </div>
-            <div className="mt-1 break-all font-mono text-sm text-slate-700">
-              {task.workflowID || '--'}
-            </div>
-          </div>
-
-          {hasInputPayload && (
-            <div>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <h4 className="text-sm font-semibold text-gray-700">
-                  {t('queued.workflowInput')}
-                </h4>
-                <button
-                  type="button"
-                  onClick={() => void handleCopy(inputText)}
-                  className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
-                >
-                  {tCommon('button.copy')}
-                </button>
-              </div>
-              <pre className="overflow-x-auto rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
-                {inputText}
-              </pre>
-            </div>
-          )}
-
-          {displayedResultText && (
-            <div>
-              <div className="mb-2 flex items-center justify-between gap-3">
-                <h4 className="text-sm font-semibold text-gray-700">
-                  {t('queued.workflowResult')}
-                </h4>
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => void handleCopy(displayedResultText)}
-                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900"
-                  >
-                    {tCommon('button.copy')}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setShowFormattedResult(true)}
-                    disabled={!formattedResultText || showFormattedResult}
-                    className="rounded-md border border-slate-200 px-2.5 py-1 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-50 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-white disabled:hover:text-slate-600"
-                  >
-                    {t('queued.workflowJsonFormat')}
-                  </button>
-                </div>
-              </div>
-              <pre className="overflow-x-auto whitespace-pre-wrap rounded-lg bg-gray-900 p-4 text-xs text-gray-200">
-                {displayedResultText}
-              </pre>
-            </div>
-          )}
-
-          {task.error && (
-            <div>
-              <h4 className="mb-2 text-sm font-semibold text-red-700">
-                {t('queued.workflowError')}
-              </h4>
-              <div className="rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800 whitespace-pre-wrap">
-                {task.error}
-              </div>
-            </div>
-          )}
-
-          {!task.error && !resultText && (
-            <div className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-500">
-              {emptyText}
-            </div>
-          )}
+    <div className="execution-body flex-1 min-h-0 overflow-y-auto">
+      <section className="execution-overview">
+        <div className="execution-section-title"><ModuleEmblem kind="workflow" size="nav"/><div><h4>工作流执行概览</h4><code>{task.workflowID || '--'}</code></div></div>
+        <div className="execution-time-grid">
+          <div><small>开始时间</small><strong>{task.startedAt ? formatTime(task.startedAt) : '尚未开始'}</strong></div>
+          <div><small>结束时间</small><strong>{task.completedAt ? formatTime(task.completedAt) : '尚未结束'}</strong></div>
+          <div><small>执行耗时</small><strong>{task.durationMs != null ? formatDuration(task.durationMs) : '—'}</strong></div>
         </div>
-      </div>
+      </section>
+      <section className="execution-result">
+        <div className="execution-section-title"><span className="execution-result-mark">{task.status === 'completed' ? '✓' : task.status === 'failed' ? '!' : '…'}</span><div><h4>{t('queued.workflowResult')}</h4><small>{task.status === 'completed' ? '本次执行已完成，以下为实际返回结果' : '以执行状态与实际输出为准'}</small></div></div>
+        {metrics && <div className="execution-metrics">
+          {typeof metrics.checked === 'number' && <div><small>核对情报</small><strong>{metrics.checked.toLocaleString()}<em>条</em></strong></div>}
+          {typeof metrics.count === 'number' && <div><small>新增 / 更新线索</small><strong>{metrics.count.toLocaleString()}<em>条</em></strong></div>}
+          {typeof metrics.since === 'string' && <div><small>匹配起始日期</small><strong className="date-value">{metrics.since}</strong></div>}
+        </div>}
+        {metrics && metrics.count === 0 && <p className="execution-note">本次未产生新的影响线索。匹配依据为已登记产品，结果不等同于资产无漏洞。</p>}
+        {Boolean(parsedResult) && !metrics && <ResultFields value={parsedResult}/>}
+        {!parsedResult && resultText && <div className="execution-prose">{resultText}</div>}
+        {!resultText && !task.error && <div className="execution-pending">{emptyText}</div>}
+        {task.error && <div className="execution-error"><h4>{t('queued.workflowError')}</h4><p>{task.error}</p></div>}
+      </section>
+      {hasInputPayload && <details className="execution-advanced">
+        <summary>{t('queued.workflowInput')}<span>展开查看参数</span></summary>
+        <div className="execution-code-actions"><button type="button" onClick={() => void handleCopy(inputText)}>{tCommon('button.copy')}</button></div>
+        <pre>{inputText}</pre>
+      </details>}
+      {displayedResultText && <details className="execution-advanced">
+        <summary>原始执行输出<span>展开查看 / 复制</span></summary>
+        <div className="execution-code-actions"><button type="button" onClick={() => void handleCopy(displayedResultText)}>{tCommon('button.copy')}</button><button type="button" onClick={() => setShowFormattedResult(true)} disabled={!formattedResultText || showFormattedResult}>{t('queued.workflowJsonFormat')}</button></div>
+        <pre>{displayedResultText}</pre>
+      </details>}
     </div>
   );
+}
+
+const resultLabels: Record<string, string> = {result:'执行结果',match_result:'资产匹配',count:'数量',checked:'已检查',since:'起始日期',keywords:'关键词',search_success:'查询成功',result_count:'结果数量',message:'说明',status:'状态',error:'错误',items:'记录',total:'总数'};
+function ResultFields({value, depth = 0}: {value: unknown; depth?: number}) {
+  if (value === null || value === undefined) return <span className="execution-null">未提供</span>;
+  if (typeof value !== 'object') return <span>{typeof value === 'boolean' ? (value ? '是' : '否') : String(value)}</span>;
+  if (depth >= 4) return <pre>{JSON.stringify(value, null, 2)}</pre>;
+  const entries = Object.entries(value);
+  return <dl className="execution-fields">{entries.slice(0, 30).map(([key, item]) => <div key={key}><dt>{Array.isArray(value) ? `记录 ${Number(key)+1}` : (resultLabels[key] || key)}</dt><dd><ResultFields value={item} depth={depth+1}/></dd></div>)}{entries.length > 30 && <p className="execution-note">其余 {entries.length - 30} 项可在原始输出中查看。</p>}{!entries.length && <span className="execution-null">暂无记录</span>}</dl>;
 }
 
 function getWorkflowInputPayload(task: TaskExecution): Record<string, unknown> {

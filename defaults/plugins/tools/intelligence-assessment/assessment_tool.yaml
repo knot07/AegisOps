@@ -1,0 +1,30 @@
+name: intelligence_asset_assessment
+description: 只读查询已登记资产产品与版本、官方来源情报及候选关联。供 Atlas 核查资产是否受漏洞影响；关键词匹配仅为线索，不代表漏洞存在。不创建资产、不扫描或利用、不修改业务数据。
+category: custom
+enabled: true
+requires_confirmation: false
+inputSchema:
+  type: object
+  additionalProperties: false
+  properties:
+    action:
+      type: string
+      enum: [assets, advisories, candidates]
+    q:
+      type: string
+      maxLength: 200
+    asset_id:
+      type: integer
+      minimum: 0
+    page:
+      type: integer
+      minimum: 1
+    days:
+      type: integer
+      minimum: 1
+      maximum: 3650
+  required: [action]
+handler:
+  type: script
+  script_file: assessment_tool.py
+  function: run

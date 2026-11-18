@@ -187,7 +187,7 @@ export default function WebUIContractWorkspaceHost() {
     : 'h-full min-w-0 overflow-x-auto p-6';
 
   return (
-    <div data-yushu-page="webuicontractworkspacehost" className="bg-zinc-50 dark:bg-zinc-950 h-full min-h-0 overflow-hidden">
+    <div data-contract-workspace={workspaceId} data-yushu-page="webuicontractworkspacehost" className="bg-zinc-50 dark:bg-zinc-950 h-full min-h-0 overflow-hidden">
       <div className={pageContentClassName}>
         <PageRuntimeHost
           key={`${currentPage.id}:${location.key}`}

@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "hub.component.v1",
+  "id": "threat-intelligence-scene",
+  "name": "威胁情报",
+  "components": [
+    {
+      "type": "webui",
+      "id": "threat_intelligence"
+    }
+  ]
+}

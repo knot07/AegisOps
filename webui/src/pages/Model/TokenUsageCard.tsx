@@ -1,3 +1,4 @@
+import './cache-usage.css';
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { Brain, Info } from 'lucide-react';
@@ -30,7 +31,7 @@ export default function TokenUsageCard(props: {
     cancelClose();
     if (!trigger.current) return;
     const rect = trigger.current.getBoundingClientRect();
-    const width = Math.min(640, window.innerWidth - 24);
+    const width = Math.min(520, window.innerWidth - 24);
     const below = window.innerHeight - rect.bottom - 20;
     const above = rect.top - 20;
     const useBelow = below >= Math.min(480, above);
@@ -119,6 +120,9 @@ export default function TokenUsageCard(props: {
         onKeyDown={event => {
           escape(event);
           if (event.key === 'Tab') {
+            const focusable = [...(panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), summary, a[href], [tabindex="0"]') ?? [])].filter(el => el.getClientRects().length > 0);
+            const index = focusable.indexOf(document.activeElement as HTMLElement);
+            if ((!event.shiftKey && index >= 0 && index < focusable.length - 1) || (event.shiftKey && index > 0)) return;
             event.preventDefault();
             if (event.shiftKey) {
               trigger.current?.focus();
@@ -134,7 +138,7 @@ export default function TokenUsageCard(props: {
             }
           }
         }}
-        className="fixed z-[1000] overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl outline-none dark:border-zinc-700 dark:bg-zinc-900"
+        className="aegis-cache-popover fixed z-[1000] overflow-y-auto rounded-xl border border-slate-200 bg-white shadow-xl outline-none dark:border-zinc-700 dark:bg-zinc-900"
       >
         <CacheUsagePanel {...props} />
       </div>, document.body,

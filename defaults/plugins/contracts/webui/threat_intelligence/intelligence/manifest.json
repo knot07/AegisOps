@@ -1,0 +1,8 @@
+{
+  "id": "intelligence",
+  "title": "威胁情报",
+  "route": "/contracts/webui/intelligence",
+  "icon": "Radar",
+  "enabled": true,
+  "entry": "src/index.tsx"
+}

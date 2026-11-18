@@ -1,0 +1,22 @@
+name: incident_optional_operations
+description: 可选 REA 环境安装与 Solar 取证。只能消费管理员在工作台明确授予的单次授权；不能自行授权。run后用jobs查询进度。
+category: custom
+enabled: true
+requires_confirmation: false
+inputSchema:
+  type: object
+  additionalProperties: false
+  properties:
+    action:
+      type: string
+      enum: [environment, run, jobs]
+    operation:
+      type: string
+      enum: [rea_install, solar_collect]
+    authorization_id:
+      type: string
+  required: [action]
+handler:
+  type: script
+  script_file: optional_tool.py
+  function: run

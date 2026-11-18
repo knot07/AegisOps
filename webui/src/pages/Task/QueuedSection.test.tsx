@@ -62,7 +62,7 @@ vi.mock('react-i18next', () => ({
       }
       return translations[key] ?? key;
     },
-    i18n: { changeLanguage: vi.fn() },
+    i18n: { language: 'zh-CN', changeLanguage: vi.fn() },
   }),
 }));
 
@@ -267,7 +267,7 @@ describe('QueuedSection', () => {
 
     await user.click(screen.getByText('工作流任务'));
 
-    expect(await screen.findByText('workflow-output')).toBeInTheDocument();
+    expect((await screen.findAllByText('workflow-output')).length).toBeGreaterThan(0);
     expect(screen.getByText('keyword-search-summary')).toBeInTheDocument();
     expect(screen.getByText(/"keywords": "agent ai"/)).toBeInTheDocument();
     expect(screen.queryByText('session-chat')).not.toBeInTheDocument();
@@ -304,13 +304,14 @@ describe('QueuedSection', () => {
 
     await user.click(screen.getByText('工作流任务 2'));
 
+    await user.click(screen.getByText('原始执行输出'));
     await user.click(screen.getByRole('button', { name: 'JSON format' }));
 
     expect(await screen.findByText(/"search_success": true/)).toBeInTheDocument();
     expect(screen.getByText(/"result_count": 8/)).toBeInTheDocument();
 
     const copyButtons = screen.getAllByRole('button', { name: '复制' });
-    await user.click(copyButtons[1]);
+    await user.click(copyButtons[copyButtons.length - 1]);
 
     expect(mocks.copyText).toHaveBeenCalledWith(expect.stringContaining('"keywords": "aegisops agent"'));
     expect(mocks.toastSuccess).toHaveBeenCalled();

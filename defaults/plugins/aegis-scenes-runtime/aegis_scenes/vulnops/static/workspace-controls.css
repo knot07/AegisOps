@@ -1,0 +1,109 @@
+/* AegisOps workspace controls, shared by all non-review scenes.
+   Reference: live Task Center / resource workspace; no review selectors.
+   One source controls both iframe workspaces and contract-rendered scenes. */
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]){--ws-font:"SF Pro Display","SF Pro Text","PingFang SC",-apple-system,BlinkMacSystemFont,"Noto Sans SC","Microsoft YaHei",sans-serif;--ws-ink:#101418;--ws-secondary:#596368;--ws-muted:#7e888c;--ws-border:#e2e6e4;--ws-canvas:#f6f8f7;--ws-primary:#bfdf88;--ws-primary-hover:#b2d677;--ws-focus:#86aa67;--ws-radius:10px;--ws-control-height:36px;font-family:var(--ws-font)!important;font-size:13px!important;color:var(--ws-ink);line-height:1.5}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button,input,select,textarea){font-family:var(--ws-font)!important;letter-spacing:normal}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button,a.btn,a.export-report,a.atlas-workbench-entry):not(.metric,.stat,.nav-btn,.vuln-title,.text-btn,.case,.source-choice,.daily-card,.source-item,.date-shortcuts button,.calendar-days button,.calendar-month-nav button,.calendar-title button,.tabs button,.scene-tabs button,.steps button,[role="tab"],.analysis-platform-tabs button,.device-source-option,.device-option,.scene-tab,.language-switch button,.source-category button,.device-source-card,.device-source-trigger,.intel-select-list button,.table-link:not(.detail-entry),.asset-card-main,.asset-topology button){box-sizing:border-box!important;display:inline-flex;align-items:center;justify-content:center;gap:8px;min-height:var(--ws-control-height)!important;height:auto;border-radius:var(--ws-radius)!important;padding:7px 14px!important;font-size:13px!important;font-weight:var(--ws-action-weight,400)!important;line-height:20px!important;color:var(--ws-secondary);background:#fff;border:1px solid var(--ws-border);box-shadow:none!important;text-decoration:none;transition:background-color .16s,border-color .16s,color .16s,box-shadow .16s!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button,a.btn,a.export-report,a.atlas-workbench-entry):not(.metric,.stat,.nav-btn,.vuln-title,.text-btn,.case,.source-choice,.daily-card,.source-item,.date-shortcuts button,.calendar-days button,.calendar-month-nav button,.calendar-title button,.tabs button,.scene-tabs button,.steps button,[role="tab"],.analysis-platform-tabs button,.device-source-option,.device-option,.scene-tab,.language-switch button,.source-category button,.device-source-card,.device-source-trigger,.intel-select-list button,.table-link:not(.detail-entry),.asset-card-main,.asset-topology button):hover:not(:disabled){background-color:#f0f4ee;border-color:#cbd7c5;transform:none!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button.primary,.btn.primary,.btn.dark,a.export-report,.atlas-workbench-entry){background:linear-gradient(115deg,#c9e89c,#b4d77c)!important;border-color:#acca79!important;color:#365324!important;font-size:13px!important;font-weight:500!important;box-shadow:0 2px 6px #6b8d3920!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button.primary,.btn.primary,.btn.dark,a.export-report,.atlas-workbench-entry):hover:not(:disabled){background:linear-gradient(115deg,#c1e290,#a9cf6e)!important;border-color:#9fc469!important;color:#304c20!important;transform:none!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.btn.danger,button.danger,.delete-event,.event-delete,.delete-case){background:#faeaea!important;border-color:#f3d7d3!important;color:#c84e45!important;box-shadow:none!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.btn.danger,button.danger,.delete-event,.event-delete,.delete-case):hover:not(:disabled){background:#f6dedd!important;border-color:#ecc8c2!important;color:#b74037!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]):not([type="file"]),select,textarea,.intel-select-trigger,.device-source-trigger){box-sizing:border-box;min-height:36px!important;border:1px solid var(--ws-border)!important;border-radius:10px!important;background:#fff!important;color:var(--ws-ink)!important;padding:7px 12px!important;font-size:13px!important;font-weight:400!important;line-height:20px!important;box-shadow:none;outline:none;transition:border-color .16s,box-shadow .16s}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) textarea{min-height:104px!important;line-height:1.75!important;resize:vertical}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) input::placeholder,:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) textarea::placeholder{color:var(--ws-muted)!important;font-weight:400;opacity:1}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :where(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]):not([type="file"]),select,textarea,.intel-select-trigger,.device-source-trigger):focus,:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) .intel-select-trigger[aria-expanded="true"]{border-color:var(--ws-focus)!important;box-shadow:0 0 0 3px #86aa671c!important;outline:none!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button,a.btn):focus-visible{outline:2px solid var(--ws-focus)!important;outline-offset:3px;box-shadow:none!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button:disabled,input:disabled,select:disabled){opacity:.45!important;cursor:not-allowed!important;transform:none!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(input[type="checkbox"],input[type="radio"]){accent-color:#658b44;min-height:0!important;padding:0!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.search,.list-search,.yushu-search-field) input{height:36px!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) .search{min-height:36px!important;border:1px solid var(--ws-border)!important;border-radius:10px!important;background:#fff!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) .search input{border:0!important;border-radius:inherit!important;box-shadow:none!important;background:transparent!important;min-height:34px!important;height:34px!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) .search:focus-within{border-color:var(--ws-focus)!important;box-shadow:0 0 0 3px #86aa671c}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.intel-filter,.toolbar,.list-search){gap:10px}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.page-head,.top,.scene-page-brand,.head) h1{font-family:var(--ws-font)!important;font-size:24px!important;line-height:1.35!important;font-weight:650!important;letter-spacing:-.035em!important;margin-bottom:4px}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.subtitle,.heading small,.page-head p,.scene-page-brand p){font-size:13px!important;line-height:1.7!important;color:var(--ws-muted)!important;font-weight:400!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.panel-head h2,.dialog h2,dialog h2,.modal h2,.drawer-head h2){font-size:17px!important;line-height:1.5!important;font-weight:600!important;letter-spacing:normal!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(label.field,.form>label,.form-grid>label,.form-label,.field-label){font-size:13px!important;line-height:1.5!important;font-weight:500!important;color:var(--ws-secondary)!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.note,.notice,.muted,.help,.panel-sub,.form small,.form-footer small){font-size:12px!important;line-height:1.75!important;font-weight:400!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(td,.inventory-list,.detail-text,.hostitem p,.evidence p){font-size:13px!important;line-height:1.75!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(th,.badge,.tag,.case small){font-size:12px!important;line-height:1.5!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.stat,.metric) strong{font-variant-numeric:tabular-nums}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.btn.small,.btn.icon,button.close,.close-btn){min-height:32px!important;padding:5px 10px!important;font-size:12px!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) .intel-select-trigger{justify-content:space-between!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) .intel-select-list button{font-family:var(--ws-font)!important;font-size:13px!important;line-height:20px!important;min-height:36px!important}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) .intel-select-list button[aria-selected="true"]{background:#edf5e1;color:#54802e;font-weight:600}
+:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.btn,.primary,.tools>button,.card-foot>button) svg{width:16px;height:16px;flex:none}
+@media(max-width:650px){:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(.page-head,.top,.scene-page-brand,.head) h1{font-size:21px!important}}
+@media(prefers-reduced-motion:reduce){:is([data-aegis-scene="vulnops"],[data-aegis-scene="intelligence"],[data-aegis-scene="incident"]) :is(button,input,select,textarea){transition:none!important}}
+
+/* Shared module proportions from the live tool workspace: 112px KPI cards. */
+[data-aegis-scene="incident"].ir{padding:24px!important}
+[data-aegis-scene="intelligence"] main{max-width:none;padding:24px!important}
+[data-aegis-scene="vulnops"] .content{max-width:none;padding:24px!important}
+[data-aegis-scene="vulnops"] .scene-tab-wrap{padding:16px 24px 0!important}
+[data-aegis-scene] :is(.page-head,.top){margin-bottom:24px!important}
+[data-aegis-scene="incident"]>.head{margin-bottom:24px!important}
+[data-aegis-scene] :is(.stats,.metric-grid){gap:12px!important;margin-top:0!important;margin-bottom:24px!important}
+[data-aegis-scene] :is(.stats>.stat,.metric-grid>.metric){box-sizing:border-box;height:112px!important;min-height:112px!important;padding:18px 22px!important;border:1px solid #e2e6e4!important;border-radius:22px!important;box-shadow:inset 0 1px 0 #fff,0 1px 2px #2e3a3e0d,0 5px 14px #2e3a3e0a!important;overflow:hidden}
+[data-aegis-scene="vulnops"] .metric{display:block;text-align:left;line-height:1.5}
+[data-aegis-scene] :is(.metric-label,.stat>span,.stat>small:first-child){font-size:13px!important;line-height:18px!important;color:#7e888c!important;font-weight:400!important}
+[data-aegis-scene] :is(.metric-value,.stat>strong,.stat>b){font-size:32px!important;line-height:35px!important;font-weight:650!important;letter-spacing:-.045em!important;margin:8px 0 0!important;color:#101418!important}
+[data-aegis-scene="vulnops"] .metric-value span{font-size:11px;letter-spacing:normal;margin-left:6px;color:#8a9495}
+[data-aegis-scene] :is(.metric-foot,.stat>small:last-child){font-size:11px!important;line-height:15px!important;font-weight:400!important;margin:2px 0 0!important}
+[data-aegis-scene="incident"] .stat:after{display:none}
+[data-aegis-scene] :is(.asset-grid,.daily-grid,.item-grid){gap:12px!important}
+[data-aegis-scene] :is(.asset-card,.daily-card,.source-item){border-radius:20px!important;padding:18px!important}
+[data-aegis-scene] :is(.intel-filter,.toolbar,.asset-search-bar){min-height:72px!important;padding:16px 18px!important;border-radius:16px!important;gap:10px!important}
+[data-aegis-scene="vulnops"] .asset-search-input{min-height:36px;border:1px solid #e2e6e4;border-radius:10px;background:#fff}
+[data-aegis-scene="vulnops"] .asset-search-input input{min-height:34px!important;border:0!important;box-shadow:none!important;background:transparent!important}
+[data-aegis-scene] :is(.panel-head,.modal-head,.drawer-head){padding:18px 22px!important}
+[data-aegis-scene="incident"] .case-summary{padding:20px 22px 0!important}
+[data-aegis-scene="incident"] .investigation-body{padding:20px 22px!important}
+[data-aegis-scene="incident"] .layout{border-radius:20px!important;min-height:680px;height:clamp(680px,calc(100dvh - 300px),1100px)!important}
+[data-aegis-scene] :is(.scene-page-logo,.heading>.logo){width:44px!important;height:44px!important;filter:none!important}
+[data-aegis-scene] :is(.scene-page-brand,.heading){gap:12px!important}
+[data-aegis-scene] :is(.dialog,.drawer,.modal-card){border-radius:20px!important}
+[data-aegis-scene="incident"] .dialog{padding:24px!important}
+@media(max-width:850px){[data-aegis-scene="incident"] .layout{height:auto!important;min-height:0}}
+@media(max-width:650px){[data-aegis-scene="incident"].ir,[data-aegis-scene="intelligence"] main,[data-aegis-scene="vulnops"] .content{padding:16px!important}[data-aegis-scene] :is(.stats,.metric-grid){gap:10px!important;margin-bottom:18px!important}[data-aegis-scene] :is(.stats>.stat,.metric-grid>.metric){padding:16px!important}[data-aegis-scene="incident"] .investigation-body{padding:16px!important}}
+
+/* A search icon owns a fixed 16px slot, separate from the input text box. */
+[data-aegis-scene] :is(.search,.asset-search-input){position:relative!important;display:flex!important;align-items:center!important;min-width:0;gap:0!important;padding:0!important}
+[data-aegis-scene] :is(.search,.asset-search-input)>.icon{position:absolute!important;left:12px!important;top:50%!important;transform:translateY(-50%)!important;width:16px!important;height:16px!important;margin:0!important;pointer-events:none;color:#8a9890!important;z-index:1}
+[data-aegis-scene] :is(.search,.asset-search-input)>input{width:100%;min-width:0;padding-left:38px!important;padding-right:12px!important}
+
+[data-aegis-scene] button.primary:not(:has(svg,img))::before{content:'';flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E") center/contain no-repeat}
+[data-aegis-scene] button.primary[type="submit"]::before{mask-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 12 4 4L19 6'/%3E%3C/svg%3E")}
+
+/* Final optical scale: quiet counters, consistent primary action weight. */
+[data-aegis-scene] :is(button.primary,.btn.primary,.btn.dark,a.export-report,.atlas-workbench-entry){--ws-action-weight:500}
+[data-aegis-scene] :is(.metric-value,.stat>strong,.stat>b){font-size:28px!important;line-height:32px!important;letter-spacing:-.035em!important;margin-top:8px!important}
+[data-aegis-scene] :is(.metric-label,.stat>span,.stat>small:first-child){font-size:12px!important;line-height:18px!important}
+[data-aegis-scene] :is(.metric-foot,.stat>small:last-child){font-size:11px!important;line-height:16px!important}
+[data-aegis-scene] .stat>strong>small{font-size:12px!important;font-weight:400!important;letter-spacing:0}
+
+[data-aegis-scene] :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]):not([type="file"]),select,.intel-select-trigger){height:36px!important}
+[data-aegis-scene] :is(.search,.asset-search-input)>input{height:34px!important}
+
+/* Daily source cards use the resource-library card rhythm. */
+[data-aegis-scene="intelligence"] .daily-grid{grid-template-columns:repeat(auto-fill,minmax(260px,1fr))!important;gap:12px!important}
+[data-aegis-scene="intelligence"] .daily-card{height:200px!important;min-height:200px!important;padding:18px!important;display:flex!important;flex-direction:column!important;align-items:stretch!important;text-align:left;border-radius:20px!important}
+[data-aegis-scene="intelligence"] .daily-top{min-height:32px;gap:10px}
+[data-aegis-scene="intelligence"] .daily-logo{width:48px;height:32px;padding:4px}
+[data-aegis-scene="intelligence"] .daily-card h3{font-size:14px!important;line-height:21px!important;min-height:21px;margin:10px 0 5px!important;font-weight:600!important;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+[data-aegis-scene="intelligence"] .daily-count strong{font-size:26px!important;line-height:32px!important;letter-spacing:-.035em}
+[data-aegis-scene="intelligence"] .daily-count span{font-size:12px!important}
+[data-aegis-scene="intelligence"] .daily-bottom{padding-top:12px!important;margin-top:auto!important;min-height:34px}
+[data-aegis-scene="intelligence"] .daily-bottom :is(small,span){font-size:11px!important;white-space:nowrap}
+[data-aegis-scene="intelligence"] .daily-top .tag{font-size:11px!important;white-space:nowrap}
+@media(max-width:650px){[data-aegis-scene="intelligence"] .daily-grid{grid-template-columns:1fr!important}}
+
+[data-aegis-scene] :is(button.primary,.btn.dark)[data-control-icon="plus"]:not(:has(svg,img))::before{content:'';display:block;flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 5v14M5 12h14'/%3E%3C/svg%3E") center/contain no-repeat!important}
+[data-aegis-scene] :is(button.primary,.btn.dark)[data-control-icon="check"]:not(:has(svg,img))::before{content:'';display:block;flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m5 12 4 4L19 6'/%3E%3C/svg%3E") center/contain no-repeat!important}
+[data-aegis-scene] :is(button.primary,.btn.dark)[data-control-icon="search"]:not(:has(svg,img))::before{content:'';display:block;flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m21 21-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0Z'/%3E%3C/svg%3E") center/contain no-repeat!important}
+[data-aegis-scene] :is(button.primary,.btn.dark)[data-control-icon="download"]:not(:has(svg,img))::before{content:'';display:block;flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 3v12m-4-4 4 4 4-4M4 17v4h16v-4'/%3E%3C/svg%3E") center/contain no-repeat!important}
+[data-aegis-scene] :is(button.primary,.btn.dark)[data-control-icon="refresh"]:not(:has(svg,img))::before{content:'';display:block;flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 14 6M4 12a8 8 0 0 0 14 6'/%3E%3C/svg%3E") center/contain no-repeat!important}
+[data-aegis-scene] :is(button.primary,.btn.dark)[data-control-icon="play"]:not(:has(svg,img))::before{content:'';display:block;flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m7 4 13 8-13 8Z'/%3E%3C/svg%3E") center/contain no-repeat!important}
+[data-aegis-scene] :is(button.primary,.btn.dark)[data-control-icon="spark"]:not(:has(svg,img))::before{content:'';display:block;flex:0 0 16px;width:16px;height:16px;background:currentColor;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.8' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m12 3 3 6 6 3-6 3-3 6-3-6-6-3 6-3Z'/%3E%3C/svg%3E") center/contain no-repeat!important}
+[data-aegis-scene] button.primary[data-control-icon="existing"]::before{display:none!important}

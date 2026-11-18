@@ -34,7 +34,7 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
   const initialError = error && !usageStats;
 
   return (
-    <section aria-labelledby={titleId} aria-busy={loading} data-testid="model-cache-usage" className="p-4">
+    <section aria-labelledby={titleId} aria-busy={loading} data-testid="model-cache-usage" className="aegis-cache-panel">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
           <h2 id={titleId} className="flex items-center gap-2 text-sm font-semibold text-slate-800 dark:text-zinc-100">
@@ -59,11 +59,11 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
 
       {!initialLoading && !initialError && (
         <>
-          <div className="mt-3 flex flex-wrap items-baseline justify-between gap-2 border-b border-slate-100 pb-3 dark:border-zinc-800">
+          <div className="aegis-cache-total">
             <span className="text-xs text-slate-500 dark:text-zinc-400">{t('dashboard.totalTokens')}</span>
             <span data-testid="model-total-tokens-exact" title={formatCount(totalTokens)} className="text-base font-semibold tabular-nums text-slate-800 dark:text-zinc-100">{formatTokens(totalTokens)}</span>
           </div>
-          <dl className="mt-3 grid grid-cols-2 gap-x-5 gap-y-3">
+          <dl className="aegis-cache-metrics">
             <div>
               <dt className="text-xs text-slate-500 dark:text-zinc-400">{t('cacheUsage.hitRate')}</dt>
               <dd data-testid="model-cache-rate" className="mt-1 break-words text-2xl font-semibold tabular-nums text-sky-700 dark:text-sky-300">
@@ -91,12 +91,12 @@ export default function CacheUsagePanel({ usageStats, loading, error, onRefresh 
                   : rate === null ? t('cacheUsage.noDenominator')
                     : t('cacheUsage.reportedOnly')}
           </p>
-          <div className="mt-3 space-y-2 border-t border-slate-100 pt-3 text-xs leading-relaxed text-slate-500 dark:border-zinc-800 dark:text-zinc-400">
-            <h3 className="font-medium text-slate-700 dark:text-zinc-300">{t('cacheUsage.explanation')}</h3>
+          <details className="aegis-cache-method">
+            <summary>{t('cacheUsage.explanation')}</summary>
             <p>{t('cacheUsage.formula')}</p>
             <p>{t('cacheUsage.exclusions')}</p>
             <p>{t('cacheUsage.recordsScope')}</p>
-          </div>
+          </details>
         </>
       )}
     </section>

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from '@aegisops/webui-contract-sdk';
+import {modelBrand} from './model-brands';
+
 
 const C = {
   bg: 'var(--dt-bg)', pageBg: 'var(--dt-page-bg)', panel: 'var(--dt-panel)', panelSoft: 'var(--dt-panel-soft)', panelHead: 'var(--dt-panel-head)',
@@ -485,7 +487,7 @@ function downloadCsv(rows: TdpRow[]) {
   ];
   const csv = '\ufeff' + [columns.map(([h]) => quote(h)).join(','), ...rows.map((r, i) => columns.map(([, g]) => quote(g(r, i))).join(','))].join('\n');
   const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
-  const link = document.createElement('a'); link.href = url; link.download = `TDP_AI_${Date.now()}.csv`; link.click();
+  const link = document.createElement('a'); link.href = url; link.download = `AegisOps_AI_${Date.now()}.csv`; link.click();
   URL.revokeObjectURL(url);
 }
 
@@ -950,12 +952,12 @@ export default function Page() {
   const detail = detailIp ? rows.find(r => rowKey(r) === detailIp) : undefined;
   const cards = [
     ['汇总攻击', tdp.event_total ?? rows.reduce((s, r) => s + Number(r.count || 0), 0)],
-    ['流量检测 TDP', tdp.event_total ?? 0], ['攻击 IP 数', rows.length], ['AI 已研判', done], ['AI 研判中', pending],
+    ['设备告警', tdp.event_total ?? 0], ['攻击 IP 数', rows.length], ['AI 已研判', done], ['AI 研判中', pending],
     ['AI 研判率', rows.length ? `${(done / rows.length * 100).toFixed(1)}%` : '0.0%'],
   ];
   const metricCards = [
     { label: '汇总攻击', value: cards[0][1], hint: '当前时间范围事件总量', icon: 'activity', accent: C.blue, soft: C.blueDark },
-    { label: '流量检测 TDP', value: cards[1][1], hint: 'TDP 告警聚合输出', icon: 'shield', accent: C.cyan, soft: C.cyanDark },
+    { label: '设备告警', value: cards[1][1], hint: '已接入设备告警汇总', icon: 'shield', accent: C.cyan, soft: C.cyanDark },
     { label: '攻击 IP 数', value: cards[2][1], hint: '按攻击源去重统计', icon: 'chart', accent: C.red, soft: C.redDark },
     { label: 'AI 已研判', value: cards[3][1], hint: '已形成处置建议', icon: 'bot', accent: C.green, soft: C.greenDark },
     { label: 'AI 研判中', value: cards[4][1], hint: '正在排队或运行', icon: 'spark', accent: C.orange, soft: C.orangeDark },
@@ -1040,7 +1042,7 @@ export default function Page() {
 <nav aria-label="研判环境切换" style={{display:"flex",gap:8,padding:"12px 24px",borderBottom:`1px solid ${C.border}`,background:C.panel}}><a href="/contracts/webui/workspaces/tdp_ai/ai" aria-current={"page"} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"#edf4e5",color:"#526e3d"}}>正式研判</a><a href="/contracts/webui/workspaces/tdp_ai/ai-demo" aria-current={undefined} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"transparent",color:C.textMuted}}>演示平台</a></nav>
     <header style={topbarStyle}>
       <div style={brandStyle}>
-        <div style={{ position: 'relative' }}><button type="button" aria-label="更换 Logo" title="点击更换 Logo" onClick={brandLogo.chooseLogo} style={brandLogoStyle}>{brandLogo.logo ? <img src={brandLogo.logo} alt="工作台 Logo" style={{ maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: 'contain' }} /> : <span style={{ color: C.textDim, fontSize: 12, fontWeight: 600 }}>＋ 上传 Logo</span>}</button><input ref={brandLogo.inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onChange={brandLogo.onLogoChange} style={{ display: 'none' }} />{brandLogo.logo && <button type="button" aria-label="恢复默认 Logo" title="恢复默认 Logo" onClick={brandLogo.resetLogo} style={resetLogoButtonStyle}>×</button>}</div>
+        <div style={{ position: 'relative' }}><button type="button" aria-label="更换 Logo" title="点击更换 Logo" onClick={brandLogo.chooseLogo} style={brandLogoStyle}>{brandLogo.logo ? <img src={brandLogo.logo} alt="工作台 Logo" style={{ maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: 'contain' }} /> : <img data-scene-logo="review" src="/api/scenes/assistant/logos/review.svg" alt="态势感知 AI 研判 Logo" style={{width:48,height:48,objectFit:"contain"}}/>}</button><input ref={brandLogo.inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onChange={brandLogo.onLogoChange} style={{ display: 'none' }} />{brandLogo.logo && <button type="button" aria-label="恢复默认 Logo" title="恢复默认 Logo" onClick={brandLogo.resetLogo} style={resetLogoButtonStyle}>×</button>}</div>
         <div style={{ minWidth: 0 }}><h1 style={brandTitleStyle}><button type="button" onClick={renamePlatform} title="点击自定义平台名称" aria-label="修改平台名称" style={{ font: 'inherit', color: 'inherit', background: 'none', border: 0, padding: 0, cursor: 'pointer', textAlign: 'left' }}>{brandName}</button></h1><div style={{ marginTop: 4, color: C.textDim, fontSize: 12, fontWeight: 600 }}>设备告警汇总、AI 研判与响应联动</div></div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: isMobile ? 'flex-start' : 'flex-end' }}>
@@ -1072,7 +1074,7 @@ export default function Page() {
               <span><span style={syncLabelStyle}>AI自动研判</span><span style={{ color: autoJudge ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }}>{autoJudge ? '已开启' : '已关闭'}</span></span>
               <span style={{ width: 48, height: 26, padding: 3, borderRadius: 999, background: autoJudge ? C.blue : C.borderLight, flex: '0 0 auto', display: 'flex', justifyContent: autoJudge ? 'flex-end' : 'flex-start', transition: '.2s' }}><span style={{ display: 'block', width: 20, height: 20, borderRadius: '50%', background: '#fff', boxShadow: '0 3px 8px rgba(28,44,66,.18)' }} /></span>
             </button>
-            <div aria-label="当前AI模型" title={currentModel.modelId ? `${currentModel.providerId}/${currentModel.modelId}` : currentModel.error} style={syncFieldStyle}><span style={syncLabelStyle}>当前AI模型</span><span style={{ display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: currentModel.modelId ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }}>{currentModel.modelId || currentModel.error || '读取中'}</span>{currentModel.providerId && <small style={{ color: C.textMuted, marginTop: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{currentModel.providerId}</small>}</div>
+            <CurrentModelCard model={currentModel}/>
             <div style={{ ...syncFieldStyle, borderColor: error ? C.red : C.border }}><span style={syncLabelStyle}>{error ? '连接异常' : '最近更新'}</span><span style={{ color: error ? C.redLight : C.textMid, fontSize: 14, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{error || fmtTime(updatedAt)}</span></div>
           </div>
         </section>
@@ -1143,7 +1145,7 @@ export default function Page() {
 const topbarStyle = { minHeight: 80, boxSizing: 'border-box', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 18, padding: '18px 28px', background: C.panel, borderBottom: `1px solid ${C.border}`, position: 'sticky', top: 0, zIndex: 10, flexWrap: 'wrap' } as const;
 const brandStyle = { display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 14, minWidth: 0 } as const;
 const brandTitleStyle = { margin: 0, color: C.text, fontSize: 22, lineHeight: 1.3, fontWeight: 720, letterSpacing: 0 } as const;
-const brandLogoStyle = { minWidth: 44, height: 40, display: 'grid', placeItems: 'center', borderRadius: 6, padding: '0 10px', background: C.panel, border: `1px solid ${C.borderLight}`, boxShadow: '0 4px 12px rgba(28,44,66,.06)' } as const;
+const brandLogoStyle = { minWidth: 44, height: 52, display: 'grid', placeItems: 'center', borderRadius: 0, padding: 0, background: 'transparent', border: 0, boxShadow: 'none' } as const;
 const resetLogoButtonStyle = { position: 'absolute', top: -7, right: -7, width: 18, height: 18, display: 'grid', placeItems: 'center', padding: 0, border: `1px solid ${C.border}`, borderRadius: '50%', background: C.panel, color: C.textDim, cursor: 'pointer', fontSize: 14, lineHeight: 1 } as const;
 const chipStyle = { minHeight: 32, maxWidth: '100%', boxSizing: 'border-box', padding: '6px 10px', borderRadius: 6, border: `1px solid ${C.border}`, background: C.panelSoft, display: 'inline-flex', alignItems: 'center', gap: 8, overflowWrap: 'anywhere', color: C.textDim, fontSize: 12 } as const;
 const statusDotStyle = { width: 7, height: 7, borderRadius: '50%', flex: '0 0 auto' } as const;
@@ -1370,4 +1372,11 @@ function EvidenceSection({ title, items, tone }: { title: string; items?: unknow
       </div>) : <div style={{ color: C.textMuted, fontSize: 13 }}>无</div>}
     </div>
   </div>;
+}
+
+
+function CurrentModelCard({model}:{model:{modelId?:string;providerId?:string;error?:string}}){
+ const initial=modelBrand(model.modelId||''),b=initial.id!=='custom'?initial:modelBrand(model.providerId||'');
+ const [failed,setFailed]=useState(false);useEffect(()=>setFailed(false),[b.asset]);
+ return <div aria-label="当前AI模型" data-current-model-brand={b.id} title={model.modelId?`${model.providerId}/${model.modelId}`:model.error} style={{...syncFieldStyle,display:'flex',alignItems:'center',gap:13,background:`linear-gradient(120deg,${b.soft},#fff)`,borderColor:`color-mix(in srgb, ${b.accent} 18%, white)`}}><span style={{width:42,height:42,display:'grid',placeItems:'center',flexShrink:0,background:'#ffffffb0',borderRadius:10,padding:6}}>{b.asset&&!failed?<img src={'/model-logos/'+b.asset+'.svg'} alt={b.name+' Logo'} onError={()=>setFailed(true)} style={{width:'100%',height:'100%',objectFit:'contain'}}/>:<svg viewBox="0 0 32 32" fill={b.accent} width="28" height="28"><path d="M16 2 29 9v14l-13 7L3 23V9Zm0 6-8 4v8l8 4 8-4v-8Z" fillRule="evenodd"/><path d="m16 11 5 3v5l-5 3-5-3v-5Z"/></svg>}</span><div style={{minWidth:0}}><span style={{...syncLabelStyle,fontSize:11}}>当前 AI 模型 · {b.name}</span><span style={{display:'block',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:b.accent,fontSize:15,fontWeight:650,marginTop:3}}>{model.modelId||model.error||'读取中'}</span>{model.providerId&&<small style={{display:'block',color:C.textMuted,fontSize:11,marginTop:4,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>接入渠道 · {model.providerId}</small>}</div></div>;
 }
