@@ -8,7 +8,7 @@
     "DEPLOY.md": "ff295ac2ef32527792164892841252dc9a9aeba52acb75842868a204877eb7e5",
     "Dockerfile": "b95668239e8bbc2fe72e1a893088ae9b54d0e90118e74dee2b830de47ce77b43",
     "LICENSE.txt": "1eb85fc97224598dad1852b5d6483bbcf0aa8608790dcc657a5a2a761ae9c8c6",
-    "README.md": "04c5dcd131336222863990c44dc8cb9858d25eadb34a6936ad12f50b8d2902c2",
+    "README.md": "583162eaf792acfc750722a708b6ad609550e1b1b37ded8a5b02fff0d1242596",
     "WINDOWS-THIRD-PARTY.md": "b1bddf5533fc759b3e44c042511e56375664ae040ee93252600dfa8f9ac64066",
     "WINDOWS.md": "edd03ac16f7378a43ab233b2433043e12eab173548c6c462a45dd1926125abb3",
     "aegis_rea/__init__.py": "e59c77d08faf112646a93fe37797224860fcc505dd9559974ed37a88b1ecd23f",
@@ -6522,7 +6522,6 @@
     "docs/images/pages/channels.png": "28fe3a6ecb92f8e3ec12c876d789f9bf4ce5a740b0044fb7609657381373e49c",
     "docs/images/pages/chat.png": "740cd209535d6da1155a47bf5c9d5b1bbd7023cec7755d038d0d28d82eb3febd",
     "docs/images/pages/devices.png": "a73665e5a2f6416d18a51e5c6aa5273a1311e33dbb390d70a2cde2660625bf29",
-    "docs/images/pages/home.png": "2876f59bea9727e4849b14473198e3c81d7c344459462556978e54a8ddb84f68",
     "docs/images/pages/hub.png": "91adacab563196db82252b5cb5072a5fa01a7b4f7c2abac2707ad023c3ec7f15",
     "docs/images/pages/incident.png": "be33fe1bd0fc0e263865153cf288cf389ca0cc47039a33f4eaae9ce89e6785c1",
     "docs/images/pages/intelligence-workflow.png": "ce065f20cbfe3436024ecada867159342d9dbe8329f85a29db6ad39e65010da0",
@@ -8633,6 +8632,7 @@
     "webui/vite.config.ts": "1dd4d29e18f4fbdd97066ab4d358f406a9d07271b8322ef3881a57813b25260c",
     "webui/vitest.config.ts": "f2f2fe41cea0f2ce41086fc6d224beaac6b2014bfc14060ae5301b39c7f3c36c",
     "windows.py": "5a350daa9c3e53d094b2ca2ef6e04fe316b02e6cda8d9f9bdf170d228f514242",
-    "部署与操作手册.html": "5de0c1af3969d83b60a920c8339d2ea2bb0b6668ce23f4f72fdf15aec54ceb1e"
+    "部署与操作手册.html": "5de0c1af3969d83b60a920c8339d2ea2bb0b6668ce23f4f72fdf15aec54ceb1e",
+    "docs/images/pages/home-overview.png": "6ec24de64805b0b842b0b6890ff2e3fb2dfe1e1bd090059dc22fcf4c9ed48d22"
   }
 }

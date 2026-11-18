@@ -16,7 +16,7 @@
 
 </div>
 
-![AegisOps 工作台首页](docs/images/pages/home.png)
+![AegisOps 工作台首页](docs/images/pages/home-overview.png)
 
 ## 2026.11.18：从看见风险，到核查与闭环
 
@@ -103,7 +103,7 @@ Linux 与源码包使用同一套核心文件。主包均不包含 REA、Ghidra 
 <details>
 <summary><b>工作台首页</b> — 运营趋势与常用功能入口。</summary>
 
-![工作台首页](docs/images/pages/home.png)
+![工作台首页](docs/images/pages/home-overview.png)
 
 </details>
 
