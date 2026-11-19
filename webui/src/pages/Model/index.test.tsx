@@ -824,7 +824,7 @@ describe('ModelPage member access', () => {
     await user.click(await screen.findByText('deepseek-v4-flash', { selector: 'h4' }));
     const sheet = await screen.findByTestId('entity-sheet');
     expect(within(sheet).getByText('detail.configAdminOnly')).toBeInTheDocument();
-    expect(within(sheet).getByRole('group')).toBeDisabled();
+    expect(within(sheet).getByRole('group', { name: /Model settings|模型配置/ })).toBeDisabled();
     const save = within(sheet).getByRole('button', { name: 'Save' });
     expect(save).toBeDisabled();
     await user.click(save);

@@ -808,6 +808,28 @@ def _catalog_entries_cache_key() -> tuple[tuple[str, int, int], ...]:
     )
 
 
+@_once_per_build
+def _readonly_runtime_skills():
+    """The selected runtime definition decides whether Hub may replace a skill."""
+    from aegisops.skill.skill import Skill
+    return {name: skill for name, skill in Skill._discover().items() if Skill.is_readonly(skill)}
+
+
+def _with_readonly_skill_state(entries):
+    readonly = _readonly_runtime_skills()
+    result = []
+    for entry in entries:
+        skill = readonly.get(entry.id) if entry.type == "skill" else None
+        if skill is not None:
+            root = Path(skill.location).parent
+            entry = entry.model_copy(update={
+                "state": "installed", "native": True, "installPath": str(root),
+                "installedVersion": local.installed_payload_version("skill", root),
+            })
+        result.append(entry)
+    return result
+
+
 def _build_catalog_entries(
     _signature: tuple[tuple[str, int, int], ...],
 ) -> tuple[HubCatalogEntry, ...]:
@@ -846,6 +868,7 @@ def _build_catalog_entries(
         if manifest:
             entries.append(_entry_from_bundled_tool(manifest, root, records, inferred_installs))
             seen.add((bundled_type, bundled_id))
+    entries = _with_readonly_skill_state(entries)
     # Both Hub and the scene manager consume this state. A suite needs repair
     # when required payloads are missing, even if its version is current. A
     # repair also updates outdated children, so completeness takes precedence.

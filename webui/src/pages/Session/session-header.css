@@ -1,0 +1,11 @@
+.aegis-session-header{font-family:Inter,"PingFang SC","Microsoft YaHei",system-ui,sans-serif;gap:8px;background:linear-gradient(90deg,#f9fbf6a6,transparent 70%)}
+.aegis-session-header .session-header-action{height:32px;gap:7px;padding:0 11px;font-size:12px!important;font-weight:500!important;line-height:1.5;letter-spacing:.15px;color:#6c7769!important;border:1px solid transparent;transition:background .18s,border-color .18s,color .18s}
+.aegis-session-header .session-header-action svg{width:15px;height:15px;stroke-width:1.7;color:#85937a}
+.aegis-session-header .session-header-action:hover,.aegis-session-header .session-header-action[aria-expanded=true]{background:#ecf2e3!important;border-color:#dce6d0;color:#4c6538!important}
+.aegis-session-header .session-header-new{color:#607a43!important}
+.aegis-session-header .session-header-title{font-size:13px!important;font-weight:600!important;line-height:1.6;letter-spacing:.1px;color:#394b3d!important}
+.aegis-session-header .session-header-action:focus-visible{outline:2px solid #91a96c;outline-offset:2px}
+.dark .aegis-session-header{background:transparent}
+.dark .aegis-session-header .session-header-action{color:#adbba5!important}
+.dark .aegis-session-header .session-header-title{color:#d3dece!important}
+.dark .aegis-session-header .session-header-action:hover,.dark .aegis-session-header .session-header-action[aria-expanded=true]{background:#2b3927!important;border-color:#43533b}

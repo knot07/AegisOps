@@ -1,3 +1,4 @@
+import ThemeSkinPicker from '@/components/common/ThemeSkinPicker';
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentType, ReactNode } from 'react';
 import { Navigate, useParams } from 'react-router-dom';
@@ -412,6 +413,14 @@ function PreferencesPanel() {
               {t('darkTheme')}
             </SegmentedOption>
           </div>
+        </PreferenceRow>
+
+        <PreferenceRow
+          icon={Sun}
+          title={i18n.language.startsWith('zh') ? '主题皮肤' : 'Color palette'}
+          description={i18n.language.startsWith('zh') ? '独立搭配浅色或深色模式，即时生效' : 'Pairs with light or dark mode and applies instantly'}
+        >
+          <ThemeSkinPicker />
         </PreferenceRow>
 
         <PreferenceRow

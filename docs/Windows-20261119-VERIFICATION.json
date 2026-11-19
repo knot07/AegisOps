@@ -1,0 +1,15 @@
+{
+  "platform": "Windows",
+  "version": "2026.11.19",
+  "bootstrap": true,
+  "memberLoginAndPermission": true,
+  "assetCRUD": true,
+  "noBundledCredentials": true,
+  "reaNotBundled": true,
+  "obsoleteTaskAbsent": true,
+  "skinSelectionAndPersistence": true,
+  "repeatToolRefresh": true,
+  "browserRoutes": 13,
+  "browserErrors": [],
+  "verifiedAt": "2026-11-19T07:53:48.486Z"
+}

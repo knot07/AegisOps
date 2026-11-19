@@ -25,7 +25,6 @@ import {
   ArrowUp,
   BookOpen,
   Bot,
-  Brain,
   CheckCircle2,
   ChevronDown,
   Clock,
@@ -47,12 +46,12 @@ import {
   User,
   Workflow as WorkflowIcon,
   X,
-  XCircle,
 } from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import ChatAvatar from './ChatAvatar';
+import ChatStepIcon from './ChatStepIcon';
 import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
@@ -6261,12 +6260,8 @@ function ChatMessageBubbleInner({
                         disabled={isThinking}
                         className="flex w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200 min-h-7"
                       >
-                        <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
-                          {isThinking ? (
-                            <Loader2 aria-hidden="true" className="h-[15px] w-[15px] animate-spin" />
-                          ) : (
-                            <Brain aria-hidden="true" className="h-[15px] w-[15px]" />
-                          )}
+                        <span className="inline-grid h-5 w-5 flex-[0_0_20px] place-items-center">
+                          <ChatStepIcon kind="thinking" active={isThinking} />
                         </span>
                         <span className="shrink-0">{t('chat.process.deepThinking')}</span>
                         {!isExpanded && (
@@ -6280,7 +6275,7 @@ function ChatMessageBubbleInner({
                         <ChevronDown aria-hidden="true" className={`ml-0.5 h-3 w-3 text-[#9da29f] transition-transform dark:text-zinc-500 flex-shrink-0 ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
                       {isExpanded && isVisible && (
-                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400 overflow-y-auto whitespace-pre-wrap">
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 border-l border-[#e3e6e3] py-1.5 pl-[28px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400 overflow-y-auto whitespace-pre-wrap">
                           <StreamingReasoningText
                             content={thinkingText}
                             isStreaming={isThinking}
@@ -6308,12 +6303,12 @@ function ChatMessageBubbleInner({
                       }`}>
                         {isThinking ? (
                           <>
-                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
+                            <ChatStepIcon kind="thinking" active={isThinking} />
                             <span className="text-violet-600">{t('chat.thinking')}</span>
                           </>
                         ) : (
                           <>
-                            <Brain aria-hidden="true" className="w-3.5 h-3.5 text-violet-500 flex-shrink-0" />
+                            <ChatStepIcon kind="thinking" active={isThinking} />
                             <span className="text-zinc-500 truncate min-w-0">
                               {thinkingText.slice(0, 80)}{thinkingText.length > 80 ? '…' : ''}
                             </span>
@@ -6363,7 +6358,7 @@ function ChatMessageBubbleInner({
                 onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
                 summary={(
                   <>
-                    <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
+                    <span className="inline-grid h-5 w-5 flex-[0_0_20px] place-items-center text-[#8d9a95] dark:text-zinc-500">
                       <Eye aria-hidden="true" className="h-4 w-4" />
                     </span>
                     <span className="min-w-0">
@@ -6958,7 +6953,7 @@ function ChatQuestionResult({
       <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
         <summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden min-h-7">
           <span
-            className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}
+            className={`inline-grid h-5 w-5 flex-[0_0_20px] place-items-center ${statusIconColor}`}
             title={statusLabel}
             aria-label={statusLabel}
             role="img"
@@ -6973,7 +6968,7 @@ function ChatQuestionResult({
           )}
           <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
         </summary>
-        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[28px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
           {questionDetails}
         </div>
       </details>
@@ -7272,25 +7267,25 @@ export function ChatToolPart({
   };
   const statusConfig: Record<string, StatusCfg> = {
     pending:   {
-      icon: <Clock aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <ChatStepIcon kind="pending" />,
       iconColor: 'text-zinc-400',
       pill: 'bg-zinc-100 text-zinc-500',
       label: t('chat.tool.pending'),
     },
     running:   {
-      icon: <Loader2 aria-hidden="true" className="w-3.5 h-3.5 animate-spin flex-shrink-0" />,
+      icon: <ChatStepIcon kind="running" />,
       iconColor: 'text-sky-500',
       pill: 'bg-sky-50 text-sky-600',
       label: t('chat.tool.running'),
     },
     completed: {
-      icon: <CheckCircle2 aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <ChatStepIcon kind="completed" />,
       iconColor: 'text-green-500',
       pill: 'bg-green-50 text-green-600',
       label: t('chat.tool.completed'),
     },
     error:     {
-      icon: <XCircle aria-hidden="true" className="w-3.5 h-3.5 flex-shrink-0" />,
+      icon: <ChatStepIcon kind="error" />,
       iconColor: 'text-red-400',
       pill: 'bg-red-50 text-red-500',
       label: t('chat.tool.error'),
@@ -7350,7 +7345,7 @@ export function ChatToolPart({
     || inputSummary
     || displayTitle;
   const processStepIcon = isTodoTool
-    ? <ListTree aria-hidden="true" className="h-[15px] w-[15px]" />
+    ? <ChatStepIcon kind="plan" />
     : config.icon;
   const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
   const statusBadgeClass = isTodoTool
@@ -7460,7 +7455,7 @@ export function ChatToolPart({
                 assistive tech (and hover) so pending/running/completed/error stay
                 distinguishable without colour. */}
             <span
-              className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}
+              className={`inline-grid h-5 w-5 flex-[0_0_20px] place-items-center ${processStepIconColor}`}
               title={config.label}
               aria-label={config.label}
               role="img"
@@ -7475,7 +7470,7 @@ export function ChatToolPart({
             )}
             <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500 flex-shrink-0" />
           </summary>
-          <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[28px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
             {toolDetails}
           </div>
         </details>

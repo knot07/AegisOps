@@ -1,6 +1,8 @@
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import HubFilters from './HubFilters';
 import './hub-filters.css';
+import './hub-detail.css';
+import './hub-tree.css';
 import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
@@ -260,14 +262,14 @@ function getHubDescription(entry: Pick<HubCatalogEntry, 'description' | 'descrip
   return getCatalogDescription(
     { description: entry.description, descriptionCn: entry.descriptionCn },
     language,
-  );
+  ).replace(/aegisops/gi, 'AegisOps');
 }
 
 function getHubName(entry: Pick<HubCatalogEntry, 'id' | 'name' | 'nameCn'>, language: string) {
   if (entry.name?.toLowerCase() === 'rex' || entry.id === 'rex') return 'Atlas';
   const name = entry.name?.trim();
   const nameCn = entry.nameCn?.trim();
-  return language.toLowerCase().startsWith('zh') ? (nameCn || name || entry.id) : (name || nameCn || entry.id);
+  return (language.toLowerCase().startsWith('zh') ? (nameCn || name || entry.id) : (name || nameCn || entry.id)).replace(/aegisops/gi, 'AegisOps');
 }
 
 const EMPTY_HUB_FACETS: HubCatalogFacets = {
@@ -614,7 +616,7 @@ export default function HubPage() {
               <button
                 onClick={handleRefresh}
                 disabled={refreshing}
-                className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50 disabled:opacity-50"
+                className="aegis-hub-refresh inline-flex items-center gap-2 px-3 py-2 rounded-lg text-sm disabled:opacity-50"
               >
                 <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
                 {text.refresh}
@@ -666,7 +668,7 @@ export default function HubPage() {
             <LoadingSpinner delayMs={HUB_LOADING_DELAY_MS} />
           </div>
         ) : (
-          <HubTree items={treeItems} actionId={actionId} text={text} onSelect={setSelected} onAction={runAction} />
+          <HubTree language={i18n.language} items={treeItems} actionId={actionId} text={text} onSelect={setSelected} onAction={runAction} />
         )}
       </div>
 
@@ -813,7 +815,8 @@ function HubTable({ items, actionId, tagLabels, language, text, onSelect, onActi
   );
 }
 
-function HubTree({ items, actionId, text, onSelect, onAction }: {
+function HubTree({ items, actionId, text, onSelect, onAction, language }: {
+  language: string;
   items: HubCatalogEntry[];
   actionId: string | null;
   text: HubText;
@@ -821,7 +824,7 @@ function HubTree({ items, actionId, text, onSelect, onAction }: {
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
 }) {
   const root = useMemo(() => {
-    const rootNode: HubTreeNode = { name: 'aegisopshub', path: 'aegisopshub', children: [] };
+    const rootNode: HubTreeNode = { name: 'AegisOps Hub', path: 'hub', children: [] };
     const nodeMap = new Map<string, HubTreeNode>([[rootNode.path, rootNode]]);
 
     const ensureNode = (parent: HubTreeNode, name: string) => {
@@ -858,8 +861,8 @@ function HubTree({ items, actionId, text, onSelect, onAction }: {
   }, [items]);
 
   return (
-    <div className="min-h-full bg-white border border-gray-200 rounded-xl p-3">
-      <HubTreeNodeView node={root} depth={0} actionId={actionId} text={text} onSelect={onSelect} onAction={onAction} root />
+    <div className="aegis-hub-tree min-h-full">
+      <HubTreeNodeView language={language} node={root} depth={0} actionId={actionId} text={text} onSelect={onSelect} onAction={onAction} root />
     </div>
   );
 }
@@ -871,65 +874,51 @@ interface HubTreeNode {
   entry?: HubCatalogEntry;
 }
 
-function HubTreeNodeView({ node, depth, actionId, text, onSelect, onAction, root = false }: {
+const HUB_DIRECTORY_LABELS: Record<string, string> = {
+  plugins: '插件资源', system: '系统内置', agents: '智能体', components: '场景套件',
+  skills: '技能库', tools: '工具清单', devices: '设备接入', webuis: '页面应用', workflows: '工作流',
+};
+
+function HubTreeNodeView({ node, depth, actionId, text, onSelect, onAction, language, root = false }: {
   node: HubTreeNode;
   depth: number;
   actionId: string | null;
   text: HubText;
+  language: string;
   onSelect: (entry: HubCatalogEntry) => void;
   onAction: (entry: HubCatalogEntry, action: 'install' | 'update' | 'uninstall') => void;
   root?: boolean;
 }) {
   const [open, setOpen] = useState(depth < 2);
   const hasChildren = node.children.length > 0;
-  const paddingLeft = `${depth * 18 + 8}px`;
+  const label = root ? 'AegisOps Hub' : node.entry ? getHubName(node.entry, language)
+    : language.startsWith('zh') ? (HUB_DIRECTORY_LABELS[node.name] || node.name) : node.name;
 
   return (
-    <div>
-      <div
-        className="flex items-center gap-2 py-1.5 pr-2 rounded-lg hover:bg-gray-50"
-        style={{ paddingLeft }}
-      >
-        {hasChildren ? (
-          <button onClick={() => setOpen(!open)} className="shrink-0">
-            <ChevronRight className={`w-4 h-4 text-gray-400 transition-transform ${open ? 'rotate-90' : ''}`} />
-          </button>
-        ) : (
-          <span className="w-4 shrink-0" />
-        )}
-        {hasChildren ? (
-          open ? <FolderOpen className="w-4 h-4 shrink-0 text-amber-500" /> : <Folder className="w-4 h-4 shrink-0 text-amber-500" />
-        ) : (
-          node.entry ? <ResourceIdentity kind={node.entry.type} name={node.entry.id} label={node.entry.name} compact /> : <FileText className="w-4 h-4 shrink-0 text-gray-400" />
-        )}
-        {node.entry ? (
-          <button onClick={() => onSelect(node.entry!)} className="flex-1 min-w-0 text-left">
-            <span className="truncate font-mono text-sm text-gray-800">{node.name}</span>
-          </button>
-        ) : (
-          <button onClick={() => hasChildren && setOpen(!open)} className="flex-1 min-w-0 text-left">
-            <span className={root ? 'font-medium text-gray-800' : 'font-mono text-sm text-gray-800'}>{node.name}</span>
-            <span className="ml-2 text-xs text-gray-400">({countPluginNodes(node)})</span>
-          </button>
-        )}
-        {node.entry && <StateBadge state={node.entry.state} text={text} guidedKind={node.entry.guidedInstall?.kind} />}
-        {node.entry && <ActionButtons item={node.entry} actionId={actionId} text={text} onAction={onAction} compact />}
+    <div className={`hub-tree-node ${root ? 'hub-tree-root' : ''}`}>
+      <div className="hub-tree-row">
+        <button
+          className="hub-tree-label"
+          onClick={() => node.entry ? onSelect(node.entry) : setOpen(!open)}
+          aria-expanded={hasChildren ? open : undefined}
+          title={label}
+        >
+          {hasChildren ? <ChevronRight className={`hub-tree-chevron ${open ? 'is-open' : ''}`} /> : <span className="hub-tree-chevron" />}
+          {node.entry ? <ResourceIdentity kind={node.entry.type} name={node.entry.id} label={node.entry.name} compact />
+            : root ? <Archive className="hub-tree-folder" />
+            : open ? <FolderOpen className="hub-tree-folder" /> : <Folder className="hub-tree-folder" />}
+          <span className="hub-tree-name">{label}</span>
+          {!node.entry && <span className="hub-tree-count">{countPluginNodes(node)}</span>}
+        </button>
+        {node.entry && <div className="hub-tree-actions">
+          <StateBadge state={node.entry.state} text={text} guidedKind={node.entry.guidedInstall?.kind} />
+          <ActionButtons item={node.entry} actionId={actionId} text={text} onAction={onAction} compact />
+        </div>}
       </div>
-      {open && (
-        <div>
-          {node.children.map(child => (
-            <HubTreeNodeView
-              key={child.path}
-              node={child}
-              depth={depth + 1}
-              actionId={actionId}
-              text={text}
-              onSelect={onSelect}
-              onAction={onAction}
-            />
-          ))}
-        </div>
-      )}
+      {open && hasChildren && <div className="hub-tree-children">
+        {node.children.map(child => <HubTreeNodeView key={child.path} node={child} depth={depth + 1}
+          actionId={actionId} text={text} language={language} onSelect={onSelect} onAction={onAction} />)}
+      </div>}
     </div>
   );
 }
@@ -992,44 +981,46 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
   };
 
   return (
-    // Below the fixed workspace header (h-14, z-50): starting at the top of
-    // the viewport put the title and the close button under it.
-    <div data-yushu-drawer className="fixed top-14 bottom-0 right-0 z-40 w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col max-md:max-w-full">
-      <div className="px-5 py-4 border-b border-gray-200 flex items-start justify-between max-md:gap-3 max-md:px-4">
+    // The full-height sheet sits above the workspace header, including its controls.
+    <div data-yushu-drawer data-plugin-detail={entry.id} style={resourceStyle(entry.type,entry.id,getHubName(entry,language))} className="aegis-hub-detail fixed top-0 bottom-0 right-0 z-[60] w-[860px] max-w-[95vw] bg-white border-l border-gray-200 shadow-xl flex flex-col max-md:max-w-full">
+      <div className="hub-detail-heading px-5 py-4 border-b border-gray-200 flex items-start justify-between max-md:gap-3 max-md:px-4">
         <div className="max-md:min-w-0">
           <div className="flex items-center gap-2 max-md:flex-wrap">
-            <h2 className="flex items-center gap-3 text-lg font-semibold text-gray-900"><ResourceIdentity kind={entry.type} name={entry.id} label={getHubName(entry,language)}/>{getHubName(entry, language)}</h2>
+            <h2 className="hub-detail-title"><ResourceIdentity kind={entry.type} name={entry.id} label={getHubName(entry,language)}/><span>{getHubName(entry, language)}</span></h2>
             <StateBadge state={entry.state} text={text} guidedKind={entry.guidedInstall?.kind} />
           </div>
           <p className="text-sm text-gray-500 mt-1">{getHubDescription(entry, language)}</p>
         </div>
-        <button onClick={onClose} className="p-1 rounded-lg hover:bg-gray-100 max-md:shrink-0"><X className="w-5 h-5" /></button>
+        <button onClick={onClose} aria-label={text.suiteInstallDismiss} className="hub-detail-close p-1 rounded-lg hover:bg-gray-100 max-md:shrink-0"><X className="w-5 h-5" /></button>
       </div>
-      <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between max-md:flex-wrap max-md:gap-2 max-md:px-4">
-        <div className="flex gap-2 max-md:w-full max-md:overflow-x-auto">
+      <div className="hub-detail-toolbar px-5 py-3 border-b border-gray-100 flex items-center justify-between max-md:flex-wrap max-md:gap-2 max-md:px-4">
+        <div className="hub-detail-tabs flex gap-2 max-md:w-full max-md:overflow-x-auto" role="tablist">
           {((entry.type === 'workflow'
             ? ['overview', 'flow', 'files', 'deps', 'permissions', 'versions']
             : ['overview', 'files', 'deps', 'permissions', 'versions']) as Array<'overview' | 'flow' | 'files' | 'deps' | 'permissions' | 'versions'>).map(tab => (
             <button
               key={tab}
               onClick={() => setActiveTab(tab)}
-              className={`px-3 py-1.5 text-sm rounded-lg max-md:shrink-0 max-md:whitespace-nowrap ${activeTab === tab ? 'bg-slate-800 text-white' : 'text-gray-600 hover:bg-gray-100'}`}
+              role="tab" aria-selected={activeTab === tab}
+              className="hub-detail-tab"
             >
               {text.tabs[tab]}
             </button>
           ))}
         </div>
-        <ActionButtons item={entry} actionId={actionId} text={text} onAction={onAction} />
+        <div className="hub-detail-actions"><ActionButtons item={entry} actionId={actionId} text={text} onAction={onAction} /></div>
       </div>
-      <div className="flex-1 overflow-hidden">
+      <div className="hub-detail-body flex-1 min-h-0 overflow-hidden">
         {activeTab === 'overview' && (
-          <div className="p-5 space-y-4 overflow-auto h-full text-sm max-md:p-4">
+          <div className="hub-detail-overview overflow-auto h-full">
+            <div className="hub-detail-info-grid">
             <InfoBlock label="ID" value={entry.id} />
             <InfoBlock label={text.type} value={formatPluginTypeLabel(entry.type, language)} />
             <InfoBlock label="Tag" value={entry.tags.join(', ') || '-'} />
             <InfoBlock label={text.useCase} value={entry.useCases.join(', ') || '-'} />
             <InfoBlock label={text.trust} value={entry.trust} />
             <InfoBlock label={text.manifest} value={entry.manifestPath} />
+            </div>
             {entry.type === 'component' && manifest?.components?.length ? (
               <div>
                 <div className="text-xs text-gray-400 mb-2">
@@ -1073,10 +1064,10 @@ function PluginDetail({ entry, language, onClose, onAction, actionId, text }: {
         )}
         {activeTab === 'files' && (
           <div className="h-full grid grid-cols-[280px_1fr] max-md:grid-cols-1 max-md:grid-rows-[auto_minmax(0,1fr)]">
-            <div className="border-r border-gray-200 overflow-auto p-3 max-md:max-h-48 max-md:border-b max-md:border-r-0">
+            <div className="hub-detail-file-tree border-r border-gray-200 overflow-auto p-3 max-md:max-h-48 max-md:border-b max-md:border-r-0">
               {tree ? <FileTree node={tree} onOpen={openFile} root /> : <LoadingSpinner />}
             </div>
-            <div className="overflow-auto">
+            <div className="hub-detail-file-content min-w-0 overflow-auto">
               {content ? (
                 <div className="h-full flex flex-col">
                   <div className="px-4 py-2 border-b border-gray-100 text-xs text-gray-500 font-mono">{content.path} · {content.size} bytes</div>
@@ -1182,13 +1173,13 @@ function Badge({ children, title }: { children: React.ReactNode; title?: string 
 
 function InfoBlock({ label, value }: { label: string; value: string }) {
   return (
-    <div>
-      <div className="text-xs text-gray-400 mb-1">{label}</div>
-      <div className="text-gray-800">{value}</div>
+    <div className="hub-detail-info">
+      <div className="hub-detail-label">{label}</div>
+      <div className="hub-detail-value">{value}</div>
     </div>
   );
 }
 
 function JsonPanel({ data }: { data: any }) {
-  return <pre className="h-full overflow-auto p-5 text-xs font-mono whitespace-pre-wrap">{JSON.stringify(data, null, 2)}</pre>;
+  return <pre className="hub-detail-json h-full overflow-auto p-5 text-xs font-mono whitespace-pre-wrap">{JSON.stringify(data, null, 2)}</pre>;
 }

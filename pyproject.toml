@@ -1,6 +1,6 @@
 [project]
 name = "aegisops"
-version = "2026.11.18"
+version = "2026.11.19"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "AegisOps Team", email = "team@example.com"}

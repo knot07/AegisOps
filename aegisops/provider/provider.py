@@ -710,6 +710,20 @@ class Provider:
                 "max_output_tokens": max_output,
             })
         
+        # A saved budget changes the compaction/input policy without inflating
+        # the upstream model's declared capacity or leaking a private API field.
+        try:
+            from aegisops.provider.model_manager import get_model_manager
+            parameters = get_model_manager().get_effective_default_parameters(provider_id, model_id)
+            limit = parameters.get("context_window_limit")
+            if isinstance(limit, int) and not isinstance(limit, bool) and 4096 <= limit <= context_window:
+                context_window = limit
+                if max_output >= limit - 1024:
+                    max_output = min(max_output or 4096, max(1024, limit // 4))
+                if max_input is not None:
+                    max_input = min(max_input, limit - max_output)
+        except Exception as exc:
+            log.debug("provider.context_budget_unavailable", {"error": str(exc)})
         return context_window, max_output, max_input
     
     @classmethod

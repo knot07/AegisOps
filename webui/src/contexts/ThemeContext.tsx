@@ -1,3 +1,4 @@
+import { ThemeSkinProvider } from './ThemeSkinContext';
 import { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
 
 export type Theme = 'light' | 'dark';
@@ -119,7 +120,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     [effectiveTheme, mode, setTheme, theme, toggleTheme],
   );
 
-  return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;
+  return <ThemeContext.Provider value={value}><ThemeSkinProvider>{children}</ThemeSkinProvider></ThemeContext.Provider>;
 }
 
 export { ThemeContext };

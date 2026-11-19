@@ -1,0 +1,25 @@
+.aegis-model-edit-sheet .model-edit-identity{padding:15px;border:1px solid color-mix(in srgb,var(--brand-accent) 20%,white);border-radius:13px;background:radial-gradient(ellipse at 100% 0,color-mix(in srgb,var(--brand-accent) 12%,white),transparent 90%),linear-gradient(115deg,var(--brand-soft),#fff)}
+.model-edit-identity header{display:flex;align-items:center;gap:11px;min-width:0}.model-edit-identity header>div{min-width:0;flex:1}.model-edit-identity header small{display:block;color:color-mix(in srgb,var(--brand-accent) 62%,#869080);font-size:11px;line-height:1.6}.model-edit-identity header strong{display:block;color:var(--brand-accent);font-size:14px;font-weight:600;line-height:1.6;overflow-wrap:anywhere}.model-edit-identity header .aegis-model-brand-icon{width:40px;height:40px;padding:8px;border-radius:12px;flex-shrink:0}
+.model-edit-model header{padding-bottom:13px;margin-bottom:12px;border-bottom:1px solid color-mix(in srgb,var(--brand-accent) 12%,white)}
+.model-edit-model input{display:block;margin-top:6px;background:#ffffffd9!important}.model-edit-model label{min-width:0}
+.model-edit-runtime .model-edit-reasoning{padding-bottom:15px;margin-bottom:15px;border-bottom:1px solid color-mix(in srgb,var(--brand-accent) 13%,white);align-items:end}.model-edit-control-caption{display:block;font-size:12px;color:#6d7b6d;line-height:1.7;margin-bottom:7px}
+.model-edit-reasoning>div>label{min-height:36px}
+.model-edit-budget-fields{margin-top:2px}
+.model-edit-capacity{margin-top:12px;padding-top:10px;border-top:1px solid color-mix(in srgb,var(--brand-accent) 12%,white)}
+.model-edit-capacity summary{list-style:none;display:flex;align-items:center;gap:8px;cursor:pointer;color:var(--brand-accent);font-size:11px;min-height:24px}.model-edit-capacity summary::-webkit-details-marker{display:none}.model-edit-capacity summary strong{font-size:11px;font-weight:550}.model-edit-capacity summary small{margin-left:auto;color:#9aa18f;font-size:10px}.model-edit-capacity summary svg{transition:transform .15s}.model-edit-capacity[open] summary svg{transform:rotate(180deg)}.model-edit-capacity>label{display:block;margin-top:10px}
+.aegis-model-edit-sheet fieldset button[role=switch][aria-checked=true]{background:var(--brand-accent)!important;color:var(--brand-accent)!important}.aegis-model-edit-sheet fieldset button[role=switch][aria-checked=true]:disabled{background:color-mix(in srgb,var(--brand-accent) 30%,white)!important;opacity:.65}
+.aegis-model-edit-sheet fieldset button[role=switch] .text-green-500,.aegis-model-edit-sheet fieldset button[role=switch] .text-green-300{color:var(--brand-accent)!important}.aegis-model-edit-sheet fieldset button[role=switch]:has(svg){background:transparent!important}
+.aegis-model-edit-sheet .yushu-creation-footer button.bg-red-600{background:linear-gradient(120deg,color-mix(in srgb,var(--brand-accent) 78%,white),var(--brand-accent))!important;color:#fff!important;border:1px solid var(--brand-accent)!important;box-shadow:0 3px 9px color-mix(in srgb,var(--brand-accent) 16%,transparent)!important}
+.aegis-model-edit-sheet .yushu-creation-footer button.bg-red-600:hover{filter:brightness(.95)}
+.aegis-model-edit-sheet .yushu-creation-footer button.bg-gray-100{background:var(--brand-soft)!important;color:var(--brand-accent)!important;border:1px solid color-mix(in srgb,var(--brand-accent) 16%,white)!important}
+.aegis-model-edit-sheet .model-edit-capacity summary:focus-visible{outline:2px solid var(--brand-accent);outline-offset:3px;border-radius:5px}
+.dark .aegis-model-edit-sheet .model-edit-identity{background:linear-gradient(115deg,color-mix(in srgb,var(--brand-accent) 17%,#293228),#293228);border-color:color-mix(in srgb,var(--brand-accent) 25%,#3b4834)}
+.dark .model-edit-identity header strong{color:color-mix(in srgb,var(--brand-accent) 50%,white)}.dark .model-edit-identity header small{color:color-mix(in srgb,var(--brand-accent) 35%,#b8c6ae)}
+.dark .model-edit-model input{background:#293228!important;color:#dce6d4}.dark .model-edit-control-caption{color:#beccb4}.dark .model-edit-capacity summary{color:color-mix(in srgb,var(--brand-accent) 45%,white)}
+@media(prefers-reduced-motion:reduce){.model-edit-capacity summary svg{transition:none}}
+
+/* Opt this model sheet into brand-colored primary actions through shared tokens. */
+.aegis-model-edit-sheet{--aegis-primary-background:linear-gradient(120deg,color-mix(in srgb,var(--brand-accent) 78%,white),var(--brand-accent));--aegis-primary-hover-background:linear-gradient(120deg,color-mix(in srgb,var(--brand-accent) 88%,white),var(--brand-accent));--aegis-primary-border:var(--brand-accent);--aegis-primary-text:#fff}
+
+.aegis-model-edit-sheet .model-edit-enabled>label{flex-direction:row-reverse;justify-content:space-between}
+

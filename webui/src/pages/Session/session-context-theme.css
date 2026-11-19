@@ -1,0 +1,25 @@
+.aegis-context-panel{font-family:inherit;font-size:13px;color:rgb(var(--ui-text));background:linear-gradient(150deg,#f7faF4,#fff 35%)}
+.aegis-context-panel .context-panel-heading{height:58px;padding:0 16px;background:linear-gradient(110deg,#e9f2dd,#f7faf2);border-color:#e0e8d7}
+.context-panel-heading>svg{color:#6f9348}.context-panel-heading>span{font-size:14px;font-weight:650;color:#40551f}
+.aegis-context-panel .context-panel-heading button{border-radius:9px;color:#7b8b70}.aegis-context-panel .context-panel-heading button:hover{background:#e3edD7;color:#4f6f30}
+.aegis-context-panel .context-panel-filters{padding:12px;gap:9px;border-color:#e6ecdf;background:#ffffffb3}
+.aegis-context-panel .context-panel-filters>div:first-child{flex-basis:100%}
+.aegis-context-panel :is(input,select){height:34px!important;font-family:inherit!important;font-size:12px!important;border-radius:10px!important;border-color:#dfe7d7!important;box-shadow:none!important}
+.aegis-context-panel input:focus,.aegis-context-panel select:focus{border-color:#95b66f!important;outline:none;box-shadow:0 0 0 3px #9dbd7222!important}
+.aegis-context-panel .context-panel-filters>div:last-child{width:100%}.aegis-context-panel .context-panel-filters select{flex:1;min-width:0;background:#f7faf3;color:#60724c}
+.aegis-context-panel .context-panel-section{margin:10px 12px;border:1px solid #e3e9dc;border-radius:12px;background:#fff;overflow:hidden}
+.context-panel-section>div:first-child{min-height:44px;background:linear-gradient(110deg,#f1f6e9,#fff);padding:10px 11px}
+.context-panel-section>div:first-child button>span:first-child{color:#779955}.context-panel-section>div:first-child button>span:nth-child(2){font-size:13px;font-weight:600;color:#4b6135}
+.context-panel-section>div:first-child button>span:nth-child(3){background:#eaf1df;color:#7b915c;border-radius:6px;font-size:11px;padding:1px 6px}
+.aegis-context-panel .session-knowledge{padding:14px 12px;margin:10px 12px;border:1px solid #e3e9dc;border-radius:12px;background:#fff}
+.aegis-context-panel .session-knowledge-heading{font-size:13px;font-weight:600;color:#4b6135}
+.aegis-context-panel .session-knowledge-help{font-size:11px;line-height:1.6;margin-top:5px}
+.aegis-context-panel .session-knowledge-empty{font-size:12px;line-height:1.7;padding:16px 8px}
+.aegis-context-panel .text-sm{font-size:13px}.aegis-context-panel .text-xs{font-size:12px}
+.dark .aegis-context-panel{background:#222a23}.dark .aegis-context-panel .context-panel-heading{background:linear-gradient(110deg,#304029,#273222);border-color:#405037}
+.dark .context-panel-heading>span{color:#d0e5b6}.dark .aegis-context-panel .context-panel-filters{background:#222a23;border-color:#3d4937}
+.dark .aegis-context-panel :is(input,select){background:#293326!important;border-color:#45543a!important;color:#d5e2c8}
+.dark .aegis-context-panel :is(.context-panel-section,.session-knowledge){background:#263025;border-color:#3c4b35}
+.dark .context-panel-section>div:first-child{background:linear-gradient(110deg,#303d28,#263025)}
+.dark .context-panel-section>div:first-child button>span:nth-child(2),.dark .aegis-context-panel .session-knowledge-heading{color:#d0e0bc}
+.dark .context-panel-section>div:first-child button>span:nth-child(3){background:#3a492e;color:#b8d194}

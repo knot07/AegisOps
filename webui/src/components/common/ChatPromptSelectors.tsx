@@ -1,6 +1,8 @@
+import ModelReasoningBadge from '@/components/common/ModelReasoningBadge';
+import ModelPreferencesDialog from './ModelPreferencesDialog';
 import {ModelBrandIcon, brandStyle, AgentIdentity, agentStyle} from '@/components/common/VisualIdentity';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Bot, ChevronDown, Cpu, Info, Sparkles } from 'lucide-react';
+import { Bot, ChevronDown, Cpu, Info, Sparkles, Settings2 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { Agent } from '@/api/agent';
@@ -27,6 +29,7 @@ export type ChatModelOption = {
   contextLabel: string;
   contextWindowTokens: number | null;
   supportsVision: boolean | null;
+  reasoningSupported?: boolean;
 };
 
 export type ChatModelProviderGroup = {
@@ -143,6 +146,7 @@ export function useChatModelOptions({ enableAuto = false }: { enableAuto?: boole
         pricingLabel: formatPricing(model.pricing),
         contextLabel: formatContextWindow(model.limits?.context_window),
         contextWindowTokens: model.limits?.context_window ?? null,
+        reasoningSupported: model.capabilities?.supports_reasoning || model.capabilities?.features?.includes('reasoning'),
         supportsVision: typeof model.capabilities?.supports_vision === 'boolean'
           ? model.capabilities.supports_vision
           : null,
@@ -489,12 +493,12 @@ export function ChatModelPicker({
   onSelectModel: (option: ChatModelOption) => void;
   autoOption?: ChatModelPickerAutoOption;
 }) {
-  const { t } = useTranslation('session');
+  const { t, i18n } = useTranslation('session');
+  const [showPreferences, setShowPreferences] = useState(false);
   const [open, setOpen] = useState(false);
   const selectorRef = useRef<HTMLDivElement>(null);
   const [menuLeftOffset, setMenuLeftOffset] = useState(0);
   const { tooltip, showTooltip, hideTooltip } = useSelectorTooltip();
-  const hasOptions = groupedOptions.some((group) => group.models.length > 0);
   const updateMenuLeftOffset = useCallback(() => {
     const selector = selectorRef.current;
     if (!selector) return;
@@ -526,15 +530,15 @@ export function ChatModelPicker({
   }, [open, updateMenuLeftOffset]);
 
   return (
-    <div ref={selectorRef} className="relative" data-model-selector>
+    <div ref={selectorRef} className="relative aegis-chat-model-selector" data-model-selector>
       <button
         type="button"
         onClick={() => {
           if (!open) updateMenuLeftOffset();
           setOpen((value) => !value);
         }}
-        disabled={loading || !hasOptions}
-        className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+        disabled={loading}
+        className="aegis-chat-model-trigger flex h-7 min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
         title={autoOption?.selected
           ? `${t('modelPicker.auto')}: ${autoOption.statusLabel}`
           : selectedModelOption
@@ -544,11 +548,12 @@ export function ChatModelPicker({
         {autoOption?.selected
           ? <Sparkles className="h-3 w-3 shrink-0" />
           : <ModelBrandIcon value={selectedModelOption?.modelID || ''} className="is-composer" />}
-        <span className="truncate font-medium">
+        <span className="aegis-chat-model-name" title={selectedModelOption?.label}>
           {autoOption?.selected
             ? t('modelPicker.auto')
             : selectedModelOption?.label ?? (loading ? t('loading') : t('modelPicker.empty'))}
         </span>
+        {!autoOption?.selected && <ModelReasoningBadge providerID={selectedModelOption?.providerID} modelID={selectedModelOption?.modelID} supported={selectedModelOption?.reasoningSupported} />}
         <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
@@ -659,8 +664,10 @@ export function ChatModelPicker({
               </>
             )}
           </div>
+          <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800"><button type="button" className="model-preferences-launch" onClick={() => { setOpen(false); setShowPreferences(true); }}><Settings2 size={14} />{i18n?.language?.startsWith('zh') ? '模型管理' : 'Model preferences'}</button></div>
         </div>
       )}
+      {showPreferences && <ModelPreferencesDialog onClose={() => setShowPreferences(false)} />}
       <SelectorTooltipOverlay tooltip={tooltip} />
     </div>
   );

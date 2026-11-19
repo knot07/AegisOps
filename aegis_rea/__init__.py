@@ -1,5 +1,9 @@
 """REA native reverse engineering plugin for AegisOps incident evidence."""
 def register():
+ from aegisops.server.route_extensions import registered_route_providers
+ # Tool refresh invokes package entry points again; HTTP routes belong to startup.
+ if 'aegis-rea' in registered_route_providers():
+  return
  from fastapi import APIRouter,Request,HTTPException
  from fastapi.responses import Response
  from aegisops.server.auth import require_admin

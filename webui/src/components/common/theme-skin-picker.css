@@ -1,0 +1,23 @@
+.aegis-skin-picker{width:100%;min-width:0}
+.aegis-skin-picker>p{margin:0 0 10px;color:rgb(var(--ui-secondary));font-size:11px;font-weight:500}
+.aegis-skin-options{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px}
+.aegis-skin-options>button{position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;min-width:0;min-height:76px;border:1px solid rgb(var(--ui-border));border-radius:10px;background:rgb(var(--ui-surface));padding:10px 4px;color:rgb(var(--ui-secondary));font-size:11px;line-height:16px;cursor:pointer;transition:background .15s,border-color .15s}
+.aegis-skin-options>button:hover{background:rgb(var(--ui-hover));border-color:var(--swatch)}
+.aegis-skin-options>button>span:not(.aegis-skin-swatch){white-space:nowrap;font-size:11px;line-height:16px}
+.aegis-skin-options>button[aria-pressed=true]{background:rgb(var(--ui-selected));border-color:var(--skin-outline,#86aa67);color:rgb(var(--ui-text));font-weight:600}
+.aegis-skin-options>button:focus-visible{outline:2px solid var(--skin-accent,#658b44);outline-offset:3px}
+.aegis-skin-swatch{display:flex;gap:2px;width:32px;height:20px;border-radius:6px;overflow:hidden;border:1px solid #74829430;background:var(--swatch-light);flex:none}
+.aegis-skin-swatch i:first-child{width:8px;background:var(--swatch-dark)}
+.aegis-skin-swatch i:nth-child(2){width:8px;background:var(--swatch)}
+.aegis-skin-swatch i:last-child{flex:1;background:var(--swatch-light)}
+.aegis-skin-check{position:absolute;top:4px;right:4px;visibility:hidden;color:var(--skin-accent,#526f37)}
+html.dark .aegis-skin-check{color:var(--night-green,#b8d98c)}
+.aegis-skin-options>button[aria-pressed=true] .aegis-skin-check{visibility:visible}
+.aegis-skin-picker.is-compact{border-top:1px solid rgb(var(--ui-border));margin-top:6px;padding:12px 6px 4px}
+.is-compact .aegis-skin-options{gap:5px}
+.is-compact .aegis-skin-options>button{font-size:10px;min-height:66px;gap:6px;border-radius:8px;padding:8px 2px}
+.is-compact .aegis-skin-swatch{width:28px;height:18px}
+.is-compact .aegis-skin-options>button>span:not(.aegis-skin-swatch){font-size:10px}
+.yushu-menu-theme{width:330px!important;max-width:calc(100vw - 24px);max-height:calc(100dvh - 24px);overflow-y:auto}
+@media(max-width:420px){.aegis-skin-options{grid-template-columns:repeat(3,minmax(0,1fr))}.is-compact .aegis-skin-options{grid-template-columns:repeat(5,minmax(0,1fr))}}
+@media(prefers-reduced-motion:reduce){.aegis-skin-options>button{transition:none}}

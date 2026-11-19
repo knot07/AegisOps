@@ -190,6 +190,7 @@ vi.mock('@/api/provider', () => ({
 
 vi.mock('@/components/common/Toast', () => ({
   useToast: () => toast,
+  useOptionalToast: () => toast,
 }));
 
 vi.mock('@/contexts/AuthContext', () => ({
@@ -1618,7 +1619,7 @@ describe('SessionPage session actions menu', () => {
 
     expect(menu.parentElement).toBe(document.body);
     expect(menu).toHaveAttribute('data-execution-mode-selector');
-    expect(menu).toHaveStyle({ width: '520px' });
+    expect(menu).toHaveStyle({ width: '480px' });
     await user.hover(plan);
     expect(plan).toHaveAttribute('title', 'executionMode.options.plan.label\nexecutionMode.options.plan.description');
     expect(plan).toHaveAttribute('aria-checked', 'false');
@@ -1635,7 +1636,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.queryByRole('menu', { name: 'executionMode.title' })).not.toBeInTheDocument();
   });
 
-  it('uses the same width for execution and model menus with full hover text', async () => {
+  it('sizes execution and model menus independently with full hover text', async () => {
     const user = userEvent.setup();
     useProviders.mockReturnValue({
       providers: modelProviders,
@@ -1654,7 +1655,7 @@ describe('SessionPage session actions menu', () => {
     await user.click(await screen.findByRole('button', { name: 'executionMode.title' }));
     const executionMenu = screen.getByRole('menu', { name: 'executionMode.title' });
     const menuWidth = executionMenu.style.width;
-    expect(menuWidth).toBe('520px');
+    expect(menuWidth).toBe('480px');
     await user.click(document.body);
 
     await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
@@ -1701,7 +1702,7 @@ describe('SessionPage session actions menu', () => {
       </MemoryRouter>,
     );
 
-    await user.click(await screen.findByRole('button', { name: triggerName }));
+    await user.click(await screen.findByRole('button', { name: new RegExp(triggerName) }));
     await user.click(await screen.findByRole('button', { name: actionName }));
     expect(screen.getByTestId('location')).toHaveTextContent(destination);
     expect(screen.queryByRole('button', { name: actionName })).not.toBeInTheDocument();
@@ -2033,198 +2034,11 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
   });
 
-  it('starts SOC alert operations setup when the component is already installed', async () => {
-    const user = userEvent.setup();
-
+  it('keeps the welcome page free of the removed alert operations shortcuts', () => {
     renderSessionPage();
-    await user.click(screen.getByRole('button', { name: 'welcome.alertOperations' }));
-
-    await waitFor(() => {
-      expect(hubAPI.catalog).toHaveBeenCalledWith({ type: 'component', q: 'soc-workspace' });
-    });
+    expect(screen.queryByRole('button', { name: 'welcome.alertOperations' })).not.toBeInTheDocument();
+    expect(screen.queryByTestId('welcome-shortcuts')).not.toBeInTheDocument();
     expect(hubAPI.install).not.toHaveBeenCalled();
-    expect(hubAPI.installStream).not.toHaveBeenCalled();
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith(
-        '/api/session/session-2/prompt_async',
-        expect.objectContaining({
-          displayText: '@@aegisops-instruction:welcome.alertOperations',
-          parts: expect.arrayContaining([
-            expect.objectContaining({
-              text: 'welcome.alertOperationsSuggestion',
-              type: 'text',
-            }),
-          ]),
-        }),
-      );
-    });
-    await waitFor(() => {
-      expect(screen.getByTestId('session-chat')).toHaveAttribute(
-        'data-optimistic-text',
-        'welcome.alertOperationsSuggestion',
-      );
-      expect(screen.getByTestId('session-chat')).toHaveAttribute(
-        'data-optimistic-display',
-        '@@aegisops-instruction:welcome.alertOperations',
-      );
-    });
-    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
-  });
-
-  it('starts alert operations in the existing empty session without creating or moving a session', async () => {
-    welcomeProbe.forSessions = true;
-    renderSessionPage('/sessions/session-1');
-    await userEvent.setup().click(await screen.findByRole('button', { name: 'welcome.alertOperations' }));
-    await waitFor(() => expect(sendWelcomePrompt).toHaveBeenCalledWith(
-      'session-1', 'welcome.alertOperationsSuggestion',
-      { displayText: '@@aegisops-instruction:welcome.alertOperations' },
-    ));
-    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
-    expect(sessionApi.moveToProject).not.toHaveBeenCalled();
-    expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
-  });
-
-  it('installs the Alert Operations Suite before starting alert operations setup', async () => {
-    const user = userEvent.setup();
-    hubAPI.catalog.mockResolvedValueOnce({
-      data: [{
-        id: 'soc-workspace',
-        type: 'component',
-        name: 'Alert Operations Suite',
-        nameCn: '告警运营套件',
-        state: 'available',
-      }],
-    });
-    hubAPI.installStream.mockImplementationOnce(async (_type, _id, onProgress) => {
-      onProgress({
-        event: 'start',
-        id: 'soc-workspace',
-        type: 'component',
-        name: 'Alert Operations Suite',
-        nameCn: '告警运营套件',
-        total: 1,
-        items: [{
-          type: 'webui',
-          id: 'soc_ui',
-          name: 'SOC Workspace WebUI',
-          status: 'pending',
-        }],
-      });
-      onProgress({
-        event: 'item',
-        id: 'soc-workspace',
-        type: 'component',
-        name: 'Alert Operations Suite',
-        nameCn: '告警运营套件',
-        total: 1,
-        item: {
-          type: 'webui',
-          id: 'soc_ui',
-          name: 'SOC Workspace WebUI',
-          status: 'installed',
-        },
-      });
-      onProgress({
-        event: 'complete',
-        id: 'soc-workspace',
-        type: 'component',
-        name: 'Alert Operations Suite',
-        nameCn: '告警运营套件',
-        total: 1,
-      });
-    });
-
-    renderSessionPage();
-    await user.click(screen.getByRole('button', { name: 'welcome.alertOperations' }));
-
-    await waitFor(() => {
-      expect(hubAPI.installStream).toHaveBeenCalledWith('component', 'soc-workspace', expect.any(Function));
-    });
-    expect(await screen.findByText('场景套件安装进度')).toBeInTheDocument();
-    expect(screen.getByText('SOC Workspace WebUI')).toBeInTheDocument();
-    expect(screen.getByText('已安装')).toBeInTheDocument();
-    expect(global.confirm).toHaveBeenCalledWith('welcome.socComponentInstallConfirm');
-    expect(toast.success).not.toHaveBeenCalled();
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith(
-        '/api/session/session-2/prompt_async',
-        expect.objectContaining({
-          displayText: '@@aegisops-instruction:welcome.alertOperations',
-          parts: expect.arrayContaining([
-            expect.objectContaining({
-              text: 'welcome.alertOperationsSuggestion',
-              type: 'text',
-            }),
-          ]),
-        }),
-      );
-    });
-    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
-  });
-
-  it('shows a localized error when the Alert Operations Suite is missing', async () => {
-    const user = userEvent.setup();
-    hubAPI.catalog.mockResolvedValueOnce({ data: [] });
-
-    renderSessionPage();
-    await user.click(screen.getByRole('button', { name: 'welcome.alertOperations' }));
-
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith(
-        'welcome.socComponentMissingTitle',
-        'welcome.socComponentMissingDescription',
-      );
-    });
-    expect(hubAPI.install).not.toHaveBeenCalled();
-    expect(hubAPI.installStream).not.toHaveBeenCalled();
-    expect(client.post).not.toHaveBeenCalled();
-    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
-  });
-
-  it('shows a localized error title when Alert Operations Suite installation fails', async () => {
-    const user = userEvent.setup();
-    hubAPI.catalog.mockResolvedValueOnce({
-      data: [{
-        id: 'soc-workspace',
-        type: 'component',
-        name: 'Alert Operations Suite',
-        nameCn: '告警运营套件',
-        state: 'available',
-      }],
-    });
-    hubAPI.installStream.mockRejectedValueOnce(new Error('install failed'));
-
-    renderSessionPage();
-    await user.click(screen.getByRole('button', { name: 'welcome.alertOperations' }));
-
-    await waitFor(() => {
-      expect(toast.error).toHaveBeenCalledWith(
-        'welcome.socComponentInstallFailedTitle',
-        'install failed',
-      );
-    });
-    expect(await screen.findByText('场景套件安装进度')).toBeInTheDocument();
-    expect(screen.getByText('安装失败: 告警运营套件')).toBeInTheDocument();
-    expect(client.post).not.toHaveBeenCalled();
-    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
-  });
-
-  it('does not start alert operations setup when component installation is declined', async () => {
-    const user = userEvent.setup();
-    vi.mocked(global.confirm).mockReturnValueOnce(false);
-    hubAPI.catalog.mockResolvedValueOnce({
-      data: [{ id: 'soc-workspace', type: 'component', state: 'available' }],
-    });
-
-    renderSessionPage();
-    await user.click(screen.getByRole('button', { name: 'welcome.alertOperations' }));
-
-    await waitFor(() => {
-      expect(hubAPI.catalog).toHaveBeenCalledWith({ type: 'component', q: 'soc-workspace' });
-    });
-    expect(hubAPI.install).not.toHaveBeenCalled();
-    expect(hubAPI.installStream).not.toHaveBeenCalled();
-    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');
   });
 
   it('does not auto-attach the previously selected session on first app visit', () => {
@@ -3232,222 +3046,10 @@ describe('SessionPage session actions menu', () => {
       welcomeProbe.forSessions = false;
     });
 
-    it('sits in the shortcut row with the plug icon and the 「新」 badge', async () => {
+    it('keeps REA installation in the plugin square instead of the removed welcome row', () => {
       mockRea();
       renderSessionPage();
-      const shortcut = await screen.findByTestId('rea-shortcut');
-      const row = screen.getByTestId('welcome-shortcuts');
-      expect(row).toContainElement(shortcut);
-      expect(within(row).getByText('welcome.alertOperations')).toBeInTheDocument();
-      expect(shortcut).toHaveTextContent('rea.entry.label');
-      await waitFor(() => expect(within(shortcut).getByTestId('rea-new-badge')).toHaveTextContent('rea.entry.badge'));
-    });
-
-    it('drops the badge when the status says so', async () => {
-      mockRea({ badge: false });
-      renderSessionPage();
-      const shortcut = await screen.findByTestId('rea-shortcut');
-      await waitFor(() => expect(client.get).toHaveBeenCalledWith('/api/rea/status', expect.anything()));
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
-      expect(within(shortcut).queryByTestId('rea-new-badge')).not.toBeInTheDocument();
-    });
-
-    it('fills the full install guide into the message box of the new conversation and sends nothing', async () => {
-      const user = userEvent.setup();
-      mockRea();
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
-      expectNothingSent();
-      expect(screen.getByTestId('session-location')).toHaveTextContent(/^\/sessions$/);
-      const chat = screen.getByTestId('session-chat');
-      expect(chat).toHaveTextContent('no-session');
-      // What the user sends goes to Rex in Build mode, the same as the guide was meant for.
-      expect(chat).toHaveAttribute('data-agent-name', 'rex');
-      expect(chat).toHaveAttribute('data-execution-mode', 'build');
-    });
-
-    it('switches a plan-mode draft to Build when it fills the guide in', async () => {
-      const user = userEvent.setup();
-      window.localStorage.setItem('aegisops:session-execution-mode:draft', 'plan');
-      mockRea();
-      renderSessionPage();
-      expect(await screen.findByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
-    });
-
-    it('fills the analysis prompt in once REA is ready, for members too', async () => {
-      const user = userEvent.setup();
-      mockRea({ state: 'ready', installed: true, badge: false, canInstall: false });
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.usePrompt'));
-      expectNothingSent();
-    });
-
-    it.each([
-      ['install', 'not_installed', true, 'rea.installPrompt'],
-      ['use', 'ready', true, 'rea.usePrompt'],
-      ['install from a session missing in the list', 'not_installed', false, 'rea.installPrompt'],
-      ['use when degraded', 'degraded', true, 'rea.usePrompt'],
-    ])('prefills the current session without creating, sending or moving a session for REA %s', async (_label, state, listed, prompt) => {
-      welcomeProbe.forSessions = true;
-      const folderSession = { ...session, projectID: 'prj_demo', effectiveProjectID: 'prj_demo' };
-      useSessions.mockReturnValue({
-        ...useSessions(), sessions: listed ? [folderSession] : [],
-      });
-      sessionApi.get.mockResolvedValue(folderSession);
-      mockRea({ state, installSessionId: 'session-old' });
-      renderSessionPage('/sessions/session-1');
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
-      await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe(prompt));
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
-      expect(sendWelcomePrompt).not.toHaveBeenCalled();
-      expectNothingSent();
-      expect(client.patch).not.toHaveBeenCalled();
-      expect(sessionApi.moveToProject).not.toHaveBeenCalled();
-      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
-    });
-
-    it.each(['installing', 'validating', 'install_failed'])('opens the existing install conversation when REA is %s elsewhere', async (state) => {
-      welcomeProbe.forSessions = true;
-      useSessions.mockReturnValue({
-        ...useSessions(), sessions: [session, { ...secondSession, id: 'session-old' }],
-      });
-      mockRea({ state, installSessionId: 'session-old' });
-      renderSessionPage('/sessions/session-1');
-      await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-old'));
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-old'));
-      expect(composerText()).toBe(state === 'install_failed' ? 'rea.repairPrompt' : '');
-      expect(sendWelcomePrompt).not.toHaveBeenCalled();
-      expectNothingSent();
-    });
-
-    it('does not prefill or send a shortcut to a read-only session', async () => {
-      welcomeProbe.forSessions = true;
-      useSessions.mockReturnValue({ ...useSessions(), sessions: [{ ...session, canWrite: false }] });
-      mockRea();
-      renderSessionPage('/sessions/session-1');
-      await userEvent.setup().click(await screen.findByTestId('rea-shortcut'));
-      expect(composerText()).toBe('');
-      expect(sendWelcomePrompt).not.toHaveBeenCalled();
-      expect(client.post).not.toHaveBeenCalled();
-    });
-
-    it('fills the analysis prompt in when REA broke after passing (Rex repairs first)', async () => {
-      const user = userEvent.setup();
-      mockRea({ state: 'degraded', badge: false });
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.usePrompt'));
-      expectNothingSent();
-    });
-
-    it('fills the guide in again after a failed install without a recent install conversation', async () => {
-      const user = userEvent.setup();
-      mockRea({ state: 'install_failed' });
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
-      expectNothingSent();
-    });
-
-    it('hands the install conversation over in Build mode even when it was left in Plan mode', async () => {
-      const user = userEvent.setup();
-      window.localStorage.setItem('aegisops:session-execution-mode:session-1', 'plan');
-      mockRea({ state: 'install_failed', installSessionId: 'session-1' });
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1'));
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build'));
-      expect(window.localStorage.getItem('aegisops:session-execution-mode:session-1')).toBeNull();
-      expectNothingSent();
-    });
-
-    it('fills the repair request in when the install conversation is the one on screen', async () => {
-      const user = userEvent.setup();
-      // e.g. the install conversation was cleared, so it shows the shortcut again, and left in Plan mode
-      welcomeProbe.forSessions = true;
-      window.localStorage.setItem('aegisops:session-execution-mode:session-1', 'plan');
-      mockRea({ state: 'install_failed', installSessionId: 'session-1' });
-      renderSessionPage('/sessions/session-1');
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan'));
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.repairPrompt'));
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
-      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
-      expectNothingSent();
-    });
-
-    it('continues a failed install in its conversation, with the repair request in the message box', async () => {
-      const user = userEvent.setup();
-      mockRea({ state: 'install_failed', installSessionId: 'session-1' });
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1'));
-      expect(window.localStorage.getItem('aegisops:chat-draft:session-1')).toBe('rea.repairPrompt');
-      await waitFor(() => expect(composerText()).toBe('rea.repairPrompt'));
-      expectNothingSent();
-    });
-
-    it('fills the guide into an empty conversation that already has an id, and only there', async () => {
-      const user = userEvent.setup();
-      welcomeProbe.forSessions = true;
-      mockRea();
-      renderSessionPage('/sessions/session-1');
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
-      expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1');
-      expectNothingSent();
-      await user.click(screen.getByText('start-new-session'));
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session'));
-      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
-      expect(composerText()).toBe('');
-    });
-
-    it('does not carry the filled guide into another conversation', async () => {
-      const user = userEvent.setup();
-      mockRea();
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(composerText()).toBe('rea.installPrompt'));
-      await user.click(screen.getByText('return-to-first'));
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1'));
-      expect(composerText()).toBe('');
-      await user.click(screen.getByText('start-new-session'));
-      await waitFor(() => expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session'));
-      expect(composerText()).toBe('');
-    });
-
-    it.each([
-      ['member, not installed', { canInstall: false }, 'info', 'rea.entry.memberInstall'],
-      ['member, install failed', { canInstall: false, state: 'install_failed' }, 'info', 'rea.entry.memberRepair'],
-      ['uninstalling', { state: 'uninstalling' }, 'info', 'rea.entry.uninstalling'],
-      ['uninstall failed', { state: 'uninstall_failed', uninstallJob: { residues: ['x'] } }, 'warning', 'rea.entry.uninstallFailed'],
-      ['installing elsewhere', { state: 'installing', job: { stage: 'components', progress: 10 } }, 'info', 'rea.entry.installing'],
-    ])('fills nothing in when %s', async (_label, overrides, kind, message) => {
-      const user = userEvent.setup();
-      mockRea(overrides);
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect((toast as Record<string, ReturnType<typeof vi.fn>>)[kind]).toHaveBeenCalledWith(message));
-      expect(composerText()).toBe('');
-      expectNothingSent();
-    });
-
-    it('opens the running install conversation of this administrator', async () => {
-      const user = userEvent.setup();
-      mockRea({ state: 'validating', installSessionId: 'session-1', job: { stage: 'validate', progress: 65 } });
-      renderSessionPage();
-      await user.click(await screen.findByTestId('rea-shortcut'));
-      await waitFor(() => expect(screen.getByTestId('session-location')).toHaveTextContent('/sessions/session-1'));
-      expect(window.localStorage.getItem('aegisops:chat-draft:session-1')).toBeNull();
+      expect(screen.queryByTestId('rea-shortcut')).not.toBeInTheDocument();
       expectNothingSent();
     });
 

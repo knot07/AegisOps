@@ -178,3 +178,30 @@ def test_delete_definition_requires_admin(monkeypatch: pytest.MonkeyPatch):
     member = _client("member")
     assert member.delete(f"/api/model/v2/definitions/{PROVIDER}/known").status_code == 403
     assert called == []
+
+
+@pytest.mark.parametrize("limit", [True, "32000", 0, -1, 4095, 128001])
+def test_context_budget_rejects_invalid_or_oversized_values(fake_manager, monkeypatch, limit):
+    manager = model_routes.get_model_manager()
+    manager.get_model = lambda pid, mid: SimpleNamespace(limits=SimpleNamespace(context_window=128000))
+    monkeypatch.setattr(model_routes, "get_model_manager", lambda: manager)
+    response = _client().put(f"/api/model/v2/settings/{PROVIDER}/known", json={"default_parameters": {"context_window_limit": limit}})
+    assert response.status_code == 422
+    assert not fake_manager
+
+
+def test_context_budget_and_thinking_settings_persist(fake_manager, monkeypatch):
+    manager = model_routes.get_model_manager()
+    manager.get_model = lambda pid, mid: SimpleNamespace(limits=SimpleNamespace(context_window=128000))
+    monkeypatch.setattr(model_routes, "get_model_manager", lambda: manager)
+    parameters = {"context_window_limit": 32000, "enable_thinking": False, "reasoning_effort": "medium", "temperature": 0.3}
+    response = _client().put(f"/api/model/v2/settings/{PROVIDER}/known", json={"default_parameters": parameters})
+    assert response.status_code == 200
+    assert fake_manager[-1]["default_parameters"] == parameters
+
+
+@pytest.mark.parametrize("parameters", [{"enable_thinking": "false"}, {"reasoning_effort": "ultra"}])
+def test_model_preferences_reject_invalid_thinking_types(fake_manager, parameters):
+    response = _client().put(f"/api/model/v2/settings/{PROVIDER}/known", json={"default_parameters": parameters})
+    assert response.status_code == 422
+    assert not fake_manager

@@ -35,3 +35,7 @@
 .aegis-hub-filters button:focus-visible{outline:2px solid #92aa63;outline-offset:2px}
 @keyframes aegis-facet-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 @media(prefers-reduced-motion:reduce){.aegis-hub-filters *{animation:none!important;transition:none!important}}
+
+[data-yushu-page=hub] .aegis-hub-refresh{background:linear-gradient(120deg,#c4df94,#acd078)!important;border:1px solid #a8c971!important;color:#40551f!important;box-shadow:0 3px 9px #587d2c18;font-size:13px;font-weight:600;min-height:36px;border-radius:11px!important}
+[data-yushu-page=hub] .aegis-hub-refresh:hover{background:linear-gradient(120deg,#bddb88,#a2c76c)!important}
+[data-yushu-page=hub] .aegis-hub-refresh:focus-visible{outline:2px solid #94b664;outline-offset:3px}

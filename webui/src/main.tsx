@@ -8,6 +8,7 @@ import './styles/yushu.css'
 import './styles/module-polish.css'
 import './styles/action-theme.css'
 import './styles/calendar-theme.css'
+import './styles/dark-theme.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <React.StrictMode>
@@ -15,3 +16,7 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <WorkspaceActionTheme />
   </React.StrictMode>,
 )
+
+import './styles/theme-palettes.css'
+
+import './styles/theme-skins.css'

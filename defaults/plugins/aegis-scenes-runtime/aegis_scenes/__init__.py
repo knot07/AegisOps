@@ -8,6 +8,10 @@ ROOT=Path(__file__).parent
 identity=ContextVar('aegis_scene_user',default=None)
 
 def register():
+    from aegisops.server.route_extensions import registered_route_providers
+    # Tool refresh invokes package entry points again; HTTP routes belong to startup.
+    if 'aegis-vuln-ops-scene' in registered_route_providers():
+        return
     from aegisops.hub.paths import register_hub_root
     from aegisops.server.route_extensions import register_route_provider
     from aegisops.server.auth import require_user

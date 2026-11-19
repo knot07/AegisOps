@@ -8,6 +8,8 @@
     <script>
       (function () {
         try {
+          var skin = localStorage.getItem('aegisops_theme_skin');
+          document.documentElement.dataset.themeSkin = ['sage','blue','teal','violet','sand'].indexOf(skin) >= 0 ? skin : 'sage';
           // Mirrors ThemeContext: an explicit choice wins, otherwise follow the OS.
           var mode = localStorage.getItem('aegisops_theme_mode');
           var prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;

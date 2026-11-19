@@ -1,0 +1,6 @@
+[data-model-selector].aegis-chat-model-selector{width:max-content;max-width:min(440px,100%);min-width:0;flex-shrink:1}
+button.aegis-chat-model-trigger{width:auto;max-width:440px;min-width:0;gap:8px}
+.aegis-chat-model-name{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:500}
+.aegis-chat-model-effort{flex-shrink:0;font-size:12px;font-weight:400;color:#798773;line-height:1.5;margin-left:2px}
+html.dark .aegis-chat-model-effort{color:#bdc9d6}
+@media(max-width:640px){[data-model-selector].aegis-chat-model-selector,button.aegis-chat-model-trigger{max-width:min(360px,calc(100vw - 74px))}}

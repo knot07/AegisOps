@@ -692,8 +692,8 @@ describe('HubPage catalog loading', () => {
 
     await user.click(screen.getByRole('button', { name: 'Directory View' }));
 
-    expect(await screen.findByText('complete-tree')).toBeInTheDocument();
-    expect(screen.getByText('paged-tree')).toBeInTheDocument();
+    expect(await screen.findByText('Complete Entry')).toBeInTheDocument();
+    expect(screen.getByText('Paged Entry')).toBeInTheDocument();
     expect(hubAPI.catalogPage).toHaveBeenCalledTimes(1);
     expect(hubAPI.catalogPage).toHaveBeenCalledWith(
       expect.objectContaining({ offset: 0, limit: 25 }),
@@ -952,7 +952,7 @@ describe('HubPage catalog loading', () => {
     renderHub();
     expect(await screen.findByText('Tree Action')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Directory View' }));
-    await user.click(await screen.findByRole('button', { name: 'tree-action' }));
+    await user.click(await screen.findByRole('button', { name: 'Tree Action' }));
     await user.click(await screen.findByRole('button', { name: 'Install' }));
     await waitFor(() => expect(hubAPI.install).toHaveBeenCalledWith('tool', 'tree-action'));
 
@@ -960,7 +960,7 @@ describe('HubPage catalog loading', () => {
       screen.getByPlaceholderText('Search plugin name, description, tag, use case'),
       { target: { value: 'latest' } },
     );
-    expect(await screen.findByRole('button', { name: 'tree-latest' })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: 'Tree Latest' })).toBeInTheDocument();
 
     await act(async () => {
       install.resolve();
@@ -970,8 +970,8 @@ describe('HubPage catalog loading', () => {
     await waitFor(() => {
       expect(hubAPI.catalog).toHaveBeenCalledWith({ q: 'tree-action', type: 'tool' });
     });
-    expect(screen.getByRole('button', { name: 'tree-latest' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'tree-action' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Tree Latest' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Tree Action' })).not.toBeInTheDocument();
     expect(hubAPI.catalogPage).toHaveBeenCalledTimes(2);
     expect(hubAPI.catalog.mock.calls.filter(([params]) => params?.q === undefined)).toHaveLength(1);
   });
@@ -991,7 +991,7 @@ describe('HubPage catalog loading', () => {
     expect(hubAPI.fileContent).toHaveBeenCalledWith('workflow', 'broken-wf', 'workflow.json');
   });
 
-  it('opens the plugin detail below the fixed workspace header, keeping its title and close button reachable (INC-D5A1458C)', async () => {
+  it('fills the viewport with the plugin detail above the workspace header, keeping controls reachable', async () => {
     const user = userEvent.setup();
     const entry = catalogEntry('soc-workspace', 'Alert Operations Suite');
     hubAPI.catalogPage.mockResolvedValue(catalogPage([entry]));
@@ -1002,8 +1002,9 @@ describe('HubPage catalog loading', () => {
 
     const heading = await screen.findByRole('heading', { name: 'Alert Operations Suite' });
     const drawer = heading.closest('.fixed') as HTMLElement;
-    // The workspace header is fixed at the top (h-14, z-50): the drawer starts under it.
-    expect(drawer.className.split(/\s+/)).toContain('top-14');
+    // Full-height sheet covers the workspace header, so its own controls remain on top.
+    expect(drawer.className.split(/\s+/)).toContain('top-0');
+    expect(drawer.className.split(/\s+/)).toContain('z-[60]');
     expect(drawer.className).not.toMatch(/(^|\s)inset-y-0(\s|$)/);
   });
 });

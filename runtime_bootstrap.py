@@ -14,7 +14,7 @@ def download(kind):
     target=cache/(url.rsplit('/',1)[1])
     if target.is_file() and hashlib.sha256(target.read_bytes()).hexdigest()==expected:return target
     temp=target.with_suffix(target.suffix+'.part');print('Downloading '+kind+' from official source...',flush=True)
-    request=urllib.request.Request(url,headers={'User-Agent':'AegisOps-Setup/2026.11.18'})
+    request=urllib.request.Request(url,headers={'User-Agent':'AegisOps-Setup/2026.11.19'})
     try:
         try:
             with urllib.request.urlopen(request,timeout=90) as response,temp.open('wb') as out:
@@ -92,5 +92,5 @@ def ensure_runtime():
     subprocess.run([str(node),str(npm),'ci','--omit=dev','--no-audit','--no-fund'],cwd=BASE/'webui',check=True)
     subprocess.run([str(python),'-I','-c','import fastapi,uvicorn,aiosqlite,litellm,aegis_scenes,asyncssh,winrm,numpy,onnxruntime,cv2,ddddocr; print("Dependency imports: OK")'],check=True,cwd=BASE)
     subprocess.run([str(BASE/'webui/node_modules/@esbuild/win32-x64/esbuild.exe'),'--version'],check=True)
-    marker.write_text(json.dumps({'fingerprint':fingerprint,'version':'2026.11.18'}),encoding='utf-8')
+    marker.write_text(json.dumps({'fingerprint':fingerprint,'version':'2026.11.19'}),encoding='utf-8')
     print('Dependencies ready; subsequent launches use this local runtime.',flush=True)

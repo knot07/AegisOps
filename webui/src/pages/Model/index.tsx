@@ -1,3 +1,7 @@
+import ThemedSelect from '@/components/common/ThemedSelect';
+import './model-editor.css';
+import ContextBudgetSlider from '@/components/common/ContextBudgetSlider';
+import { refreshChatModelResources } from '@/hooks/useChatModelResources';
 import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
 import { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
@@ -2260,6 +2264,7 @@ function ToggleField({ label, checked, onChange, disabled, disabledHint }: {
       <button
         type="button"
         role="switch"
+        aria-label={label}
         aria-checked={checked}
         disabled={disabled}
         onClick={() => !disabled && onChange(!checked)}
@@ -2408,7 +2413,11 @@ function ModelDetailSheet({
   onSaved: () => void;
 }) {
   const toast = useToast();
-  const { t } = useTranslation('model');
+  const { t, i18n } = useTranslation('model');
+  const zh = i18n.language.startsWith('zh');
+  const effortMap = model.capabilities?.thinking_level_map || {};
+  const efforts = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'].filter(key => typeof effortMap[key] === 'string');
+  const effortLabels: Record<string, string> = zh ? { minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '极高', max: '最大' } : {};
   const features = model.capabilities?.features || [];
   const modelSupportsReasoning = features.includes('reasoning') || !!model.capabilities?.supports_reasoning;
   const isPredefined = model.fetch_from === 'predefined';
@@ -2484,10 +2493,14 @@ function ModelDetailSheet({
       toast.error(t('pricing.invalidPrice'));
       return;
     }
+    const capacity = Number(contextWindow), output = Number(maxOutput);
+    const budget = defaultParameters.context_window_limit;
+    if (!Number.isInteger(capacity) || capacity < 4096 || !Number.isInteger(output) || output < 1 || output > capacity || (budget != null && (budget < 4096 || budget > capacity))) {
+      toast.error(zh ? '请检查上下文容量、最大输出与使用上限，使用上限不能超过模型容量。' : 'Check context capacity, maximum output and context budget.'); return;
+    }
     setLoading(true);
     try {
-      await Promise.all([
-        modelV2API.createDefinition(provider.id, {
+      await modelV2API.createDefinition(provider.id, {
           model_id: model.id,
           name: name.trim() || model.id,
           context_window: parseInt(contextWindow) || undefined,
@@ -2502,17 +2515,14 @@ function ModelDetailSheet({
             cache_read_price: cacheReadPrice.trim() === '' ? null : Number(cacheReadPrice),
             currency,
           } : {}),
-        }),
-        modelSettingsAPI.update(provider.id, model.id, {
+        });
+      await modelSettingsAPI.update(provider.id, model.id, {
           enabled,
           default_parameters: modelSupportsReasoning
-            ? {
-              ...defaultParameters,
-              enable_thinking: supportsReasoning,
-            }
-            : undefined,
-        }),
-      ]);
+            ? { ...defaultParameters, enable_thinking: supportsReasoning }
+            : defaultParameters,
+        });
+      await refreshChatModelResources();
       toast.success(t('credentialsSaved'));
       onSaved();
     } catch (e: any) {
@@ -2523,12 +2533,12 @@ function ModelDetailSheet({
   };
 
   return (
-    <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet"
+    <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet aegis-model-edit-sheet" surfaceStyle={brandStyle(model.id)}
       open
       mode="edit"
       entityType={t('form.model')}
       entityName={model.name}
-      icon={<Brain className="w-5 h-5" />}
+      icon={<ModelBrandIcon value={model.id} />}
       rexSystemContext=""
       rexWelcomeMessage=""
       submitDisabled={readOnly || loading || loadingSettings || !!settingsLoadError}
@@ -2546,56 +2556,29 @@ function ModelDetailSheet({
           <button type="button" onClick={loadModelSettings} disabled={loadingSettings} className="rounded border border-red-300 px-3 py-1.5 text-xs hover:bg-red-100 disabled:opacity-40">{t('configuration.retry')}</button>
         </div>
       )}
-      <fieldset disabled={readOnly} className="space-y-4 min-w-0">
+      <fieldset aria-label={zh ? '模型配置' : 'Model settings'} disabled={readOnly} className="space-y-4 min-w-0">
         {readOnly && <p className="text-xs text-gray-500">{t('detail.configAdminOnly')}</p>}
         {loadingSettings ? (
           <div className="flex justify-center py-8"><LoadingSpinner /></div>
         ) : (
           <>
-            {/* Provider — 只读 */}
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
-              <input type="text" readOnly value={provider.name} className={inputClsReadOnly} />
-            </div>
+            <section className="model-edit-identity model-edit-provider" style={brandStyle(provider.id)} data-model-provider={provider.id}>
+              <header>
+                <ModelBrandIcon value={provider.id} />
+                <div><small>{zh ? '模型服务商' : 'Provider'}</small><strong>{provider.name}</strong></div>
+              </header>
+            </section>
 
-            {/* 模型 ID + 显示名称：模型 ID 只读，显示名称可编辑 */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.modelId')}</label>
-                <input type="text" readOnly value={model.id} className={inputClsReadOnly} />
+            <section className="model-edit-identity model-edit-model" style={brandStyle(model.id)} data-model-identity={model.id}>
+              <header>
+                <ModelBrandIcon value={model.id} />
+                <div><small>{zh ? '模型' : 'Model'}</small><strong>{model.name}</strong></div>
+              </header>
+              <div className="grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+                <label>{t('form.modelId')}<input type="text" readOnly value={model.id} className={inputClsReadOnly} /></label>
+                <label>{t('form.displayName')}<input type="text" value={name} onChange={e => setName(e.target.value)} className={fieldCls} /></label>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.displayName')}</label>
-                <input
-                  type="text"
-                  value={name}
-                  onChange={e => setName(e.target.value)}
-                  className={fieldCls}
-                />
-              </div>
-            </div>
-
-            {/* 上下文窗口 + 最大输出 — 可编辑 */}
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.contextWindow')}</label>
-                <input
-                  type="number"
-                  value={contextWindow}
-                  onChange={e => setContextWindow(e.target.value)}
-                  className={fieldCls}
-                />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.maxOutput')}</label>
-                <input
-                  type="number"
-                  value={maxOutput}
-                  onChange={e => setMaxOutput(e.target.value)}
-                  className={fieldCls}
-                />
-              </div>
-            </div>
+            </section>
 
             {/* 能力 — 可编辑，与添加模型同款开关（绿色/灰色醒目） */}
             <div>
@@ -2622,15 +2605,54 @@ function ModelDetailSheet({
                   disabled={readOnly}
                   disabledHint={readOnlyHint}
                 />
-                <ToggleField
-                  label={t('form.reasoning')}
-                  checked={supportsReasoning}
-                  onChange={setSupportsReasoning}
-                  disabled={readOnly}
-                  disabledHint={readOnlyHint}
-                />
+
               </div>
             </div>
+
+            <section className="model-edit-runtime">
+              <h3><Brain size={15} />{zh ? '推理与上下文' : 'Reasoning and context'}</h3>
+              <div className="model-edit-reasoning grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+                <div>
+                <ToggleField
+                  label={zh ? '思考模式' : 'Thinking mode'}
+                  checked={supportsReasoning}
+                  onChange={setSupportsReasoning}
+                  disabled={readOnly || !modelSupportsReasoning}
+                  disabledHint={readOnlyHint}
+                />
+                </div>
+                <label>{zh ? '思考强度' : 'Reasoning effort'}
+                  <ThemedSelect label={zh ? '思考强度' : 'Reasoning effort'} value={defaultParameters.reasoning_effort || ''}
+                    themeStyle={brandStyle(model.id)} disabled={readOnly || !modelSupportsReasoning || !supportsReasoning || !efforts.length}
+                    onChange={value => { const next = { ...defaultParameters }; if (value) next.reasoning_effort = value; else delete next.reasoning_effort; setDefaultParameters(next); }}
+                    options={[{ value: '', label: efforts.length ? (zh ? '模型默认' : 'Model default') : (zh ? '自动适配' : 'Automatic') },
+                      ...efforts.map(effort => ({ value: effort, label: effortLabels[effort] || effort }))]} />
+                </label>
+              </div>
+              <div className="model-edit-budget-fields grid grid-cols-2 gap-3 max-sm:grid-cols-1">
+                <label>{t('form.maxOutput')}<input aria-label={t('form.maxOutput')} type="number" min={1} max={Number(contextWindow)} value={maxOutput} onChange={e => setMaxOutput(e.target.value)} className={fieldCls} /></label>
+                <label>{zh ? '上下文使用上限' : 'Context budget'}
+                  <input aria-label={zh ? '上下文使用上限' : 'Context budget'} type="number" min={4096} max={Number(contextWindow) || model.limits?.context_window} step={1}
+                    value={defaultParameters.context_window_limit ?? ''} placeholder={zh ? '跟随模型容量' : 'Model capacity'} className={fieldCls} onChange={e => {
+                      const next = { ...defaultParameters }; if (e.target.value) next.context_window_limit = Number(e.target.value); else delete next.context_window_limit; setDefaultParameters(next);
+                    }} />
+                </label>
+              </div>
+              <div className="model-edit-context-slider"><ContextBudgetSlider
+                label={zh ? '调整上下文使用上限' : 'Adjust context budget'}
+                capacity={Math.max(4096, Number(contextWindow) || 4096)}
+                value={defaultParameters.context_window_limit ?? (Number(contextWindow) || 4096)}
+                disabled={readOnly || loading}
+                onChange={value => setDefaultParameters(current => ({ ...current, context_window_limit: value }))} />
+              </div>
+              <details className="model-edit-capacity">
+                <summary><span>{zh ? '模型容量' : 'Model capacity'}</span><strong>{Number(contextWindow).toLocaleString()} tokens</strong><small>{zh ? '高级设置' : 'Advanced'}</small><ChevronDown size={13} /></summary>
+                <label>{zh ? '模型上下文容量' : 'Model context capacity'}
+                  <input aria-label={zh ? '模型上下文容量' : 'Model context capacity'} type="number" min={4096} value={contextWindow} className={fieldCls} onChange={e => setContextWindow(e.target.value)} />
+                </label>
+              </details>
+              <p>{zh ? '使用上限控制会话压缩，下一轮请求生效。' : 'The budget controls compaction from the next request.'}</p>
+            </section>
 
             {/* 价格 — 可编辑 */}
             <div>
@@ -2685,20 +2707,8 @@ function ModelDetailSheet({
               </div>}
             </div>
 
-            {/* 启用此模型 — 可编辑 */}
-            <div className="flex items-center justify-between py-2 border-t border-gray-200">
-              <label className="text-sm font-medium text-gray-700">{t('form.enableModel')}</label>
-              <button
-                type="button"
-                onClick={() => setEnabled(!enabled)}
-                className={`transition-colors ${readOnly ? 'cursor-not-allowed' : ''}`}
-                aria-checked={enabled}
-                title={readOnlyHint}
-              >
-                {enabled
-                  ? <ToggleRight className={`w-8 h-8 ${readOnly ? 'text-green-300' : 'text-green-500'}`} />
-                  : <ToggleLeft className={`w-8 h-8 ${readOnly ? 'text-gray-200' : 'text-gray-300'}`} />}
-              </button>
+            <div className="model-edit-enabled">
+              <ToggleField label={t('form.enableModel')} checked={enabled} onChange={setEnabled} disabled={readOnly} disabledHint={readOnlyHint} />
             </div>
           </>
         )}

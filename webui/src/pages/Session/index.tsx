@@ -1,3 +1,6 @@
+import ModelReasoningBadge from '@/components/common/ModelReasoningBadge';
+import ModelPreferencesDialog from '@/components/common/ModelPreferencesDialog';
+import './session-header.css';
 import ModuleEmblem from '@/components/common/ModuleEmblem';
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import {ModelBrandIcon, brandStyle, AgentIdentity, agentStyle} from '@/components/common/VisualIdentity';
@@ -7,6 +10,7 @@ import {
   History,
   ChevronDown,
   ChevronRight,
+  SlidersHorizontal,
   Sparkles,
   Shield,
   Search,
@@ -265,6 +269,7 @@ type ChatModelOption = {
   contextLabel: string;
   contextWindowTokens: number | null;
   supportsVision: boolean | null;
+  reasoningSupported?: boolean;
 };
 type ChatModelProviderGroup = {
   providerID: string;
@@ -515,6 +520,7 @@ export default function SessionPage() {
   const [pendingFocusMessageId, setPendingFocusMessageId] = useState<string | null>(null);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
+  const [showModelPreferences, setShowModelPreferences] = useState(false);
   const [showWorkflowOptions, setShowWorkflowOptions] = useState(false);
   const [showSkillOptions, setShowSkillOptions] = useState(false);
   const [composerWorkflows, setComposerWorkflows] = useState<WorkflowSummary[]>([]);
@@ -706,6 +712,7 @@ export default function SessionPage() {
         pricingLabel: formatPricing(model.pricing),
         contextLabel: formatContextWindow(model.limits?.context_window),
         contextWindowTokens: model.limits?.context_window ?? null,
+        reasoningSupported: model.capabilities?.supports_reasoning || model.capabilities?.features?.includes('reasoning'),
         supportsVision: typeof model.capabilities?.supports_vision === 'boolean'
           ? model.capabilities.supports_vision
           : null,
@@ -1799,14 +1806,14 @@ export default function SessionPage() {
       {/* ── Main area ── */}
       <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-ui-canvas">
         {/* Header */}
-        <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-4 text-[13px]">
-          <button type="button" onClick={() => setHistoryOpen((open) => !open)} aria-expanded={historyOpen} aria-label={tNav('history.title')} title={tNav('history.title')} className={`flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs transition-colors ${historyOpen ? 'bg-ui-selected text-ui-text' : 'text-ui-secondary hover:bg-ui-hover'}`}>
+        <header className="aegis-session-header relative flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-4 text-[13px]">
+          <button type="button" onClick={() => setHistoryOpen((open) => !open)} aria-expanded={historyOpen} aria-label={tNav('history.title')} title={tNav('history.title')} className={`session-header-action flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs transition-colors ${historyOpen ? 'bg-ui-selected text-ui-text' : 'text-ui-secondary hover:bg-ui-hover'}`}>
             <History className="h-4 w-4" /><span className="hidden sm:inline">{tNav('history.title')}</span>
           </button>
-          <button type="button" onClick={() => { selectSession(null); setHistoryOpen(false); }} aria-label={tNav('newChat')} className="flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-ui-secondary hover:bg-ui-hover"><Plus className="h-4 w-4" /><span className="hidden sm:inline">{t('newSession')}</span></button>
+          <button type="button" onClick={() => { selectSession(null); setHistoryOpen(false); }} aria-label={tNav('newChat')} className="session-header-action session-header-new flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-ui-secondary hover:bg-ui-hover"><Plus className="h-4 w-4" /><span className="hidden sm:inline">{t('newSession')}</span></button>
           <span className="mx-1 h-4 border-l border-ui-border" aria-hidden="true" />
           <div className="flex min-w-0 items-center">
-            <h2 className="truncate text-sm font-medium text-ui-secondary">
+            <h2 className="session-header-title truncate text-sm font-medium text-ui-secondary">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
@@ -2241,7 +2248,8 @@ export default function SessionPage() {
             // The model picker gives way first on a narrow composer (its name truncates);
             // on phones the permission picker can drop to the next line (longer English labels).
             <div className="flex min-w-0 items-center gap-1 max-md:flex-wrap">
-              <div ref={modelSelectorRef} className="relative w-[132px] min-w-[72px] shrink" data-model-selector>
+              <div ref={modelSelectorRef} className="relative aegis-chat-model-selector" data-model-selector>
+              {showModelPreferences && <ModelPreferencesDialog onClose={() => setShowModelPreferences(false)} />}
               <button
                 type="button"
                 onClick={() => {
@@ -2250,8 +2258,8 @@ export default function SessionPage() {
                   setShowProjectOptions(false);
                   setShowAgentOptions(false);
                 }}
-                disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
-                className="flex h-7 w-full min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                disabled={loadingProviders || loadingEnabledModels}
+                className="aegis-chat-model-trigger flex h-7 min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                 title={selectedModelAuto
                   ? `${t('modelPicker.auto')}: ${autoStatusLabel}`
                   : selectedModelOption
@@ -2261,11 +2269,12 @@ export default function SessionPage() {
                 {selectedModelAuto
                   ? <Sparkles className="h-3 w-3 shrink-0" />
                   : <ModelBrandIcon value={selectedModelOption?.modelID || ''} className="is-composer" />}
-                <span className="truncate font-medium">
+                <span className="aegis-chat-model-name" title={selectedModelOption?.label}>
                   {selectedModelAuto
                     ? t('modelPicker.auto')
                     : selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
                 </span>
+                {!selectedModelAuto && <ModelReasoningBadge providerID={selectedModelOption?.providerID} modelID={selectedModelOption?.modelID} supported={selectedModelOption?.reasoningSupported} />}
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
@@ -2282,6 +2291,8 @@ export default function SessionPage() {
                   contentClassName="p-1.5"
                   footer={(
                     <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
+                      <button type="button" onClick={() => { setShowModelOptions(false); setSelectorTooltip(null); setShowModelPreferences(true); }} className="model-preferences-launch"><SlidersHorizontal className="h-3.5 w-3.5" />{i18n.language.startsWith('zh') ? '模型管理' : 'Model preferences'}</button>
+
                       <button
                         type="button"
                         onClick={() => {

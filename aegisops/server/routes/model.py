@@ -443,6 +443,23 @@ async def update_model_settings(
             status_code=404,
             detail=f"Model '{model_id}' not found for provider '{provider_id}'",
         )
+    # This is a local context budget, never an advertised provider capability.
+    parameters = body.default_parameters
+    if parameters is not None:
+        limit = parameters.get("context_window_limit")
+        if limit is not None:
+            definition = manager.get_model(provider_id, model_id)
+            limits = getattr(definition, "limits", None)
+            maximum = getattr(limits, "context_window", None)
+            if isinstance(limit, bool) or not isinstance(limit, int) or limit < 4096:
+                raise HTTPException(status_code=422, detail="Context window limit must be an integer of at least 4096 tokens")
+            if not maximum or limit > maximum:
+                raise HTTPException(status_code=422, detail="Context window limit cannot exceed the model capacity")
+        if "enable_thinking" in parameters and not isinstance(parameters["enable_thinking"], bool):
+            raise HTTPException(status_code=422, detail="Thinking mode must be a boolean")
+        effort = parameters.get("reasoning_effort")
+        if effort is not None and effort not in {"minimal", "low", "medium", "high", "xhigh", "max"}:
+            raise HTTPException(status_code=422, detail="Unsupported reasoning effort")
     setting = manager.update_setting(
         provider_id=provider_id,
         model_id=model_id,

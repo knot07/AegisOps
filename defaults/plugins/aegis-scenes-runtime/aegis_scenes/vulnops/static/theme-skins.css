@@ -1,0 +1,90 @@
+/* Skin applies to the host workspace and its same-origin scene frames.
+   Vendor identities and risk/status colors intentionally keep their meaning. */
+html[data-theme-skin]:not([data-theme-skin=sage]) body{background:var(--skin-canvas);color:var(--skin-text)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegisops-shell main{background:radial-gradient(ellipse at 95% 0%,color-mix(in srgb,var(--skin-selected) 32%,transparent),transparent 48%),var(--skin-canvas)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegisops-sidebar{background:linear-gradient(150deg,var(--skin-sidebar),var(--skin-surface))}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegisops-nav-active{background:var(--skin-selected)!important;color:var(--skin-text)!important;box-shadow:inset 3px 0 var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegisops-nav-active>svg{color:var(--skin-accent)}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.yushu-page-icon,.aegis-page-icon){color:var(--skin-accent);background:var(--skin-selected);border-color:var(--skin-border)}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.yushu-overview-card:first-child,.aegisops-home-hero,.aegis-dashboard-hero){background:linear-gradient(125deg,var(--skin-selected),var(--skin-surface))!important;border-color:var(--skin-border)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-module-tabs,.yushu-account-tabs,.yushu-group-filter) button[aria-pressed=true]{background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegisops-shell .yushu-group-filter button[aria-pressed=true]>span:last-child{color:var(--skin-accent)}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-hub-types button[aria-pressed=true],.aegis-hub-facet-options button[aria-pressed=true]){background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-preference-panel button[aria-pressed=true]:not([data-skin-option]){background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-dashboard-primary,button[data-aegis-action-tone=primary],.aegis-hub-refresh,.model-preferences-footer button.is-primary){background:var(--aegis-primary-background)!important;border-color:var(--aegis-primary-border)!important;color:var(--aegis-primary-text)!important;box-shadow:none!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-dashboard-primary,button[data-aegis-action-tone=primary],.aegis-hub-refresh,.model-preferences-footer button.is-primary):hover:not(:disabled){background:var(--aegis-primary-hover-background)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(input,textarea,select):focus-visible{outline-color:var(--skin-outline)!important;border-color:var(--skin-outline)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(input[type=checkbox],input[type=radio]){accent-color:var(--skin-accent)}
+html[data-theme-skin]:not([data-theme-skin=sage]) ::selection{background:var(--skin-selected);color:var(--skin-text)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .prose{--chat-emphasis:var(--skin-accent);--tw-prose-bold:var(--skin-accent)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .prose :is(h1,h2,h3,h4,strong){color:var(--skin-accent)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .model-preferences-toolbar [role=tab][aria-selected=true]{background:var(--skin-selected);color:var(--skin-accent)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .model-preferences-toolbar small{background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-calendar-grid button[aria-selected=true],.calendar-days button.edge,.aegis-calendar-confirm,.calendar-footer button.primary){background:var(--skin-button-background)!important;color:var(--skin-buttonText)!important;border-color:var(--skin-outline)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-calendar-grid button,.calendar-days button):hover{background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.calendar-days button.between,.calendar-days button.in-range){background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-date-panel,.range-calendar){border-color:var(--skin-border)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir){--ws-ink:var(--skin-text);--ws-secondary:var(--skin-secondary);--ws-muted:var(--skin-muted);--ws-border:var(--skin-border);--ws-canvas:var(--skin-canvas);--ws-primary:var(--skin-buttonTo);--ws-primary-hover:var(--skin-buttonFrom);--ws-focus:var(--skin-outline);--ink:var(--skin-text);--dim:var(--skin-muted);--muted:var(--skin-muted);--line:var(--skin-border);--border:var(--skin-border);--bg:var(--skin-canvas);--paper:var(--skin-surface);--green:var(--skin-accent);--green-ink:var(--skin-accent);--green-hover:var(--skin-accent);--soft:var(--skin-selected);--lime:var(--skin-buttonTo);background-color:var(--skin-canvas)!important;color:var(--skin-text)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button.primary,.btn.primary,.btn.dark,a.export-report,.atlas-workbench-entry){background:var(--skin-button-background)!important;color:var(--skin-buttonText)!important;border-color:var(--skin-outline)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button.primary,.btn.primary,.btn.dark,a.export-report,.atlas-workbench-entry):hover:not(:disabled){background:var(--skin-button-hover)!important;color:var(--skin-buttonText)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.scene-tab.active,.scene-tab[aria-selected=true],.tabs button.active,.investigation-nav button.active){background:var(--skin-selected)!important;color:var(--skin-accent)!important;border-color:var(--skin-outline)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.scene-tab-wrap,.scene-tabs){background:var(--skin-sidebar)!important;border-color:var(--skin-border)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.metric.featured,.stats>.stat:first-child,.vuln-trend-panel){background:linear-gradient(125deg,var(--skin-selected),var(--skin-surface))!important;border-color:var(--skin-border)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]):not(.dark) .ir :is(.work-help,.report-preview-icon){background:var(--skin-raised)!important;border-color:var(--skin-border)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]):not(.dark) .ir .work-help>summary{color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]):not(.dark) .ir .case.active{background:var(--skin-selected)!important;border-color:var(--skin-outline)!important;box-shadow:inset 3px 0 var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-skin-options>button[aria-pressed=true]{background:var(--skin-selected)!important;color:var(--skin-text)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .yushu-theme-preview i:nth-child(2){background:var(--skin-buttonTo)!important}
+/* Dashboard graphics must follow the same palette as its primary actions. */
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-trend{background:radial-gradient(ellipse at 0 0,var(--skin-selected),transparent 72%),var(--skin-surface)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-gauge{background:conic-gradient(var(--skin-accent) calc(var(--rate) * 1%),var(--skin-border) 0)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-resource-list i{background:var(--skin-buttonTo)}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-resource-list svg,.aegis-quick-start>a>svg:first-child){color:var(--skin-accent)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-quick-start>a>svg:first-child{background:var(--skin-selected)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-comparison>span{background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-range button[aria-pressed=true],.yushu-menu-theme button[role=menuitemradio][aria-checked=true]){background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+/* Incident decoration, step artwork and neutral event cards share the active skin. */
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir{background:radial-gradient(ellipse at 0 0,var(--skin-selected),transparent 62%),var(--skin-canvas)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .list{background:linear-gradient(170deg,var(--skin-sidebar),var(--skin-surface))!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .list-heading h3{color:var(--skin-text)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir :is(.overline,.list-heading span,.source-device-line>span){color:var(--skin-muted)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .source-device-line strong{color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .stat:first-child:after{background:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .case.active{border-color:var(--skin-outline)!important;box-shadow:inset 3px 0 var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .report-preview-icon{border-color:var(--skin-outline)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir :is(.investigation-nav button i,.investigation-nav button.active i){--stage-soft:var(--skin-selected);color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .investigation-nav button small{color:var(--skin-muted)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .investigation-nav button.active :is(strong,small){color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir .case[data-attack-type=other]{--case-accent:var(--skin-accent)!important;--case-soft:var(--skin-selected)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir :is(.case.active strong,.case[data-attack-type=other] strong){color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir :is(.case[data-attack-type=other] .case-type,.head>.tools>.badge){background:var(--skin-selected)!important;border-color:var(--skin-border)!important;color:var(--skin-accent)!important}
+/* Review uses accent-soft only for its summary card and trend panel background.
+   Keep its independent chart, coordinate, severity and legend tokens untouched. */
+html[data-theme-skin]:not([data-theme-skin=sage]) [data-aegisops-theme][data-layout]{--dt-accent-soft:var(--skin-selected)!important}
+/* Task center decoration follows the skin; failure remains a semantic red. */
+html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] .yushu-task-overview>div:first-child{background:linear-gradient(125deg,var(--skin-selected),var(--skin-surface) 80%)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] .yushu-task-overview>div>div:first-child{background:var(--skin-raised)!important;border-color:var(--skin-border)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] .yushu-task-overview>div:not(:last-child) svg{color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] [class~="bg-gray-100"]>button[class~="bg-white"]{background:var(--skin-selected)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-task-filters button[type=submit]{background:var(--skin-button-background)!important;color:var(--skin-buttonText)!important;border:1px solid var(--skin-outline)}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-date-trigger{background:linear-gradient(120deg,var(--skin-surface),var(--skin-raised))!important;color:var(--skin-secondary)!important;border-color:var(--skin-control)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-date-trigger>svg{color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-date-trigger:hover,.aegis-date-trigger[aria-expanded=true]){border-color:var(--skin-outline)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--skin-outline) 14%,transparent)!important}
+html[data-theme-skin] .aegis-utility-glyph[data-utility-glyph=theme]{color:var(--skin-accent,var(--text-secondary))}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-date-panel header{background:linear-gradient(110deg,var(--skin-surface),var(--skin-selected))!important;color:var(--skin-accent)!important;border-color:var(--skin-border)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-date-panel :is(header button,.aegis-calendar-week,.aegis-calendar-time>span,.aegis-calendar-time b,footer button){color:var(--skin-muted)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-calendar-month button{border-color:var(--skin-border)!important;color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-calendar-grid button{color:var(--skin-secondary)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-calendar-grid button[data-outside=true]{color:var(--skin-muted)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-calendar-grid button[aria-current=date]{border-color:var(--skin-outline)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-calendar-grid button[aria-selected=true]{color:var(--skin-buttonText)!important;box-shadow:none}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-calendar-time{border-color:var(--skin-border)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-calendar-time input{background:var(--skin-raised)!important;color:var(--skin-text)!important;border-color:var(--skin-control)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-date-panel footer .aegis-calendar-confirm{color:var(--skin-buttonText)!important}
+/* Replace legacy fixed green/gray captions with the readable palette tokens. */
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegisops-shell :is(.yushu-page-header p,.yushu-group-filter h2,.yushu-manage-groups,.yushu-plugin-card p,.text-ui-secondary){color:var(--skin-secondary)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]):not(.dark) .aegisops-shell :is(.text-ui-muted,.text-gray-400,.text-gray-500,.text-slate-400,.text-slate-500){color:var(--skin-muted)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-chat-model-effort,.aegis-health){color:var(--skin-accent)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-log-toolbar{background:var(--skin-raised)!important;border-color:var(--skin-border)!important;color:var(--skin-secondary)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .ir :is(.activity-digest small,.activity-item small,.work-help small,.case-status){color:var(--skin-muted)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) [data-aegis-scene=intelligence] :is(.source-notice,details>summary,details>p){color:var(--skin-muted)!important}

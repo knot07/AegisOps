@@ -1,8 +1,12 @@
 import { useId, type ReactNode } from 'react';
 
-export type UtilityKind = 'language' | 'sun' | 'moon' | 'system' | 'update' | 'bell' | 'collapse' | 'expand';
+export type UtilityKind = 'language' | 'theme' | 'sun' | 'moon' | 'system' | 'update' | 'bell' | 'collapse' | 'expand';
 export default function UtilityGlyph({ kind }: { kind: UtilityKind }) {
  const icons = {
+  theme: <g fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M12 2.8a9.2 9.2 0 1 0 0 18.4h1.1a2 2 0 0 0 1.6-3.2c-.7-.9-.1-2.2 1-2.2H18a3.2 3.2 0 0 0 3.2-3.3A9.4 9.4 0 0 0 12 2.8Z" fill="currentColor" fillOpacity=".08"/>
+    <circle cx="7.2" cy="10.2" r="1" fill="currentColor" stroke="none"/><circle cx="10.2" cy="6.8" r="1" fill="currentColor" stroke="none"/><circle cx="14.8" cy="7" r="1" fill="currentColor" stroke="none"/><circle cx="17.7" cy="10.6" r="1" fill="currentColor" stroke="none"/>
+  </g>,
   language: <><path d="M3 5h11v3H3zM7 2h3v3H7zM6 8c1 5 4 8 8 10l-2 2C7 17 4 13 3 8zm5 0h3c-1 5-5 9-10 12l-2-2c5-3 8-6 9-10z"/><path d="m16 10 6 12h-3l-1-3h-5l-1 3H9l6-12zm-2 6h3l-1.5-3z" fillRule="evenodd"/></>,
   sun: <><path d="m12 5 5 3v7l-5 3-5-3V8zm0 3-2 1v4l2 2 2-2V9z" fillRule="evenodd"/><path d="M11 0h2v3h-2zM11 21h2v3h-2zM0 11h3v2H0zM21 11h3v2h-3zM3 2l3 3-2 2-3-3zM19 17l3 3-2 2-3-3zM18 5l3-3 2 2-3 3zM1 20l3-3 2 2-3 3z"/></>,
   moon: <path d="M14 1a10 10 0 1 0 9 14A10 10 0 0 1 14 1zm-4 4c0 7 3 11 9 12A7 7 0 1 1 10 5z" fillRule="evenodd"/>,

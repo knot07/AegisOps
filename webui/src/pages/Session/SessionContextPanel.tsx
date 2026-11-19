@@ -1,3 +1,4 @@
+import './session-context-theme.css';
 import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   ArrowLeft, ChevronDown, Download, FileText, Folder, FolderPlus,
@@ -83,10 +84,11 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <section className="border-b border-ui-border last:border-b-0">
+    <section className="context-panel-section border-b border-ui-border last:border-b-0">
       <div className="flex items-center gap-2 px-3 py-2.5">
         <button
           type="button"
+          aria-expanded={open}
           onClick={() => setOpen((value) => !value)}
           className="flex min-w-0 flex-1 items-center gap-2 text-left"
         >
@@ -396,8 +398,8 @@ export default function SessionContextPanel({
 
   if (preview) {
     return (
-      <div className="relative flex h-full min-h-0 flex-col bg-ui-surface">
-        <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-3">
+      <div className="aegis-context-panel relative flex h-full min-h-0 flex-col bg-ui-surface">
+        <div className="context-panel-heading flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-3">
           <button type="button" onClick={backFromPreview} aria-label={t('context.back')} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover">
             <ArrowLeft className="h-4 w-4" />
           </button>
@@ -448,8 +450,8 @@ export default function SessionContextPanel({
   if (root) {
     const parentPath = rootPath.includes('/') ? rootPath.slice(0, rootPath.lastIndexOf('/')) : '';
     return (
-      <div className="relative flex h-full min-h-0 flex-col bg-ui-surface">
-        <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-3">
+      <div className="aegis-context-panel relative flex h-full min-h-0 flex-col bg-ui-surface">
+        <div className="context-panel-heading flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-3">
           <button type="button" onClick={backFromRoot} aria-label={t('context.back')} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover">
             <ArrowLeft className="h-4 w-4" />
           </button>
@@ -499,8 +501,8 @@ export default function SessionContextPanel({
   }
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-ui-surface">
-      <div className="flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-3">
+    <div className="aegis-context-panel relative flex h-full min-h-0 flex-col bg-ui-surface">
+      <div className="context-panel-heading flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-3">
         {previewLoading ? (
           <button type="button" onClick={cancelNavigation} aria-label={t('context.back')} className="rounded p-1.5 text-ui-secondary"><ArrowLeft className="h-4 w-4" /></button>
         ) : <Sparkles className="h-4 w-4 text-ui-secondary" />}
@@ -512,24 +514,25 @@ export default function SessionContextPanel({
       </div>
 
       {/* In a narrow panel the filters move under the search box instead of squeezing it. */}
-      <div className="flex flex-wrap items-center gap-2 border-b border-ui-border px-3 py-2">
+      <div className="context-panel-filters flex flex-wrap items-center gap-2 border-b border-ui-border px-3 py-2">
         <div className="relative min-w-[10rem] flex-[1_1_10rem]">
           <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ui-muted" />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
+            aria-label={t('context.searchPlaceholder')}
             placeholder={t('context.searchPlaceholder')}
             className="h-8 w-full rounded-lg border border-ui-control bg-ui-surface pl-8 pr-2 text-[13px] leading-5 text-ui-text outline-none placeholder:text-ui-muted focus:ring-2 focus:ring-ui-focus"
           />
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <SlidersHorizontal className="h-3.5 w-3.5 text-ui-muted" />
-          <select value={filter} onChange={(event) => setFilter(event.target.value as FileFilter)} className="h-8 rounded-lg border border-ui-control bg-ui-surface px-2 text-[13px] leading-5 text-ui-secondary focus:outline-none focus:ring-2 focus:ring-ui-focus">
+          <select aria-label={t('context.filter.all')} value={filter} onChange={(event) => setFilter(event.target.value as FileFilter)} className="h-8 rounded-lg border border-ui-control bg-ui-surface px-2 text-[13px] leading-5 text-ui-secondary focus:outline-none focus:ring-2 focus:ring-ui-focus">
             <option value="all">{t('context.filter.all')}</option>
             <option value="outputs">{t('context.outputs')}</option>
             <option value="context">{t('context.contextFiles')}</option>
           </select>
-          <select value={sort} onChange={(event) => setSort(event.target.value as FileSort)} className="h-8 rounded-lg border border-ui-control bg-ui-surface px-2 text-[13px] leading-5 text-ui-secondary focus:outline-none focus:ring-2 focus:ring-ui-focus">
+          <select aria-label={t('context.sort.updated')} value={sort} onChange={(event) => setSort(event.target.value as FileSort)} className="h-8 rounded-lg border border-ui-control bg-ui-surface px-2 text-[13px] leading-5 text-ui-secondary focus:outline-none focus:ring-2 focus:ring-ui-focus">
             <option value="updated">{t('context.sort.updated')}</option>
             <option value="name">{t('context.sort.name')}</option>
             <option value="size">{t('context.sort.size')}</option>

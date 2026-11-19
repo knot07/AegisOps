@@ -1,0 +1,284 @@
+/* AegisOps dark design system. Neutral surfaces, readable text, restrained brand tints.
+   This source is also served inside the two same-origin scene frames. */
+html.dark,html.dark .aegisops-shell{
+ --night-canvas:#11161d;--night-sidebar:#141b23;--night-surface:#1a222d;--night-raised:#222d3a;--night-hover:#293645;--night-selected:#2a3c35;--night-border:#344253;--night-control:#526478;
+ --night-text:#edf2f7;--night-secondary:#bdc9d6;--night-muted:#99a9bb;--night-green:#b8d98c;--night-link:#9cbdf8;--night-danger:#ffaaa5;--night-warning:#f2cb83;
+ --ui-canvas:17 22 29;--ui-sidebar:20 27 35;--ui-surface:26 34 45;--ui-subtle:34 45 58;--ui-hover:41 54 69;--ui-selected:42 60 53;--ui-text:237 242 247;--ui-secondary:189 201 214;--ui-muted:153 169 187;--ui-border:52 66 83;--ui-control:82 100 120;--ui-focus:184 217 140;--ui-action:184 217 140;--ui-on-action:28 43 24;
+ --bg-canvas:var(--night-canvas);--bg-surface:var(--night-surface);--bg-subtle:var(--night-raised);--bg-hover:var(--night-hover);--bg-selected:var(--night-selected);
+ --text-primary:var(--night-text);--text-secondary:var(--night-secondary);--text-muted:var(--night-muted);--text-placeholder:#97a7b9;--text-link:var(--night-link);--border-subtle:var(--night-border);--border-control:var(--night-control);
+ --action-primary:#b8d98c;--action-hover:#c8e6a2;--action-pressed:#a6c77c;--action-onPrimary:#1c2b18;--action-danger:#a74646;--action-onDanger:#fff;--focus-ring:#b8d98c;--disabled-bg:#222d3a;--disabled-text:#8b9bad;--switch-on:#8fbd6f;--switch-thumb:#fff;
+ --status-success:#b8d98c;--status-successBg:#24382f;--status-warning:#f2cb83;--status-warningBg:#3a3025;--status-danger:#ffaaa5;--status-dangerBg:#3d292e;--status-info:#a4c4ff;--status-infoBg:#25364e;--accent-ai:#c9b6ff;--accent-aiBg:#322e49;--accent-data:#8bd5df;--accent-dataBg:#22383f;--accent-brand:#b8d98c;--accent-brandBg:#2a3c35;
+ --aegisops-dark-app:var(--night-canvas);--aegisops-dark-surface:var(--night-surface);--aegisops-dark-surface-soft:var(--night-raised);--aegisops-dark-surface-raised:var(--night-hover);--aegisops-dark-border:var(--night-border);--aegisops-dark-border-strong:var(--night-control);--aegisops-dark-text:var(--night-text);--aegisops-dark-text-muted:var(--night-secondary);--aegisops-dark-text-subtle:var(--night-muted);--aegisops-dark-accent:var(--night-link);--aegisops-dark-placeholder:#97a7b9;
+ --module-accent:#b8d98c;--module-selected:#2a3c35;--aegis-grid:#344253;--aegis-primary-background:linear-gradient(115deg,#c8e4a6,#b3d587);--aegis-primary-hover-background:linear-gradient(115deg,#d3edb5,#bfde99);--aegis-primary-border:#accd82;--aegis-primary-text:#24371d;
+ color-scheme:dark;color:var(--night-text);background-color:var(--night-canvas);
+}
+html.dark body,html.dark #root{background:var(--night-canvas);color:var(--night-text)}
+html.dark ::selection{background:#426749;color:#fff}
+html.dark :is(input,textarea)::placeholder{color:var(--night-muted)!important;opacity:1}
+html.dark :is(input,select,textarea){caret-color:var(--night-green)}
+html.dark :is(input[type=checkbox],input[type=radio]){accent-color:var(--night-green)}
+html.dark :is(button,a,input,select,textarea,summary,[tabindex]):focus-visible{outline-color:var(--night-green)}
+html.dark *{scrollbar-color:var(--night-control) transparent}
+html.dark .aegisops-shell{border-color:#0c1016;box-shadow:0 12px 40px #0004}
+html.dark .aegisops-shell main{background:var(--night-canvas)}
+html.dark .aegisops-sidebar{background:var(--night-sidebar)}
+html.dark .aegisops-nav-active{background:var(--night-selected);border-color:#415946;box-shadow:inset 3px 0 var(--night-green);color:var(--night-text)}
+html.dark .aegisops-sidebar :is(nav h3,.aegis-scene-switcher label){color:var(--night-muted)}
+html.dark .aegisops-shell .yushu-page-header :is(h1,h2){color:var(--night-text)}
+html.dark .aegisops-shell .yushu-page-header p{color:var(--night-muted)}
+html.dark :is(.yushu-overview-card,.yushu-plugin-card,.aegisops-stat-card,.yushu-task-overview>div,.aegis-preference-panel,.aegis-task-filters){background:var(--night-surface)!important;border-color:var(--night-border)!important;box-shadow:0 2px 8px #00000012!important}
+html.dark :is(.aegisops-home-hero,.aegis-trend){background:linear-gradient(125deg,#22352c,var(--night-surface) 65%)!important;border-color:var(--night-border)}
+html.dark :is(.aegis-trend,.aegis-dashboard){--aegis-grid:var(--night-border)}
+html.dark :is(.aegis-dashboard,.aegis-trend) :is(p,small){color:var(--night-muted)}
+html.dark :is(.aegis-dashboard,.aegis-trend) :is(h2,h3,strong){color:var(--night-text)}
+html.dark .recharts-default-tooltip{background:var(--night-raised)!important;border-color:var(--night-control)!important;color:var(--night-text)!important;box-shadow:0 8px 24px #0004}
+html.dark .recharts-tooltip-label,html.dark .recharts-tooltip-item{color:var(--night-text)!important}
+html.dark .aegisops-shell table{background:var(--night-surface)}
+html.dark :is(thead,th){background:var(--night-raised)!important;color:var(--night-secondary)!important;border-color:var(--night-border)!important}
+html.dark td{border-color:var(--night-border)}
+html.dark .aegisops-shell .yushu-group-filter{background:transparent!important}
+html.dark .aegisops-shell .yushu-group-filter button[aria-pressed=true]{background:var(--night-selected)!important;color:var(--night-green)!important}
+html.dark .aegisops-shell .yushu-group-filter button[aria-pressed=true]>span:last-child{color:var(--night-green)}
+html.dark :is(.aegis-module-tabs,.yushu-account-tabs) button[aria-pressed=true]{background:var(--night-selected);color:var(--night-green)}
+/* Identity color is an accent, never a full-page wash. */
+html.dark :is(.aegis-agent-card,.aegis-provider-card,.aegis-provider-choice,.aegis-model-branded,.aegis-default-model-brand,.aegis-model-row,.aegis-resource-surface,.aegis-device-card,.aegis-channel-card,.aegis-hub-resource-row){background:linear-gradient(120deg,color-mix(in srgb,var(--resource-accent,var(--device-accent,var(--agent-accent,var(--brand-accent,#849b7a)))) 9%,var(--night-surface)),var(--night-surface) 78%)!important;border-color:var(--night-border)!important;color:var(--night-text)!important;box-shadow:none!important}
+html.dark :is(.aegis-agent-card,.aegis-provider-card,.aegis-model-row,.aegis-resource-surface,.aegis-device-card):hover{border-color:#667c92!important}
+html.dark :is(.aegis-model-row,.aegis-default-model-brand,.aegis-provider-card) :is(strong,.font-medium,.font-semibold){color:var(--night-text)!important}
+html.dark :is(.aegis-resource-identity,.aegis-agent-identity,.aegis-model-brand-icon){background:linear-gradient(140deg,#293544,#1f2b37)!important;border-color:#45556a!important;box-shadow:0 1px 3px #0003!important}
+html.dark .aegis-resource-identity{color:color-mix(in srgb,var(--resource-accent) 50%,white)!important}
+html.dark .aegis-agent-identity{color:color-mix(in srgb,var(--agent-accent) 50%,white)!important}
+html.dark .aegis-model-brand-icon{color:color-mix(in srgb,var(--brand-accent) 50%,white)!important}
+html.dark .aegis-model-brand-icon img:is([src$="/openai.svg"],[src$="/anthropic.svg"],[src$="/grok.svg"],[src$="/ollama.svg"],[src$="/moonshot.svg"]){filter:brightness(0) invert(.9)}
+html.dark :is(.aegis-model-overview,.yushu-resource-overview) :is(small,.text-xs){color:var(--night-secondary)}
+/* Forms, editor drawers, details and portals share the same surface hierarchy. */
+html.dark :is(.yushu-creation-sheet,.aegis-resource-detail,.aegis-resource-config,.aegis-channel-panel,.aegis-agent-editor,.aegis-skill-editor,.aegis-user-dialog){background:var(--night-surface)!important;color:var(--night-text);border-color:var(--night-border)!important}
+html.dark :is(.yushu-creation-header,.yushu-creation-body,.yushu-creation-footer,.yushu-device-creation,.aegis-detail-summary,.aegis-detail-sections>div,[data-detail-section],.aegis-channel-section,.aegis-channel-section-heading){background:var(--night-surface)!important;border-color:var(--night-border)!important;color:var(--night-text)}
+html.dark :is(.yushu-creation-header,.aegis-detail-header,.aegis-channel-panel>div:first-child){background:linear-gradient(120deg,var(--night-raised),var(--night-surface))!important}
+html.dark :is(.aegis-resource-detail,.aegis-resource-config,.aegis-model-sheet,.aegis-agent-form,.aegis-skill-editor,.aegis-device-config,.aegis-channel-panel,.yushu-account-modal,.yushu-creation-sheet) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]),textarea,select){background:var(--night-canvas)!important;color:var(--night-text)!important;border-color:var(--night-control)!important}
+html.dark :is(.aegis-resource-detail,.aegis-resource-config,.aegis-channel-panel,.yushu-creation-sheet) :is(label,legend){color:var(--night-secondary)!important}
+html.dark :is(.aegis-resource-detail,.aegis-resource-config,.aegis-model-sheet,.aegis-channel-panel) :is(h2,h3,h4){color:var(--night-text)!important}
+html.dark :is(.aegis-agent-form>div,.aegis-agent-form>section,.aegis-model-sheet fieldset>div){background:var(--night-raised)!important;border-color:var(--night-border)!important}
+html.dark :is(.aegis-resource-config,.aegis-resource-detail,.aegis-channel-panel) :is(button[role=tab][aria-selected=true],[data-detail-tab][aria-selected=true],[data-resource-config-tab][aria-selected=true]){background:var(--night-selected)!important;color:var(--night-green)!important;border-color:var(--skin-outline,#628465)!important}
+html.dark :is(.aegis-detail-summary,.aegis-detail-sections,.aegis-resource-config) :is(p,small){color:var(--night-secondary)}
+html.dark :is(.aegis-model-edit-sheet,.aegis-model-sheet){background:var(--night-surface)!important;--aegis-primary-background:linear-gradient(110deg,color-mix(in srgb,var(--brand-accent) 48%,white),color-mix(in srgb,var(--brand-accent) 68%,white));--aegis-primary-hover-background:linear-gradient(110deg,color-mix(in srgb,var(--brand-accent) 38%,white),color-mix(in srgb,var(--brand-accent) 58%,white));--aegis-primary-border:color-mix(in srgb,var(--brand-accent) 55%,white);--aegis-primary-text:#152233}
+html.dark .aegis-model-edit-sheet :is(.model-edit-identity,.model-edit-runtime){background:linear-gradient(120deg,color-mix(in srgb,var(--brand-accent) 11%,#1e2834),var(--night-surface))!important;border-color:color-mix(in srgb,var(--brand-accent) 28%,var(--night-border))!important}
+html.dark .aegis-model-edit-sheet .model-edit-model input{background:var(--night-canvas)!important}
+html.dark .aegis-model-edit-sheet .model-edit-identity header :is(strong,small){color:color-mix(in srgb,var(--brand-accent) 35%,white)}
+html.dark .aegis-model-edit-sheet :is(.model-edit-runtime p,.model-edit-capacity summary small){color:var(--night-muted)}
+html.dark .aegis-model-edit-sheet .model-edit-capacity summary{color:var(--night-secondary)}
+html.dark .aegis-model-edit-sheet .model-edit-capacity summary strong{color:color-mix(in srgb,var(--brand-accent) 40%,white)}
+html.dark .aegis-model-edit-sheet .yushu-creation-footer button.bg-gray-100{background:var(--night-raised)!important;color:var(--night-secondary)!important;border-color:var(--night-border)!important}
+html.dark .aegis-model-edit-sheet .yushu-creation-footer button.bg-red-600{background:var(--aegis-primary-background)!important;color:var(--aegis-primary-text)!important;border-color:var(--aegis-primary-border)!important}
+html.dark :is(.aegis-model-sheet [role=tablist],.model-edit-capacity){background:transparent;border-color:var(--night-border)}
+/* Model management / reasoning dropdown / context ruler. */
+html.dark .aegis-model-preferences{background:var(--night-surface);border-color:var(--night-border);color:var(--night-text)}
+html.dark :is(.model-preferences-header,.model-preferences-footer){background:var(--night-raised);border-color:var(--night-border)}
+html.dark .model-preferences-header h2{color:var(--night-text)}
+html.dark :is(.model-preferences-header p,.model-preferences-footer p,.model-preferences-name small,.model-preferences-columns,.model-preferences-thinking>small){color:var(--night-muted)}
+html.dark :is(.model-preferences-mark,.model-preferences-toolbar [role=tablist],.model-preferences-search){background:var(--night-canvas);border-color:var(--night-border);color:var(--night-secondary)}
+html.dark .model-preferences-toolbar [role=tab][aria-selected=true]{background:var(--night-selected);color:var(--night-green)}
+html.dark :is(.model-preferences-columns,.model-preferences-row){background:var(--night-surface);border-color:var(--night-border)}
+html.dark .model-preferences-row:hover{background:var(--night-raised)}
+html.dark .model-preferences-name strong{color:var(--night-text)}
+html.dark :is(.model-preferences-reset,.model-preferences-control>small,.model-preferences-budget>small){color:var(--night-muted)}
+html.dark :is(.model-preferences-switch,.ui-switch){background:#445164;border-color:#5a6c80}
+html.dark :is(.model-preferences-switch,.ui-switch)[aria-checked=true]{background:#8fbd6f;border-color:#8fbd6f}
+html.dark .model-preferences-footer button:not(.is-primary){background:var(--night-hover);color:var(--night-secondary)}
+html.dark .model-preferences-footer button.is-primary{background:var(--aegis-primary-background);color:var(--aegis-primary-text);border-color:var(--aegis-primary-border)}
+html.dark button.aegis-themed-select-trigger{background:var(--night-canvas);color:color-mix(in srgb,var(--select-accent) 35%,white);border-color:color-mix(in srgb,var(--select-accent) 35%,var(--night-border))}
+html.dark .aegis-themed-select-menu{background:var(--night-raised);border-color:var(--night-control);box-shadow:0 12px 32px #0007}
+html.dark .aegis-themed-select-option{color:var(--night-secondary)}
+html.dark .aegis-themed-select-option:is(.is-active,[aria-selected=true]){background:color-mix(in srgb,var(--select-accent) 23%,var(--night-raised));color:color-mix(in srgb,var(--select-accent) 30%,white)}
+html.dark .context-budget-slider{--context-ruler-bg:var(--night-surface);--context-track:var(--night-raised);--context-fill-start:color-mix(in srgb,var(--context-accent) 48%,#293544);--context-fill-end:color-mix(in srgb,var(--context-accent) 70%,#293544);--context-handle:color-mix(in srgb,var(--context-accent) 35%,white);--context-tick:var(--night-control);--context-label:#b2c0d0;--context-active:var(--night-text)}
+html.dark .aegis-model-edit-sheet .context-budget-slider{--context-ruler-bg:var(--night-surface)}
+/* Shared calendar, including all its inner pieces and the range picker. */
+html.dark :is(.aegis-date-trigger,.date-range-trigger,.aegis-date-panel,.range-calendar){background:var(--night-surface)!important;color:var(--night-secondary)!important;border-color:var(--night-control)!important;box-shadow:none!important}
+html.dark :is(.aegis-date-panel header,.calendar-title,.aegis-date-panel footer,.calendar-footer){background:var(--night-raised)!important;border-color:var(--night-border)!important;color:var(--night-text)!important}
+html.dark :is(.aegis-calendar-month,.calendar-months h3){color:var(--night-text)!important}
+html.dark :is(.aegis-calendar-week,.calendar-week){color:var(--night-muted)!important}
+html.dark :is(.aegis-calendar-grid button,.calendar-days button,.calendar-month-nav button,.calendar-title button){background:transparent!important;color:var(--night-secondary)!important;border-color:transparent!important}
+html.dark :is(.aegis-calendar-grid button,.calendar-days button):hover{background:var(--night-hover)!important;color:var(--night-text)!important}
+html.dark :is(.aegis-calendar-grid button[aria-selected=true],.calendar-days button.edge){background:var(--night-green)!important;color:var(--aegis-primary-text)!important;border-color:var(--night-green)!important}
+html.dark .calendar-days button.in-range{background:var(--night-selected)!important;color:var(--night-green)!important}
+html.dark :is(.aegis-calendar-grid button[data-outside=true],.calendar-days button.out){color:#8492a4!important}
+html.dark :is(.aegis-date-panel footer button,.calendar-footer button,.aegis-calendar-time input){background:var(--night-canvas)!important;color:var(--night-secondary)!important;border-color:var(--night-control)!important}
+html.dark :is(.aegis-date-panel footer .aegis-calendar-confirm,.calendar-footer button.primary){background:var(--night-green)!important;color:var(--aegis-primary-text)!important}
+/* Chat and auxiliary drawers. */
+html.dark :is(.aegis-context-panel,.aegis-context-popover,.aegis-composer-popover,.aegis-agent-picker,.aegis-agent-model-menu,.aegis-agent-model-trigger){background:var(--night-surface)!important;color:var(--night-text)!important;border-color:var(--night-border)!important}
+html.dark :is(.context-panel-heading,.context-panel-filters,.context-panel-section>div:first-child,.agent-picker-header,.agent-picker-filters){background:var(--night-raised)!important;border-color:var(--night-border)!important}
+html.dark :is(.context-panel-heading>span,.session-knowledge-heading,.agent-picker-name,.agent-picker-header>div:first-child>div:first-child){color:var(--night-text)!important}
+html.dark :is(.context-panel-section,.session-knowledge,.agent-picker-card,.aegis-agent-model-option){background:var(--night-surface)!important;border-color:var(--night-border)!important}
+html.dark :is(.aegis-context-panel,.aegis-composer-popover,.aegis-agent-picker) :is(input,select){background:var(--night-canvas)!important;border-color:var(--night-control)!important;color:var(--night-text)!important}
+html.dark .aegis-context-popover :is(strong,.font-semibold,.font-medium){color:var(--night-text)!important}
+html.dark :is(.agent-picker-card[aria-pressed=true],.aegis-agent-model-option[aria-selected=true]){background:var(--night-selected)!important;border-color:var(--skin-outline,#628465)!important;color:var(--night-green)!important}
+html.dark .aegis-agent-picker .agent-picker-name{color:var(--night-text)!important}
+html.dark .aegis-session-header{background:var(--night-surface)}
+html.dark .aegis-session-header :is(.session-header-action,.session-header-title){color:var(--night-secondary)!important}
+html.dark .aegis-session-header .session-header-action:hover{background:var(--night-hover)!important;border-color:var(--night-control)}
+html.dark .prose{--tw-prose-body:var(--night-secondary);--tw-prose-headings:var(--night-text);--tw-prose-bold:#d0e6ae;--tw-prose-links:#9cbdf8;--tw-prose-quotes:var(--night-secondary);--tw-prose-counters:var(--night-muted);--tw-prose-bullets:var(--night-muted);--tw-prose-hr:var(--night-border);--tw-prose-th-borders:var(--night-control);--tw-prose-td-borders:var(--night-border);--chat-emphasis:var(--night-green);color:var(--night-secondary)}
+html.dark .prose :is(pre,code){background:#10161e;color:#d7e4f2}
+html.dark .prose :is(thead,th,td,details,summary,blockquote){background-color:var(--night-surface);border-color:var(--night-border);color:var(--night-secondary)}
+html.dark .prose :is(a){color:var(--night-link)}
+html.dark .prose :is(h1,h2,h3,h4,strong){color:var(--night-green)}
+/* Work, memory, knowledge, settings and system logs. */
+html.dark .aegisops-shell :is(.kb-workspace,.kb-modal--knowledge){--kb-canvas:var(--night-canvas);--kb-panel:var(--night-surface);--kb-ink:var(--night-text);--kb-muted:var(--night-secondary);--kb-subtle:var(--night-muted);--kb-line:var(--night-border);--kb-soft:var(--night-raised);--kb-red:var(--night-green);--kb-red-hover:var(--action-hover);--kb-blue:#a4c4ff;--kb-blue-soft:#25364e;--kb-green:var(--night-green);--kb-green-soft:var(--night-selected);--kb-card-line:var(--night-border);--kb-card-hover:#667c92;--kb-description:var(--night-secondary);--kb-metadata:var(--night-muted);--kb-rule:var(--night-border);--kb-icon-bg:var(--night-raised);--kb-icon-line:var(--night-border)}
+html.dark :is(.kb-dataset-empty,.aegis-memory-tree,.aegis-memory-workbench,.aegis-log-search,.aegis-log-footer,.aegis-preference-panel .yushu-preference-row>div:first-child>span){background:var(--night-raised)!important;color:var(--night-secondary)!important;border-color:var(--night-border)!important}
+html.dark :is(.kb-search>input,.aegis-memory-workbench textarea){background:var(--night-canvas)!important;color:var(--night-text)!important;border-color:var(--night-control)!important}
+html.dark .aegis-log-content{background:#10161e;color:var(--night-secondary)}
+html.dark .aegis-log-line[data-level=error]{color:#ffaaa5}html.dark .aegis-log-line[data-level=warning]{color:#f2cb83}html.dark .aegis-log-line[data-level=debug]{color:var(--night-muted)}
+html.dark .aegis-preference-panel button[aria-pressed=true]{background:var(--night-selected)!important;color:var(--night-green)!important}
+html.dark :is(.aegis-model-preferences,.aegis-user-dialog,dialog)::backdrop{background:#060b12b3;backdrop-filter:blur(3px)}
+html.dark button[data-aegis-action-tone=danger]{background:#3d292e!important;border-color:#805057!important;color:#ffaaa5!important}
+html.dark button[data-aegis-action-tone=danger]:hover:not(:disabled){background:#513239!important;color:#ffd0ca!important}
+/* Scene workspaces use the same tokens as their host, including dialogs and AI panels. */
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],[data-aegis-scene=incident]){--ws-ink:var(--night-text);--ws-secondary:var(--night-secondary);--ws-muted:var(--night-muted);--ws-border:var(--night-border);--ws-canvas:var(--night-canvas);--ws-primary:var(--night-green);--ws-primary-hover:var(--action-hover);--ws-focus:var(--night-green);--ink:var(--night-text);--dim:var(--night-muted);--muted:var(--night-muted);--line:var(--night-border);--border:var(--night-border);--bg:var(--night-canvas);--paper:var(--night-surface);--green:var(--night-green);--green-ink:var(--night-green);--green-hover:var(--action-hover);--soft:#24382f;--lime:var(--night-green);color:var(--night-text)!important;background:var(--night-canvas)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(h1,h2,h3,h4){color:var(--night-text)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.panel,.metric,.stat,.toolbar,.asset-card,.table-panel,.modal,.drawer,dialog,.evidence,.report-card,.host-card,.card,.day-group,.source-group,.daily-card,.daily-source-card,.source-day-card,.inventory-list){background:var(--night-surface)!important;border-color:var(--night-border)!important;color:var(--night-text)!important;box-shadow:0 2px 8px #0002!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.metric.featured,.stat:first-child,.vuln-trend-panel){background:linear-gradient(120deg,#22352c,var(--night-surface) 75%)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.metric-value,.stat strong,.vuln-trend-summary>strong,.vuln-trend-facts b,.asset-stats b,.detail-field span,.linked-asset-name,.owner-label,.deadline-date,.topology-inspector dd){color:var(--night-text)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.subtitle,.panel-sub,.metric-label,.metric-foot,.asset-meta,.asset-address,.footer-note,.risk-note,.chart-caption,.vuln-trend-period,.legend,.risk-legend,.eyebrow,.overline,.muted,.excerpt,.detail-field small,.field small,.timeline-actor,.timeline-top small,.activity-summary,.activity-summary small,.addr,.case-status,.head p,.sub,.dim,small){color:var(--night-muted)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.scene-tabs,.tabs,.modal-head,.drawer-head,.modal-footer,.detail-actions,.pagination,.detail-grid,.asset-stats,.panel-head,.table-wrap,.list-head,.report-summary,.activity-stamp,.activity-full){background:var(--night-surface)!important;border-color:var(--night-border)!important;color:var(--night-secondary)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button,.btn,.date-pill,.search,.asset-search-bar,.asset-view-switch,.topology-tools a,.analysis-official-link,a.export-report){background:var(--night-raised)!important;border-color:var(--night-control)!important;color:var(--night-secondary)!important;box-shadow:none!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button,.btn):hover:not(:disabled){background:var(--night-hover)!important;color:var(--night-text)!important;border-color:#74889e!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button.primary,.btn.primary,.btn.dark,a.export-report,.atlas-workbench-entry){background:var(--aegis-primary-background)!important;border-color:var(--aegis-primary-border)!important;color:var(--aegis-primary-text)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button.primary,.btn.primary,.btn.dark,a.export-report,.atlas-workbench-entry):hover:not(:disabled){background:var(--action-hover)!important;color:var(--aegis-primary-text)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button.danger,.btn.danger,.delete-event,.event-delete,.delete-case,.asset-delete,#delete-asset-form .modal-footer .primary){background:#3d292e!important;border-color:#805057!important;color:#ffaaa5!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(button.danger,.btn.danger,.delete-event,.event-delete,.delete-case,.asset-delete):hover:not(:disabled){background:#513239!important;color:#ffd0ca!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(input:not([type=checkbox]):not([type=radio]):not([type=range]),select,textarea,.intel-select-trigger,.device-source-trigger){background:var(--night-canvas)!important;border-color:var(--night-control)!important;color:var(--night-text)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(option,.intel-select-list,.device-source-menu){background:var(--night-raised)!important;color:var(--night-text)!important;border-color:var(--night-control)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.scene-tab.active,.scene-tab[aria-pressed=true],.tabs button.active,.tabs button[aria-selected=true],.asset-view-switch button.active,.pagination button.active,.source-category button.active){background:var(--night-selected)!important;color:var(--night-green)!important;border-color:var(--skin-outline,#628465)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.badge,.tag,.overview-summary-badge,.owner-monogram){background:#28384a;color:#bdcfe7;border-color:#42566f}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.severity-critical,.severity-high,.tag.risk){background:#3d292e!important;color:#ffaaa5!important;border-color:#805057!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.severity-medium,.status-fixing){background:#3a3025!important;color:#f2cb83!important;border-color:#7b6644!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.severity-low,.status-closed,.status-retest,.status-new,.status-assigned){background:#24382f!important;color:var(--night-green)!important;border-color:#4b6855!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.attention,.hint,.notice,.banner,.analysis-notice){background:var(--night-raised)!important;border-color:var(--night-border)!important;color:var(--night-secondary)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.attention,.banner.error){background:#3a3025!important;color:#f2cb83!important;border-color:#7b6644!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.warn,.due-overdue,.deadline-alert){color:#f2cb83!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.vuln-title,.table-link,.table-wrap .linked-asset-name,.linked-asset-name,.link){color:var(--night-green)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(tr[data-vuln-theme],tbody tr:nth-child(even)){background:var(--night-surface)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) tbody tr:hover{background:var(--night-raised)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence],.ir) :is(.asset-icon,.linked-asset-icon,.empty-icon,.topology-selected-icon){background:var(--night-raised)!important;border-color:var(--night-control)!important;color:#bdcfe7!important;box-shadow:none!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence]) :is(.chart text,.topology-stage text){fill:var(--night-secondary)!important}
+html.dark :is([data-aegis-scene=vulnops],[data-aegis-scene=intelligence]) .chart .grid{stroke:var(--night-border)}
+html.dark [data-aegis-scene=vulnops] .donut:after{background:var(--night-surface)}
+html.dark :is(.asset-topology,.topology-stage,.topology-heading,.topology-tools,.topology-inspector,.topology-legend,.topology-hint,.detail-text,.timeline-note,.audit-note,.attachment,.prose){background:var(--night-surface)!important;border-color:var(--night-border)!important;color:var(--night-secondary)!important}
+html.dark :is(.backdrop,.ir .overlay){background:#060b12b3!important;backdrop-filter:blur(3px)}
+/* Incident workflow and investigation details. */
+html.dark .ir :is(.list,.case-list,.investigation-tabs,.steps,.investigation-nav,.evidence-toolbar,.report-toolbar,.activity-digest,.evidence-categories){background:var(--night-surface)!important;border-color:var(--night-border)!important}
+html.dark .ir .case{background:linear-gradient(120deg,color-mix(in srgb,var(--attack-accent,#8bb867) 10%,var(--night-surface)),var(--night-surface))!important;border-color:var(--night-border)!important;color:var(--night-text)!important}
+html.dark .ir .case:is(.selected,.active){background:var(--night-selected)!important;border-color:#8fb678!important;box-shadow:inset 3px 0 var(--night-green)!important}
+html.dark .ir .case :is(strong,b){color:var(--night-text)!important}
+html.dark .ir .case-type{background:var(--night-hover)!important;border-color:var(--night-control)!important;color:#bdcfe7!important}
+html.dark .ir :is(.steps button,.investigation-tabs button,.evidence-categories button){background:transparent!important;border-color:var(--night-border)!important;color:var(--night-secondary)!important}
+html.dark .ir :is(.steps button.active,.steps button[aria-current=step],.investigation-tabs button.active,.evidence-categories button.active){background:var(--night-selected)!important;border-color:var(--skin-outline,#628465)!important;color:var(--night-green)!important}
+html.dark .ir [data-stage-icon]{color:color-mix(in srgb,var(--stage-accent,var(--night-green)) 40%,white);--stage-soft:var(--night-raised)}
+html.dark .ir :is(.investigation-body,.detail,.settings,.activity-entry,.activity-entry details,.report-card-body,.summary-grid>div,.evidence-item,.sample-group){background:var(--night-surface)!important;color:var(--night-secondary)!important;border-color:var(--night-border)!important}
+html.dark .ir :is(.report-preview,.report-summary,.activity-full,.analysis-sample code,pre,code){background:var(--night-canvas)!important;color:var(--night-secondary)!important;border-color:var(--night-border)!important}
+html.dark .ir :is(.evidence strong,.analysis-sample strong,.analysis-results-title,.host-card strong){color:var(--night-text)!important}
+html.dark .ir .external-analysis{--analysis-ink:#bdcfe7;--analysis-border:#455a72;--analysis-fill:#27384d;--analysis-soft:#202e40}
+html.dark .ir .external-analysis :is(.analysis-platform-tabs button,.evidence.analysis-sample,.analysis-official-link){background:linear-gradient(115deg,color-mix(in srgb,var(--analysis-accent) 13%,var(--night-surface)),var(--night-surface))!important;border-color:color-mix(in srgb,var(--analysis-accent) 35%,var(--night-border))!important;color:var(--night-secondary)!important}
+html.dark .ir .external-analysis .analysis-platform-tabs button[aria-selected=true]{background:color-mix(in srgb,var(--analysis-accent) 24%,var(--night-raised))!important;border-color:color-mix(in srgb,var(--analysis-accent) 55%,var(--night-control))!important}
+html.dark .ir .external-analysis :is(.analysis-platform-tabs strong,.analysis-brand-head h3,.sample-actions button,.sample-actions a,.analysis-official-link){color:color-mix(in srgb,var(--analysis-accent) 30%,white)!important}
+html.dark .ir .external-analysis :is(p,.analysis-platform-tabs small,.analysis-platform-tabs i){color:var(--night-muted)!important}
+/* Intelligence source identity remains recognizable on a neutral dark card. */
+html.dark [data-aegis-scene=intelligence] :is(.source-card,.source-choice,.source-item,.daily-card,.daily-source,.source-daily-card,.source-module,.source-summary,.intel-card){background:linear-gradient(120deg,color-mix(in srgb,var(--source-accent,#849b7a) 12%,var(--night-surface)),var(--night-surface))!important;border-color:var(--night-border)!important;color:var(--night-text)!important}
+html.dark [data-aegis-scene=intelligence] :is(.source-card,.source-choice,.source-item,.daily-card,.source-module,.source-summary) :is(strong,b,h3){color:var(--night-text)!important}
+html.dark [data-aegis-scene=intelligence] :is(.source-card,.source-choice,.source-item,.daily-card,.source-module,.source-summary) :is(p,small){color:var(--night-secondary)!important}
+html.dark :is(#toast,#notice){background:var(--night-selected);color:var(--night-text);border:1px solid var(--skin-outline,#628465);box-shadow:0 6px 24px #0006}
+/* Readability fixes for legacy utility variants and remaining secondary surfaces. */
+html.dark :is(.dark\:text-zinc-500,.dark\:text-slate-500,.dark\:text-gray-500){color:var(--night-muted)}
+html.dark :is(.bg-amber-100,.bg-yellow-100){background:#3a3025!important;color:#f2cb83!important}
+html.dark :is(.aegis-memory-tree,.aegis-memory-workbench) :is(h2,h3,.font-medium){color:var(--night-text)!important}
+html.dark [data-yushu-page=task] [class~="bg-gray-100"]>button[class~="bg-white"]{background:var(--night-selected);color:var(--night-green)}
+html.dark .aegis-preference-panel button[class~="bg-zinc-950"][class~="dark:bg-zinc-100"]{background:var(--night-green)!important;color:var(--aegis-primary-text)!important}
+html.dark :is(.yushu-role-badge,.yushu-table-action){color:#a4c4ff}
+html.dark .yushu-account-avatar{background:var(--night-selected);color:var(--night-green)}
+html.dark .aegis-channel-card :is(.font-medium,strong),html.dark .aegis-channel-section-heading{color:var(--night-text)!important}
+html.dark .aegis-channel-panel button[data-aegis-action-tone=primary]{background:var(--aegis-primary-background)!important;color:var(--aegis-primary-text)!important;border-color:var(--aegis-primary-border)!important}
+html.dark .aegis-model-brand-icon:has(img){background:linear-gradient(140deg,#f3f6fa,#e1e8f0)!important;border-color:#64758a!important}
+html.dark .aegis-model-brand-icon img{filter:none!important}
+/* Hub filters and the full resource details, including the file navigator. */
+html.dark :is(.aegis-hub-filters,.aegis-hub-types,.aegis-hub-facet-bar){color:var(--night-secondary);border-color:var(--night-border)}
+html.dark .aegis-hub-types button{color:var(--night-secondary)}
+html.dark .aegis-hub-types button:hover,html.dark .aegis-hub-types button[aria-pressed=true]{background:var(--night-selected);color:var(--night-green)}
+html.dark .aegis-hub-types button span,html.dark .aegis-hub-filter-label{color:var(--night-muted)}
+html.dark :is(.aegis-hub-facet-trigger,.aegis-hub-facet-panel,.aegis-hub-facet-search){background:var(--night-surface)!important;border-color:var(--night-control)!important;color:var(--night-secondary)!important}
+html.dark .aegis-hub-facet-trigger span,html.dark .aegis-hub-facet-search input{color:var(--night-secondary)!important}
+html.dark .aegis-hub-facet-options button:hover,html.dark .aegis-hub-facet-options button[aria-pressed=true]{background:var(--night-selected);color:var(--night-green)}
+html.dark .aegis-hub-detail[data-yushu-drawer]{--hub-border:var(--night-border);--hub-ink:var(--night-text);background:var(--night-surface)!important;color:var(--night-secondary)}
+html.dark .aegis-hub-detail :is(.hub-detail-heading,.hub-detail-toolbar,.hub-detail-info,.hub-detail-close,.hub-detail-tabs,.hub-detail-files,.hub-detail-file-tree,.hub-detail-file-content){background:var(--night-surface)!important;border-color:var(--night-border)!important;color:var(--night-secondary)!important}
+html.dark .aegis-hub-detail :is(.hub-detail-title,.hub-detail-value){color:var(--night-text)!important}
+html.dark .aegis-hub-detail :is(p,.hub-detail-label,.hub-detail-tab){color:var(--night-muted)}
+html.dark .aegis-hub-detail .hub-detail-tab[aria-selected=true]{background:var(--night-selected)!important;color:var(--night-green)!important;border-color:var(--skin-outline,#628465)}
+html.dark .aegis-hub-detail .hub-detail-actions>button{background:var(--night-raised)!important;color:var(--night-text)!important;border-color:var(--night-control)!important}
+html.dark .hub-tree-root>.hub-tree-row{background:var(--night-selected);border-color:#415946}
+html.dark .hub-tree-count{background:var(--night-raised);color:var(--night-secondary)}
+html.dark .vuln-trend-period{background:var(--night-raised)!important;border-color:var(--night-border)!important}
+html.dark .metric-value span{color:var(--night-muted)!important}
+html.dark .ir .stat b{color:var(--night-text)!important}
+html.dark .ir p,html.dark .ir .empty p,html.dark .ir .compact-empty{color:var(--night-secondary)!important}
+html.dark .ir :is(.dialog,.hostitem,.report-document,.report-dialog,.report-dialog-header,.report-dialog-toolbar,.report-dialog-body,.sample-review-result,.rea-environment,.evidence-browser,.evidence-search label,.source-device-line,.source-picker-options,.status-update,.status-current,.case-context,.note,.case-summary .archive-fact){background:var(--night-surface)!important;color:var(--night-secondary)!important;border-color:var(--night-border)!important}
+html.dark .ir :is(.source-option-copy strong,.source-picker-trigger strong,.status-current strong,.sample-review-head strong,.report-dialog-heading h2){color:var(--night-text)!important}
+html.dark .ir :is(.evidence-category-tabs button[aria-pressed=true],.investigation-nav button.active){background:var(--night-selected)!important;color:var(--night-green)!important;border-color:var(--skin-outline,#628465)!important}
+html.dark .ir :is(.investigation-nav button i,.evidence-category-tabs button span,.evidence-kind,.operation-number){background:var(--night-raised)!important;color:var(--night-secondary)!important;border-color:var(--night-border)!important}
+html.dark .ir .report-document :is(p,li,td,th,blockquote,strong,b){color:var(--night-secondary)!important}
+html.dark .ir .report-document :is(h1,h2,h3,h4){color:var(--night-green)!important}
+html.dark .ir .report-document :is(th,tr:nth-child(even) td){background:var(--night-raised)!important}
+html.dark .ir .report-dialog::backdrop{background:#060b12b3}
+html.dark .ir .step:not(:last-child):after{background:var(--night-control)!important}
+html.dark .ir :is(.step,.step.done,.step.warn){color:var(--night-secondary)!important}
+html.dark .ir :is(.step i,.step.done i,.step.warn i){background:var(--night-raised)!important;border-color:var(--night-control)!important;color:var(--night-text)!important}
+html.dark [data-aegis-scene=intelligence] :is(.daily-count span,.daily-bottom>span){color:color-mix(in srgb,var(--source-accent) 30%,white)!important}
+html.dark [data-aegis-scene=intelligence] .daily-bottom{border-color:var(--night-border)!important}
+html.dark [data-aegis-scene=intelligence] :is(.daily-logo,.source-logo){background:#edf1f5!important;border-color:#64758a!important;box-shadow:none!important}
+html.dark .yushu-theme-preview[data-theme-preview=dark]{background:var(--night-canvas);border-color:var(--night-control)}
+html.dark .yushu-theme-preview[data-theme-preview=dark] i:first-child{background:var(--night-sidebar);border-color:var(--night-border)}
+html.dark .yushu-theme-preview[data-theme-preview=dark] i:nth-child(2){background:var(--night-green)}
+html.dark .yushu-theme-preview[data-theme-preview=dark] i:last-child{background:var(--night-raised);border-color:var(--night-border)}
+
+html.dark .aegis-detail-metrics dd{color:var(--night-text)!important}
+html.dark :is(.aegis-detail-tags>span,.schedule-pill){background:var(--night-raised)!important;color:var(--night-secondary)!important;border-color:var(--night-control)!important}
+html.dark .aegis-detail-metrics dt{color:var(--night-muted)}
+html.dark .aegis-resource-detail [data-detail-tab][aria-selected=true]{background:var(--night-selected)!important;color:var(--night-green)!important;border-color:var(--skin-outline,#628465)!important}
+html.dark .aegis-resource-detail [data-detail-tab][aria-selected=true] span{color:var(--night-green)!important}
+html.dark .yushu-current-page{background:var(--night-selected);color:var(--night-green)}
+html.dark :is(.vuln-trend-summary>span:first-child,.vuln-trend-facts>div,.ir .stat span){color:var(--night-muted)!important}
+html.dark .metric-foot b{color:var(--night-green)}
+html.dark .aegis-trend-delta>span:first-child{color:var(--night-green);background:var(--night-selected)}
+/* Disclosure panels must retain dark surfaces when expanded, including their log rows. */
+html.dark .ir .work-help{background:var(--night-raised)!important;border-color:var(--night-border)!important;color:var(--night-secondary)!important}
+html.dark .ir .work-help>summary{color:var(--night-green)!important}
+html.dark .ir .work-help>summary::marker{color:var(--night-green)}
+html.dark .ir :is(.compact-timeline,.activity-entry,.host-operation){border-color:var(--night-border)!important}
+html.dark .ir .activity-entry{background:var(--night-surface)!important}
+html.dark .ir :is(.activity-entry summary,.activity-full){color:var(--night-secondary)!important}
+html.dark .ir .activity-full{background:var(--night-raised)!important}
+html.dark .ir :is(.activity-summary,.activity-summary small,.activity-stamp time,.activity-full small,.work-section-head small,.operation-body .field>span){color:var(--night-muted)!important}
+html.dark .ir :is(.activity-stamp b,.activity-entry summary i){background:var(--night-selected)!important;color:var(--night-green)!important}
+html.dark .ir :is(.activity-entry[data-status=blocked],.activity-entry[data-status=partial]) .activity-stamp b{background:#3a3025!important;color:var(--night-warning)!important}
+html.dark .ir .activity-entry[data-status=failed] .activity-stamp b{background:#412c32!important;color:var(--night-danger)!important}
+html.dark .ir .report-preview-icon{--stage-soft:var(--night-raised);background:linear-gradient(145deg,var(--night-selected),var(--night-raised))!important;border-color:#526b55!important;color:var(--night-green)!important}
+html.dark .scene-tab-wrap{background:var(--night-sidebar)!important;border-color:var(--night-border)!important;box-shadow:none!important}
+html.dark .ir .source-device-line strong{color:var(--night-green)!important}
+html.dark .ir .tools>a:not(.export-report){color:var(--night-link)!important}
+html.dark .ir .sample-review-head span{background:var(--night-selected)!important;color:var(--night-green)!important}
+html.dark .ir .sample-review-result[data-verdict=suspicious] .sample-review-head span{background:#3a3025!important;color:var(--night-warning)!important}
+html.dark .ir .sample-review-result[data-verdict=malicious] .sample-review-head span{background:#412c32!important;color:var(--night-danger)!important}
+html.dark .ir .sample-review-result[data-verdict=insufficient] .sample-review-head span{background:var(--night-raised)!important;color:var(--night-secondary)!important}
+html.dark .model-preferences-toolbar small{background:var(--night-selected)!important;color:var(--night-green)!important}
+html.dark .model-preferences-header a{color:var(--night-link)!important}
+html.dark .aegis-memory-tree>div:first-child{background:var(--night-raised)!important;border-color:var(--night-border)!important}
+html.dark .aegis-skill-editor .yushu-creation-tab[aria-pressed=true]{background:var(--night-selected)!important;color:var(--night-green)!important;border-color:var(--skin-outline,#628465)!important}
+html.dark .aegis-skill-editor .yushu-creation-tab[aria-pressed=true] span{color:var(--night-green)!important}
+html.dark :is(.asset-search-bar label span,.asset-result-count){color:var(--night-secondary)!important}
+/* Device and tool detail headers are outside the generic creation header component. */
+html.dark .aegis-device-config{background:var(--night-surface)!important;color:var(--night-text)!important;border-color:var(--night-border)!important}
+html.dark .aegis-device-config>div:first-child{background:linear-gradient(110deg,color-mix(in srgb,var(--device-accent,#789b56) 12%,var(--night-raised)),var(--night-surface))!important;border-color:var(--night-border)!important}
+html.dark .aegis-tool-detail>div:first-child{background:linear-gradient(110deg,color-mix(in srgb,var(--resource-accent,#789b56) 12%,var(--night-raised)),var(--night-surface))!important;border-color:var(--night-border)!important}
+html.dark :is(.aegis-device-config,.aegis-tool-detail)>div:first-child :is(h2,h3){color:var(--night-text)!important}
+html.dark .aegis-device-config :is(label,legend){color:var(--night-secondary)!important}
+html.dark .aegis-device-config .aegis-device-docs{background:color-mix(in srgb,var(--device-accent,#789b56) 12%,var(--night-raised))!important;border-color:var(--night-control)!important;color:color-mix(in srgb,var(--device-accent,#789b56) 28%,white)!important}
+html.dark .aegis-device-config .aegis-device-tab[aria-pressed=true]{background:var(--night-raised)!important;color:color-mix(in srgb,var(--device-accent,#789b56) 28%,white)!important;border-color:var(--night-control)!important}
+html.dark .aegis-device-config .aegis-vendor-badge{background:var(--night-raised)!important;color:var(--night-secondary)!important}
+html.dark .aegis-device-config .aegis-device-save{background:linear-gradient(115deg,color-mix(in srgb,var(--device-accent,#789b56) 35%,white),color-mix(in srgb,var(--device-accent,#789b56) 52%,white))!important;color:#172b3c!important;border-color:var(--night-control)!important;box-shadow:none!important}
+html.dark .aegis-device-config .aegis-device-save:hover:not(:disabled){filter:brightness(1.06)}

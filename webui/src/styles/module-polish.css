@@ -115,7 +115,7 @@
 .prose.chat-prose p { margin:.6em 0;line-height:1.85; }
 .prose.chat-prose :is(ul,ol) { margin:.65em 0;padding-left:1.45em; }
 .prose.chat-prose li { margin:.25em 0; }
-.prose.chat-prose strong { font-weight:600;color:rgb(var(--ui-text) / .93); }
+.prose.chat-prose strong { font-weight:600; }
 .prose.chat-prose h1 { font-size:19px; }.prose.chat-prose h2 { font-size:17px; }.prose.chat-prose :is(h3,h4) { font-size:15px; }
 .prose.chat-prose :is(h1,h2,h3,h4) { margin-top:1.2em;margin-bottom:.5em;letter-spacing:0; }
 .prose.chat-prose .chat-inline-code { font-family:"Cascadia Code",Consolas,"Microsoft YaHei UI",monospace;font-size:12px;padding:2px 5px;border-radius:4px;background:rgb(var(--ui-hover) / .7);color:rgb(var(--ui-secondary));font-weight:400; }
@@ -457,3 +457,31 @@ button[data-chat-model-choice]:hover{border-color:color-mix(in srgb,var(--brand-
 .aegis-resource-picker .agent-picker-card>span:first-child{width:28px;height:28px;flex-shrink:0}
 .aegis-resource-picker .agent-picker-card>span:last-child:not(.agent-picker-badge):not(.agent-picker-name){display:none}
 .dark .aegis-agent-picker .aegis-composer-resource{background:linear-gradient(110deg,color-mix(in srgb,var(--resource-accent) 18%,#202720),#222a23)!important}
+
+/* Shared emphasis color for assistant replies, including embedded chats. */
+.prose.chat-prose { --chat-emphasis: #557d24; }
+.dark .prose.chat-prose { --chat-emphasis: #bddc94; }
+.prose.chat-prose :is(h1,h2,h3,h4,h5,h6,strong,b) { color:var(--chat-emphasis); }
+.aegis-chat-avatar .aegis-identity-avatar { width:100%;height:100%; }
+
+/* The selected model, rather than its API gateway, defines the editor theme. */
+.aegis-model-edit-sheet .yushu-creation-header{background:radial-gradient(ellipse at 100% 0,color-mix(in srgb,var(--brand-accent) 12%,white),transparent 80%),linear-gradient(110deg,#fff,var(--brand-soft));border-color:color-mix(in srgb,var(--brand-accent) 20%,white)}
+.aegis-model-edit-sheet .yushu-creation-header h2{color:var(--brand-accent);font-size:16px;font-weight:650}
+.aegis-model-edit-sheet .yushu-creation-icon{background:none;border:0;box-shadow:none;padding:0}
+.aegis-model-edit-sheet .yushu-creation-icon .aegis-model-brand-icon{width:42px;height:42px;padding:8px}
+.aegis-model-edit-sheet fieldset>div{padding:14px;border:1px solid color-mix(in srgb,var(--brand-accent) 13%,white);border-radius:13px;background:#ffffffb3}
+.aegis-model-edit-sheet input:not([type=checkbox]):not([type=range]),.aegis-model-edit-sheet select{min-height:36px;border-radius:10px;border-color:color-mix(in srgb,var(--brand-accent) 17%,#e6eae3);font-size:13px}
+.aegis-model-edit-sheet label{color:#6d7b6d!important;line-height:1.7}
+.aegis-model-edit-sheet .model-edit-runtime{padding:16px;border:1px solid color-mix(in srgb,var(--brand-accent) 20%,white);border-radius:13px;background:linear-gradient(120deg,var(--brand-soft),#fff)}
+.model-edit-runtime h3{display:flex;gap:7px;align-items:center;margin:0 0 14px;color:var(--brand-accent);font-weight:600;font-size:13px}
+.model-edit-runtime select,.model-edit-runtime input[type=number]{display:block;margin-top:6px}
+.aegis-model-edit-sheet .model-edit-runtime input[type=range]{width:100%;height:6px;min-height:6px;margin:18px 0 10px;accent-color:var(--brand-accent);background:transparent;border:0;box-shadow:none}
+.model-edit-runtime p{font-size:11px;color:#96a08f;line-height:1.6}
+.aegis-model-edit-sheet .yushu-creation-footer{border-color:color-mix(in srgb,var(--brand-accent) 15%,white);background:linear-gradient(110deg,#fff,var(--brand-soft))}
+.dark .aegis-model-edit-sheet{background:radial-gradient(ellipse at 0 0,color-mix(in srgb,var(--brand-accent) 16%,#242b25),transparent 85%),#242b25!important}
+.dark .aegis-model-edit-sheet .yushu-creation-header{background:linear-gradient(110deg,#293228,color-mix(in srgb,var(--brand-accent) 13%,#293228))}
+.dark .aegis-model-edit-sheet .yushu-creation-header h2{color:color-mix(in srgb,var(--brand-accent) 50%,white)}
+.dark .aegis-model-edit-sheet fieldset>div,.dark .aegis-model-edit-sheet .model-edit-runtime{background:#293228;border-color:#43523d}
+.dark .aegis-model-edit-sheet label{color:#beccb4!important}
+
+.model-edit-context-slider{margin:18px 0 8px}.aegis-model-edit-sheet .context-budget-slider{--context-ruler-bg:#fff}.dark .aegis-model-edit-sheet .context-budget-slider{--context-ruler-bg:#293228}

@@ -1,0 +1,22 @@
+.aegis-hub-tree{padding:12px;border:1px solid rgb(var(--ui-border));border-radius:16px;background:rgb(var(--ui-surface));font-family:inherit;font-size:13px}
+.hub-tree-row{display:flex;align-items:center;gap:12px;min-height:44px;padding:3px 9px 3px 4px;border-radius:10px;transition:background .15s}
+.hub-tree-row:hover{background:rgb(var(--ui-hover)/.65)}
+.hub-tree-label{display:flex;align-items:center;gap:9px;flex:1;min-width:0;text-align:left;color:rgb(var(--ui-text));padding:5px 0;font-size:13px;line-height:1.5}
+.hub-tree-label:focus-visible{outline:2px solid #8fb65c;outline-offset:3px;border-radius:5px}
+.hub-tree-chevron{width:14px;height:14px;flex-shrink:0;color:#87977b;transition:transform .15s}
+.hub-tree-chevron.is-open{transform:rotate(90deg)}
+.hub-tree-folder{width:18px;height:18px;flex-shrink:0;color:#779a52;stroke-width:1.7}
+.hub-tree-name{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:500}
+.hub-tree-count{flex-shrink:0;padding:1px 7px;border-radius:6px;background:#ecf2e5;color:#73855e;font-size:11px;line-height:18px;font-variant-numeric:tabular-nums}
+.hub-tree-root>.hub-tree-row{margin-bottom:8px;background:linear-gradient(110deg,#e8f1db,#f7faf3);border:1px solid #e0e9d6;padding:6px 10px}
+.hub-tree-root>.hub-tree-row .hub-tree-name{font-size:14px;font-weight:650;color:#4b652f}
+.hub-tree-children{margin-left:12px;padding-left:13px;border-left:1px solid rgb(var(--ui-border)/.75)}
+.hub-tree-children>.hub-tree-node{position:relative}
+.hub-tree-children>.hub-tree-node:before{content:'';position:absolute;left:-14px;top:22px;width:10px;height:1px;background:rgb(var(--ui-border)/.75)}
+.hub-tree-actions{display:flex;align-items:center;gap:10px;flex-shrink:0}
+.hub-tree-label .aegis-resource-identity{width:28px;height:28px;flex-shrink:0;border-radius:8px}
+.dark .hub-tree-root>.hub-tree-row{background:linear-gradient(110deg,#30412a,#273123);border-color:#405439}
+.dark .hub-tree-root>.hub-tree-row .hub-tree-name{color:#cee3b1}
+.dark .hub-tree-count{background:#34442b;color:#c1d4ab}
+@media(max-width:640px){.aegis-hub-tree{padding:8px}.hub-tree-children{margin-left:5px;padding-left:8px}.hub-tree-children>.hub-tree-node:before{left:-9px;width:6px}.hub-tree-row{gap:6px}.hub-tree-label{gap:6px}.hub-tree-actions{gap:6px}.hub-tree-actions>span{display:none}}
+@media(prefers-reduced-motion:reduce){.hub-tree-row,.hub-tree-chevron{transition:none}}

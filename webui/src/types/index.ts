@@ -560,6 +560,7 @@ export interface ModelDefinitionV2 {
 }
 
 export interface ModelCapabilitiesV2 {
+  thinking_level_map?: Record<string, string | null>;
   features: string[];
   modalities?: { input: string[]; output: string[] };
   supports_streaming: boolean;

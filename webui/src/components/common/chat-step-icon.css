@@ -1,0 +1,10 @@
+.chat-step-icon{display:block;width:18px;height:18px;flex:0 0 18px;color:#63a33b;overflow:visible}
+.chat-step-icon[data-step-icon=thinking]{color:#58952f}
+.chat-step-icon[data-step-icon=error]{color:#d96359}
+.chat-step-icon[data-step-icon=pending]{color:#94a581}
+.chat-step-icon__orbit{transform-origin:12px 12px;animation:chat-step-turn 1.5s linear infinite}
+.chat-step-icon--active{animation:chat-step-breathe 2s ease-in-out infinite}
+.dark .chat-step-icon{color:#a4d477}.dark .chat-step-icon[data-step-icon=error]{color:#f18e80}
+@keyframes chat-step-turn{to{transform:rotate(360deg)}}
+@keyframes chat-step-breathe{50%{opacity:.55}}
+@media(prefers-reduced-motion:reduce){.chat-step-icon__orbit,.chat-step-icon--active{animation:none}}

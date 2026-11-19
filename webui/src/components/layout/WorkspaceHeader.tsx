@@ -1,3 +1,4 @@
+import ThemeSkinPicker from '@/components/common/ThemeSkinPicker';
 import UtilityGlyph from '@/components/common/UtilityGlyph';
 import SystemUpdateButton from "./SystemUpdateButton";
 import { useContext } from 'react';
@@ -93,7 +94,7 @@ export default function WorkspaceHeader({
           )}
         </HeaderMenu>
 
-        <HeaderMenu placement="above" label={t('theme')} align="right" menuClassName="yushu-utility-menu yushu-menu-theme w-72" triggerClassName={ICON_BUTTON_CLASS} trigger={<UtilityGlyph kind={mode === "system" ? "system" : mode === "dark" ? "moon" : "sun"} />}>
+        <HeaderMenu placement="above" label={t('theme')} align="right" menuClassName="yushu-utility-menu yushu-menu-theme w-72" triggerClassName={ICON_BUTTON_CLASS} trigger={<UtilityGlyph kind="theme" />}>
           {(close) => (
             <>
               <div className={MENU_LABEL_CLASS}>{t('theme')}</div>
@@ -105,6 +106,7 @@ export default function WorkspaceHeader({
                   {mode === option.mode && <Check className="h-4 w-4" />}
                 </button>
               ))}
+              <ThemeSkinPicker compact />
             </>
           )}
         </HeaderMenu>
