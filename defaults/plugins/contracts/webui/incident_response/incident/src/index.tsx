@@ -102,6 +102,46 @@ function DeviceSourcePicker({devices,value,onChange,label}:{devices:any[];value:
 }
 function caseSource(detail:any){try{return JSON.parse(detail?.alert||'{}')._source_device||null}catch{return null}}
 function eventMessage(e:any){return e.message==='设备日志查询失败，请检查已接入 TDP 的连接和权限。原告警证据已保留。'?'来源设备日志查询失败，请检查本事件绑定设备的连接与查询权限。原告警证据已保留。':e.message}
+// Summarize only recorded metadata: missing counts never mean zero.
+function logCoverage(value: unknown) {
+ let meta: Record<string, unknown> = {};
+ try {
+  const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) meta = parsed;
+ } catch { /* Legacy or malformed metadata remains unknown. */ }
+ const query = (meta.query && typeof meta.query === 'object' ? meta.query : {}) as Record<string, unknown>;
+ const count = (value: unknown) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+ const returned = count(meta.returned), total = count(meta.total), limit = count(meta.page_limit);
+ const epoch = (v: unknown) => typeof v === 'number' && v > 0 && v < 1e11 ? new Date(v * 1000).toLocaleString('zh-CN', {timeZone: 'Asia/Shanghai', hour12: false}) : '';
+ const local = (v: unknown) => typeof v === 'string' && /^\d{4}[/\-]\d{2}[/\-]\d{2} \d{2}:\d{2}:\d{2}$/.test(v) ? v : '';
+ const from = epoch(query.time_from) || local(query.time_start);
+ const to = epoch(query.time_to) || local(query.time_end);
+ if (meta.truncated === true || (returned !== null && total !== null && total > returned)) return { label: '结果已截断', from, to, returned, total, limit, note: '未返回的日志不在本次证据内，不能据此排除其他行为。' };
+ if (limit !== null) return { label: '仅首批 · 覆盖未确认', from, to, returned, total, limit, note: '可能还有后续分页；本次证据不能代表完整查询结果。' };
+ const requested = count(query.size);
+ if (requested !== null && requested > 0 && returned !== null && returned >= requested) return { label: '达到查询上限 · 覆盖未确认', from, to, returned, total, limit, note: '返回条数达到请求上限，无法确认是否还有更多匹配日志。' };
+ if (meta.truncated === false && returned !== null && total === returned) return { label: returned === 0 ? '本次返回 0 条' : '未记录截断', from, to, returned, total, limit, note: '仅代表这台设备在指定时间和过滤条件下的返回，不代表事件证据完整。' };
+ return { label: '覆盖未知', from, to, returned, total, limit, note: '这份证据没有足够的范围或计数记录，不能据此判断是否查全。' };
+}
+
+function DeviceLogCoverage({detail}:{detail:any}) {
+ const records = (detail.evidence || []).filter((e:any) => e.kind === 'device_logs').slice().reverse();
+ const latest = (detail.events || []).filter((e:any) => e.stage === 'logs').slice(-1)[0];
+ return <section aria-label="日志证据覆盖" style={{marginBottom:16}}>
+  <div className="work-section-head" style={{marginBottom:8}}><div><h3>日志证据覆盖</h3><small>归档证据按时间倒序；覆盖范围不是事件完整度。</small></div>{latest&&<span className="badge">最近记录：{labels[latest.status]||latest.status}</span>}</div>
+  <div className="device-results">{records.map((e:any) => {
+   const coverage = logCoverage(e.metadata);
+   return <div className="evidence compact-log" key={e.id} style={{flexWrap:'wrap'}}><Icon type="file"/><div className="body" style={{minWidth:0,overflowWrap:'anywhere'}}>
+    <strong>{e.label} · {coverage.label}</strong>
+    <small>归档：{new Date(e.created).toLocaleString()} · {(e.size/1024).toFixed(1)} KB</small>
+    <small>查询范围：{coverage.from && coverage.to ? `${coverage.from} 至 ${coverage.to}（UTC+8）` : '未记录'}</small>
+    <small>返回 {coverage.returned ?? '未知'} 条 · 记录总数 {coverage.total ?? '未知'}{coverage.limit !== null ? ` · 首批上限 ${coverage.limit} 条` : ''}</small>
+    <p style={{margin:'5px 0 0',fontSize:12}}>{coverage.note}</p>
+   </div><a href={BASE+'/cases/'+detail.id+'/evidence/'+e.id}>下载原始日志</a></div>;
+  })}{records.length===0&&<div className="compact-empty">{caseSource(detail) ? '暂无归档日志。未采集不等于没有异常，请先查询关联日志。' : '尚未绑定告警来源设备，无法判断日志覆盖。'}</div>}</div>
+ </section>;
+}
+
 export default function IncidentPage(){
  const [cases,setCases]=useState<any[]>([]),[selected,setSelected]=useState(new URLSearchParams(location.search).get('case')||''),[detail,setDetail]=useState<any>(null),[tab,setTab]=useState('overview'),[settings,setSettings]=useState<any>({hosts:[]}),[error,setError]=useState(''),[busy,setBusy]=useState(''),[query,setQuery]=useState(''),[modal,setModal]=useState(false),[remote,setRemote]=useState(''),[path,setPath]=useState('');
  const [analysisProvider,setAnalysisProvider]=useState('threatbook'),[externalReport,setExternalReport]=useState<any>(null);
@@ -418,7 +458,7 @@ export default function IncidentPage(){
  {optionalLog&&<div className="modal" onClick={()=>setOptionalLog('')}><div className="dialog" onClick={e=>e.stopPropagation()}><button onClick={()=>setOptionalLog('')}>关闭</button><h3>安装日志</h3><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere',fontSize:12}}>{optionalLog}</pre></div></div>}
  {busy&&<p className="busy" role="status">{busy}，请稍候…</p>}
  {tab==='overview'&&<><div className="work-section-head"><h3>调查动态</h3><button disabled={!!busy||locked} onClick={()=>action('重新关联日志',()=>req('/cases/'+detail.id+'/run',{}))}>刷新关联日志</button></div><ActivityTimeline events={detail.events}/></>}
- {tab==='logs'&&<><div className="work-section-head"><div><h3>设备关联</h3><small>{caseSource(detail)?.name||'尚未绑定来源设备'}</small></div><div className="tools"><button disabled={locked} onClick={openSource}>{caseSource(detail)?'更换设备':'选择设备'}</button><button className="primary" disabled={!!busy||locked||!caseSource(detail)} onClick={()=>action('关联设备日志',()=>req('/cases/'+detail.id+'/run',{}))}>查询关联日志</button></div></div><div className="device-results">{detail.evidence.filter((e:any)=>e.kind==='device_logs').map((e:any)=><div className="evidence compact-log" key={e.id}><Icon type="file"/><div className="body"><strong>{e.label}</strong><small>{(e.size/1024).toFixed(1)} KB · {new Date(e.created).toLocaleString()}</small></div><a href={BASE+'/cases/'+detail.id+'/evidence/'+e.id}>下载日志</a></div>)}{!detail.evidence.some((e:any)=>e.kind==='device_logs')&&<div className="compact-empty">{caseSource(detail)?'暂无关联日志，点击查询开始。':'请先选择产生本事件告警的设备。'}</div>}</div>{detail.events.some((e:any)=>e.stage==='logs')&&<details className="work-help" open={detail.events.filter((e:any)=>e.stage==='logs').slice(-1)[0]?.status==='blocked'||detail.events.filter((e:any)=>e.stage==='logs').slice(-1)[0]?.status==='failed'}><summary>查询记录与异常</summary><ActivityTimeline compact events={detail.events.filter((e:any)=>e.stage==='logs')}/></details>}<details className="work-help"><summary>查询范围说明</summary><p>仅查询当前事件绑定的设备、告警时间窗口及关联 IP。原始响应保留在证据库，完整性以证据 SHA-256 校验。</p></details></>}
+ {tab==='logs'&&<><div className="work-section-head"><div><h3>设备关联</h3><small>{caseSource(detail)?.name||'尚未绑定来源设备'}</small></div><div className="tools"><button disabled={locked} onClick={openSource}>{caseSource(detail)?'更换设备':'选择设备'}</button><button className="primary" disabled={!!busy||locked||!caseSource(detail)} onClick={()=>action('关联设备日志',()=>req('/cases/'+detail.id+'/run',{}))}>查询关联日志</button></div></div><DeviceLogCoverage detail={detail}/>{detail.events.some((e:any)=>e.stage==='logs')&&<details className="work-help" open={detail.events.filter((e:any)=>e.stage==='logs').slice(-1)[0]?.status==='blocked'||detail.events.filter((e:any)=>e.stage==='logs').slice(-1)[0]?.status==='failed'}><summary>查询记录与异常</summary><ActivityTimeline compact events={detail.events.filter((e:any)=>e.stage==='logs')}/></details>}<details className="work-help"><summary>查询范围说明</summary><p>仅查询当前事件绑定的设备、告警时间窗口及关联 IP。原始响应保留在证据库，完整性以证据 SHA-256 校验。</p></details></>}
  {tab==='sandbox'&&<section className="external-analysis" data-provider={analysisProvider} style={{'--analysis-accent':platform.accent,'--analysis-soft':platform.soft} as React.CSSProperties}>
  <div className="analysis-platform-tabs" role="tablist" aria-label="样本分析平台">{[['threatbook','微步云沙箱','threatbook-hd.svg','动态行为 · 云沙箱'],['virustotal','VirusTotal','virustotal.svg','多引擎检测 · 文件情报']].map(([id,name,logo,desc])=><button role="tab" aria-selected={analysisProvider===id} key={id} onClick={()=>setAnalysisProvider(id)} style={{'--analysis-accent':id==='threatbook'?'#b45f55':'#586e9d','--analysis-soft':id==='threatbook'?'#fcf3f0':'#f0f3fa'} as React.CSSProperties}><img src={'/vendor-logos/'+logo} alt={name}/><span><strong>{name}</strong><small>{desc}</small></span><i>{(id==='threatbook'?settings.sandbox_key_configured:settings.virustotal_key_configured)?'已配置':'待配置'}</i></button>)}</div>
  <div className="analysis-brand-head"><img src={'/vendor-logos/'+platform.logo} alt=""/><div><h3>{platform.name}样本分析</h3><p>{analysisProvider==='threatbook'?'以云沙箱行为报告辅助验证可疑文件。':'聚合多引擎检出与文件情报，辅助交叉验证样本风险。'}</p></div><a className="analysis-official-link" href={analysisProvider==='threatbook'?'https://s.threatbook.com/':'https://www.virustotal.com/gui/home/upload'} target="_blank" rel="noopener noreferrer">前往{analysisProvider==='threatbook'?'微步':' VT'}官网上传 <span aria-hidden="true">↗</span></a></div>

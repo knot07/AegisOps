@@ -2,6 +2,7 @@
 import json,sqlite3
 from datetime import datetime,timedelta,timezone
 from pathlib import Path
+from .threat_intelligence import ADVISORY_ONLY_ARGS,ADVISORY_ONLY_SQL
 
 def lookup(database,action='candidates',q='',asset_id=0,page=1,days=30):
     page=max(1,min(int(page),10000));days=max(1,min(int(days),3650));q=str(q)[:200];size=20
@@ -26,7 +27,7 @@ def lookup(database,action='candidates',q='',asset_id=0,page=1,days=30):
             for software in asset['inventory']:
                 product=str(software.get('product','')).strip()
                 if len(product)<3:continue
-                rows=con.execute("SELECT id,source,cve,title,published,substr(info,1,3500) info,url,severity FROM ti_items WHERE substr(published,1,10)>=? AND instr(lower(title || ' ' || info),lower(?))>0 ORDER BY published DESC LIMIT 3",(since,product)).fetchall()
+                rows=con.execute(f"SELECT id,source,cve,title,published,substr(info,1,3500) info,url,severity FROM ti_items WHERE substr(published,1,10)>=? AND {ADVISORY_ONLY_SQL} AND instr(lower(title || ' ' || info),lower(?))>0 ORDER BY published DESC LIMIT 3",(since,*ADVISORY_ONLY_ARGS,product)).fetchall()
                 for r in rows:
                     items.append({'asset':{k:asset[k] for k in ['id','name','address']},'software':software,'advisory':dict(r),'verdict':'待核实','basis':'仅产品关键词匹配；需要核对官方影响版本、实际版本和配置条件。'})
         return {'items':items[:60],'asset_total':assets['total'],'asset_page':page,'assets_without_inventory':[a['id'] for a in assets['items'] if not a['inventory']],'note':'不执行扫描、利用或远程命令；不创建或修改资产、影响记录与漏洞。'}

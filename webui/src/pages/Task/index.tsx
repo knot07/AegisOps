@@ -1,5 +1,6 @@
+import WorkspaceGlyph, { type WorkspaceGlyphKind } from '@/components/common/WorkspaceGlyph';
 import { useState } from 'react';
-import { ListTodo, Plus, Clock, Calendar, Globe } from 'lucide-react';
+import { CircleAlert, ListTodo } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import { useTaskDashboard, useTaskSystemNotice, useTaskSystemHealth } from '@/hooks/useTasks';
@@ -14,10 +15,10 @@ type TabKey = 'queued' | 'scheduled' | 'services';
 
 export default function TaskPage() {
   const { t } = useTranslation('task');
-  const MAIN_TABS: { key: TabKey; label: string; icon: React.ElementType; countKey: keyof DashboardCounts | null }[] = [
-    { key: 'queued',    label: t('tabs.queued'),    icon: Clock,     countKey: 'queued' },
-    { key: 'scheduled', label: t('tabs.scheduled'), icon: Calendar,  countKey: 'scheduled_active' },
-    { key: 'services',  label: t('tabs.services'),  icon: Globe,     countKey: null },
+  const MAIN_TABS: { key: TabKey; label: string; icon: WorkspaceGlyphKind; countKey: keyof DashboardCounts | null }[] = [
+    { key: 'queued',    label: t('tabs.queued'),    icon: 'queue',     countKey: 'queued' },
+    { key: 'scheduled', label: t('tabs.scheduled'), icon: 'schedule',  countKey: 'scheduled_active' },
+    { key: 'services',  label: t('tabs.services'),  icon: 'api',     countKey: null },
   ];
   const [activeTab, setActiveTab] = useState<TabKey>('queued');
   const [showCreateDialog, setShowCreateDialog] = useState(false);
@@ -46,7 +47,7 @@ export default function TaskPage() {
               onClick={() => setShowCreateDialog(true)}
               className="flex items-center gap-2 px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors"
             >
-              <Plus className="w-4 h-4" /> {t('createTask')}
+              <WorkspaceGlyph kind="add" size="xs" /> {t('createTask')}
             </button>
           ) : null
         }
@@ -64,11 +65,16 @@ export default function TaskPage() {
             {notice.message}
           </div>
         )}
+        {activeTab !== 'services' && !!counts?.failed_unviewed && (
+          <div role="status" className="flex items-center gap-2 rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-800 dark:text-rose-200">
+            <CircleAlert className="size-4 shrink-0" aria-hidden="true" />
+            {t('attention.pending', { count: counts.failed_unviewed })}
+          </div>
+        )}
         {activeTab !== 'services' && <DashboardCards counts={counts} />}
 
         <div className="aegis-module-tabs">
           {MAIN_TABS.map(tab => {
-            const Icon = tab.icon;
             const count = tab.countKey ? (counts?.[tab.countKey] as number | undefined) : undefined;
             return (
               <button
@@ -81,7 +87,7 @@ export default function TaskPage() {
                     : 'text-gray-600 hover:text-gray-900'
                 }`}
               >
-                <Icon className="w-4 h-4" />
+                <WorkspaceGlyph kind={tab.icon} size="xs" />
                 {tab.label}
                 {count != null && count > 0 && (
                   <span className={`text-xs px-1.5 py-0.5 rounded-full font-medium ${

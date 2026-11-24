@@ -141,6 +141,7 @@ vi.mock('@/components/common/EntitySheet', () => ({
     rexGuidePanelDesc,
     rexGuideEmptyTitle,
     rexAgentName,
+    resizable,
   }: {
     children: React.ReactNode;
     onSubmit: () => void | Promise<void>;
@@ -152,9 +153,11 @@ vi.mock('@/components/common/EntitySheet', () => ({
     rexGuidePanelDesc?: string;
     rexGuideEmptyTitle?: string;
     rexAgentName?: string;
+    resizable?: boolean;
   }) => (
     <div
       data-testid="entity-sheet"
+      data-resizable={String(resizable)}
       data-guide-title={rexGuidePanelTitle ?? ''}
       data-guide-desc={rexGuidePanelDesc ?? ''}
       data-guide-empty-title={rexGuideEmptyTitle ?? ''}
@@ -273,6 +276,7 @@ describe('TaskSheet', () => {
     );
 
     const sheet = screen.getByTestId('entity-sheet');
+    expect(sheet).toHaveAttribute('data-resizable', 'false');
     expect(sheet).toHaveAttribute('data-guide-title', 'Rex 辅助创建任务');
     expect(sheet).toHaveAttribute('data-guide-empty-title', '暂无创建对话');
     expect(sheet).toHaveAttribute('data-rex-agent-name', 'rex');

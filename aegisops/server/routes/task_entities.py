@@ -411,8 +411,9 @@ async def list_scheduler_executions(
 @router.post("/task-schedulers/{scheduler_id}/run")
 async def run_scheduler(scheduler_id: str):
     from aegisops.task.manager import TaskManager
+    from aegisops.task.models import ExecutionTriggerType
 
-    execution = await TaskManager.rerun_scheduler(scheduler_id)
+    execution = await TaskManager.rerun_scheduler(scheduler_id, trigger_type=ExecutionTriggerType.RUN_NOW)
     if not execution:
         raise HTTPException(404, "Task scheduler not found")
     return execution.model_dump(mode="json", by_alias=True)

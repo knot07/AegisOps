@@ -1,4 +1,7 @@
 {
+  "attention": {"badge": "待查看", "pending_one": "有 {{count}} 项任务失败待查看（已停止自动重试）。请在执行列表中查看详情。", "pending_other": "有 {{count}} 项任务失败待查看（已停止自动重试）。请在执行列表中查看详情。"},
+  "nodeHistory": {"title": "节点执行记录", "refresh": "刷新", "attempt": "执行尝试", "attemptNumber_other": "第 {{count}} 次执行", "lastNodeAfterError": "出错前最后记录的节点", "lastNode": "最后记录的节点", "error": "暂时无法读取节点记录，请重试。", "empty": "本次任务暂无节点记录。旧任务可能没有保存记录。", "loading": "正在读取节点记录…", "running": "工作流执行中，节点记录将在本次执行结束后显示。", "recentOnly": "此处显示最近 30 个节点，完整步骤可在工作流执行历史中查看。", "attemptNumber_one": "第 {{count}} 次执行"},
+  "executionTrigger": {"run_now": "手动立即执行", "scheduled": "定时触发", "run_once": "一次性执行", "rerun": "重跑记录", "unknown": "触发方式未知"},
   "pageTitle": "任务中心",
   "pageDescription": "管理任务队列、定时任务和已发布的 API 服务",
   "health": {
@@ -127,6 +130,7 @@
     "actionFailed": "操作失败"
   },
   "scheduled": {
+    "statusArchived": "已归档",
     "emptyTitle": "暂无定时任务",
     "emptyDescription": "在对话中告诉 Agent「每天9点帮我执行…」，即可创建定时任务",
     "colStatus": "状态",
@@ -219,6 +223,9 @@
     "workflowIdPlaceholder": "输入 Workflow ID"
   },
   "taskSheet": {
+    "basics": "基本信息",
+    "executionConfig": "执行配置",
+    "viewNodes": "查看节点记录",
     "entityType": "任务",
     "saveFailed": "保存失败",
     "createFailed": "创建失败",

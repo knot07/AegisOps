@@ -620,6 +620,7 @@ export function ChatModelPicker({
                           key={option.key}
                                 style={brandStyle(option.modelID)}
                                 data-chat-model-choice={option.modelID}
+                                aria-pressed={!autoOption?.selected && selectedModelOption?.key === option.key}
                           type="button"
                           onClick={() => {
                             onSelectModel(option);

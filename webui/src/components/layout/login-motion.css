@@ -1,0 +1,124 @@
+.yushu-auth.auth-login-motion {
+  --login-panel:#fcfefbf0; --login-canvas:#edf2ee; --login-ink:#17241e; --login-muted:#4c6257;
+  --login-line:#cddbd1; --login-field:#f5f9f6; --login-primary:#193d2e; --login-primary-hover:#24523c;
+  --login-focus:#317a55;
+  --signal-dot:#6c9781; --signal-hot:#479c69; --signal-dim:#8baf9c; --signal-shine:#fff;
+  position:relative; isolation:isolate; display:grid; grid-template-columns:minmax(0,1fr); overflow:hidden;
+  background:radial-gradient(ellipse at 50% 30%,#fff9,transparent 60%),var(--login-canvas); color:var(--login-ink);
+}
+.dark .yushu-auth.auth-login-motion {
+  --login-panel:#1b2925f5; --login-canvas:#101b17; --login-ink:#eff6ef; --login-muted:#adbfaf;
+  --login-line:#465e50; --login-field:#13211b; --login-primary:#b5df91; --login-primary-hover:#c5eba6;
+  --login-focus:#9bdc84;
+  --signal-dot:#548e78; --signal-hot:#abdf7d; --signal-dim:#376955; --signal-shine:#9accae;
+  background:radial-gradient(ellipse at 50% 26%,#22372e,transparent 62%),var(--login-canvas);
+}
+.yushu-auth.auth-login-motion .login-visuals { position:absolute; inset:0; overflow:hidden; pointer-events:none; z-index:-1; }
+.login-visuals::before,.login-visuals::after { content:''; position:absolute; inset:0; pointer-events:none; }
+.login-visuals::before {
+  background:linear-gradient(to right,#6b9c7a17 1px,transparent 1px),linear-gradient(to bottom,#6b9c7a17 1px,transparent 1px);
+  background-size:64px 64px; mask-image:radial-gradient(ellipse at 50% 56%,transparent 14%,#000 82%);
+}
+.login-visuals::after {
+  background:radial-gradient(ellipse at 16% 77%,#6cb88230,transparent 43%),radial-gradient(ellipse at 82% 24%,#bdd8a860,transparent 38%);
+}
+.dark .login-visuals::after { background:radial-gradient(ellipse at 16% 77%,#467e543d,transparent 43%),radial-gradient(ellipse at 82% 24%,#7cb95020,transparent 38%); }
+.login-signal-field { position:absolute; inset:0; width:100%; height:100%; }
+.login-network { position:absolute; inset:auto 0 0; width:100%; height:58%; pointer-events:none; }
+.login-network-flow line { stroke:var(--signal-dot); stroke-opacity:.14; stroke-width:1; }
+.login-network-flow circle { fill:var(--signal-hot); opacity:.52; }
+.login-network-flow .login-network-packet { stroke:var(--signal-hot); stroke-opacity:.8; stroke-dasharray:1 99; stroke-width:4; stroke-linecap:round; }
+.login-network-success { opacity:0; fill:none; stroke:var(--signal-hot); stroke-linecap:round; stroke-linejoin:round; }
+.login-network-success path { stroke-width:4; stroke-dasharray:1; stroke-dashoffset:1; }
+.auth-login-motion[data-login-success] .login-network-flow { opacity:.24; }
+.auth-login-motion[data-login-success] .login-network-success { opacity:1; }
+.yushu-auth.auth-login-motion .yushu-auth-main { min-width:0; min-height:100dvh; perspective:1100px; padding:75px 24px 72px; }
+.yushu-auth.auth-login-motion .yushu-auth-form { max-width:392px; animation:none; }
+.yushu-auth.auth-login-motion .yushu-auth-options,.yushu-auth.auth-login-motion .yushu-auth-options button { color:var(--login-muted); }
+.yushu-auth.auth-login-motion .yushu-auth-options button[aria-pressed=true] { color:var(--login-focus); }
+.yushu-auth.auth-login-motion .yushu-auth-footnote { color:var(--login-muted); text-align:center; max-width:calc(100% - 32px); }
+.login-motion-brand { display:grid; justify-items:center; gap:10px; margin-bottom:22px; text-align:center; }
+.login-motion-brand img { width:58px; height:58px; border-radius:17px; box-shadow:0 7px 24px #386f4b35; }
+.login-motion-brand strong { font-size:17px; font-weight:700; color:var(--login-ink); }
+.login-motion-brand span { font-size:9px; color:var(--login-muted); letter-spacing:.18em; }
+.login-motion-header { text-align:center; }
+.login-clock { position:absolute; left:28px; bottom:23px; display:flex; align-items:center; gap:8px; color:var(--login-ink); }
+.login-clock .aegis-gauge-dial { position:static; width:45px; height:45px; --gauge-accent:var(--login-focus); --gauge-track:var(--login-line); }
+.login-clock > div { display:grid; gap:3px; font-family:ui-monospace,Consolas,monospace; }
+.login-clock strong { font-size:15px; line-height:1; font-variant-numeric:tabular-nums slashed-zero; }
+.login-clock span { font-size:8px; letter-spacing:.09em; color:var(--login-muted); }
+.yushu-auth.auth-login-motion .yushu-auth-form > .login-motion-card {
+  position:relative; display:grid; gap:17px; width:100%; padding:clamp(22px,4vw,32px); border:1px solid var(--login-line); border-radius:23px;
+  background:radial-gradient(circle at var(--login-x,50%) var(--login-y,0%),#97cd8c26,transparent 55%),var(--login-panel);
+  backdrop-filter:blur(14px); box-shadow:0 22px 62px #1d31271f,0 2px 5px #1d312711;
+  color:var(--login-ink);
+}
+.yushu-auth.auth-login-motion .login-motion-card :is(h1,label) { color:var(--login-ink); }
+.yushu-auth.auth-login-motion .login-motion-card h1 { margin:0 0 4px; font-size:24px; font-weight:700; }
+.yushu-auth.auth-login-motion .login-motion-card :is(p,.login-field-icon) { color:var(--login-muted); }
+.yushu-auth.auth-login-motion .login-motion-card p { line-height:1.6; font-size:12px; }
+.login-field { position:relative; margin-top:5px; }
+.login-field-icon { position:absolute; z-index:1; top:0; bottom:0; left:13px; margin:auto 0; pointer-events:none; }
+.yushu-auth.auth-login-motion .login-motion-card input {
+  width:100%; min-height:46px; border:1px solid var(--login-line); border-radius:11px; padding-left:38px;
+  color:var(--login-ink); background:var(--login-field); font-size:14px; outline:none;
+}
+.yushu-auth.auth-login-motion .login-motion-card input::placeholder { color:var(--login-muted); opacity:.85; }
+.yushu-auth.auth-login-motion .login-motion-card input:focus { border-color:var(--login-focus); background:var(--login-field); box-shadow:0 0 0 3px color-mix(in srgb,var(--login-focus) 23%,transparent); }
+.yushu-auth.auth-login-motion .login-motion-card button[type=button] { color:var(--login-muted); }
+.yushu-auth.auth-login-motion .login-motion-card button[type=submit] {
+  display:flex; align-items:center; justify-content:center; gap:8px; width:100%; min-height:46px;
+  margin-inline:auto; border-radius:12px; color:white; background:var(--login-primary); font-size:14px; font-weight:650;
+  box-shadow:0 8px 20px #284d3b30;
+}
+.dark .yushu-auth.auth-login-motion .login-motion-card button[type=submit] { color:#193020; }
+.yushu-auth.auth-login-motion .login-motion-card button[type=submit]:hover { background:var(--login-primary-hover); }
+.yushu-auth.auth-login-motion :is(.login-motion-card,.yushu-auth-options) button:focus-visible { outline:2px solid var(--login-focus); outline-offset:3px; }
+.yushu-auth.auth-login-motion .login-motion-card button:disabled { cursor:wait; }
+.login-motion-card .login-result { display:grid; place-items:center; min-height:46px; }
+.login-result svg { width:46px; height:46px; padding:7px; border-radius:50%; background:#3d8048; color:#fff; }
+.login-result svg :is(circle,path) { fill:none; stroke:currentColor; stroke-width:1.6; stroke-linecap:round; stroke-linejoin:round; stroke-dasharray:1; }
+.login-scene-toggle { display:grid; place-items:center; min-width:32px; min-height:32px; border-radius:8px; }
+.login-scene-toggle:hover { background:var(--login-line); }
+@media (hover:hover) and (pointer:fine) and (prefers-reduced-motion:no-preference) {
+  .yushu-auth.auth-login-motion .yushu-auth-form > .login-motion-card { transform:rotateX(var(--login-rx,0deg)) rotateY(var(--login-ry,0deg)); transition:transform .38s cubic-bezier(.13,.8,.2,1); }
+}
+@media (prefers-reduced-motion:no-preference) {
+  .login-motion-brand,.login-clock,.yushu-auth.auth-login-motion .yushu-auth-form > .login-motion-card { animation:login-motion-reveal .65s cubic-bezier(.19,1,.33,1) backwards; }
+  .yushu-auth.auth-login-motion .yushu-auth-form > .login-motion-card { animation-delay:.12s; }
+  .yushu-auth.auth-login-motion .yushu-auth-form > .login-motion-card:focus-within { animation:none; }
+  .login-clock { animation-delay:.18s; }
+  .login-clock line { animation:login-motion-tick .32s backwards; animation-delay:calc(.24s + var(--tick-index) * 8ms); }
+  .login-visuals::after { animation:login-motion-glow 7s ease-in-out infinite; }
+  .login-motion-brand img { animation:login-motion-beacon 3.2s ease-in-out infinite; }
+  .login-network-flow { animation:login-motion-drift 12s ease-in-out infinite; }
+  .login-network-flow circle { animation:login-motion-glow 3s ease-in-out infinite; }
+  .login-network-flow .login-network-packet { animation:login-motion-packet 5s linear infinite; }
+  .auth-login-motion[data-login-paused] :is(.login-visuals,.login-motion-brand img,.login-network-flow,.login-network-flow *) { animation-play-state:paused; }
+  .auth-login-motion[data-login-paused] .login-visuals::after { animation-play-state:paused; }
+  .auth-login-motion[data-login-success] .login-network-flow { animation:none; transition:opacity .22s; }
+  .auth-login-motion[data-login-success] .login-network-success line { animation:login-motion-burst .58s ease-out both; }
+  .auth-login-motion[data-login-success] .login-network-success path { animation:login-motion-draw .42s .18s both; }
+  .login-result svg { animation:login-motion-orb .46s cubic-bezier(.2,1,.3,1.3) both; }
+  .login-result svg circle { animation:login-motion-draw .42s both; }
+  .login-result svg path { animation:login-motion-draw .28s .18s both; }
+  .login-motion-card [role=alert] { animation:login-motion-reveal .24s ease-out; }
+  .login-motion-spinner { animation:login-motion-spin .8s linear infinite; }
+}
+@keyframes login-motion-reveal { from { opacity:0; translate:0 13px; } }
+@keyframes login-motion-tick { from { opacity:.13; } }
+@keyframes login-motion-glow { 0%,100% { opacity:.44; } 50% { opacity:1; } }
+@keyframes login-motion-beacon { 0%,100% { box-shadow:0 0 5px #71b28239; } 50% { box-shadow:0 0 22px #71b28280; } }
+@keyframes login-motion-drift { 50% { transform:translate(9px,-7px); } }
+@keyframes login-motion-packet { from { stroke-dashoffset:100; } to { stroke-dashoffset:0; } }
+@keyframes login-motion-draw { from { stroke-dashoffset:1; } to { stroke-dashoffset:0; } }
+@keyframes login-motion-burst { from { opacity:1; } to { opacity:0; } }
+@keyframes login-motion-orb { from { opacity:0; transform:scale(.65); } }
+@keyframes login-motion-spin { to { transform:rotate(360deg); } }
+@media (max-width:767px) {
+  .yushu-auth.auth-login-motion .yushu-auth-main { padding:68px 18px 64px; }
+  .login-clock { display:none; }
+  .login-motion-brand { margin-bottom:16px; }
+  .yushu-auth.auth-login-motion .yushu-auth-options { right:17px; top:13px; }
+  .yushu-auth.auth-login-motion .yushu-auth-footnote { bottom:18px; }
+}

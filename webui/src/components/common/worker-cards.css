@@ -1,0 +1,52 @@
+/* Primary button fill colors are not readable as text on pale surfaces. */
+.worker-accent-ink { color: var(--skin-accent, #446027); }
+.dark .worker-accent-ink { color: var(--skin-accent, #b8d98c); }
+
+.worker-reading-card {
+  min-width: 0;
+  padding: clamp(.75rem, 2.2vw, 1.125rem);
+  border: 1px solid var(--border-subtle);
+  border-radius: .875rem;
+  background: var(--bg-surface);
+  color: var(--text-primary);
+  overflow-wrap: anywhere;
+}
+.worker-detail-body { background: var(--bg-canvas); }
+.worker-brief, .worker-summary-text {
+  font-size: .8125rem;
+  line-height: 1.65;
+}
+.worker-report-card .prose.chat-prose {
+  font-size: .875rem;
+  font-weight: 400;
+  line-height: 1.75;
+  color: inherit !important;
+  background: transparent !important;
+}
+.worker-report-card .prose.chat-prose :is(p,li) { line-height: inherit; }
+.worker-report-card .prose.chat-prose :is(h1,h2,h3,h4,h5,h6) {
+  margin-block: 1.25em .45em;
+  line-height: 1.4;
+  font-weight: 650;
+  color: var(--text-primary);
+}
+.worker-report-card .prose.chat-prose > :first-child { margin-block-start: 0; }
+.worker-report-card .prose.chat-prose h1 { font-size: 1.125rem; }
+.worker-report-card .prose.chat-prose h2 { font-size: 1rem; }
+.worker-report-card .prose.chat-prose :is(h3,h4,h5,h6) { font-size: .9375rem; }
+.worker-report-card .prose.chat-prose :is(ol,ul) { padding-inline-start: 1.3em; }
+.worker-report-card .prose.chat-prose li + li { margin-block-start: .45em; }
+.worker-report-card .prose.chat-prose :is(pre,.chat-table-scroll) { overflow: auto; }
+.worker-report-card .prose.chat-prose .chat-inline-code {
+  font-size: .86em;
+  padding: .08em .3em;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+}
+.worker-report-meta {
+  margin-top: .875rem;
+  padding-top: .75rem;
+  border-top: 1px solid var(--border-subtle);
+  font-size: .75rem;
+  color: var(--text-secondary);
+}

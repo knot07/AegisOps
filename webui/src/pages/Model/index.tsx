@@ -1,3 +1,4 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ThemedSelect from '@/components/common/ThemedSelect';
 import './model-editor.css';
 import ContextBudgetSlider from '@/components/common/ContextBudgetSlider';
@@ -9,8 +10,7 @@ import { useTranslation } from 'react-i18next';
 import {
   Brain, Cog, TestTube, Trash2, Search,
   Zap, Eye, EyeOff, Wrench, MessageSquare,
-  Link2, Link2Off, DollarSign, Cpu,
-  Plus, ToggleLeft, ToggleRight,
+  Link2, Link2Off, Plus, ToggleLeft, ToggleRight,
   ChevronDown, Check, AlertCircle, Loader2,
   X, Shield, Pencil, Star, AlertTriangle,
   CheckCircle2, ArrowUp, ArrowDown, ListOrdered,
@@ -869,7 +869,7 @@ function DashboardStrip({
         )}
       </div>
       <StatCard
-        icon={<ListOrdered className="w-5 h-5" />}
+        icon={<WorkspaceGlyph kind="queue" size="xs" />}
         label={t('dashboard.fallbackModels')}
         value={fallbackCount > 0
           ? t('dashboard.fallbackAvailability', { available: availableFallbackCount, total: fallbackCount })
@@ -879,11 +879,11 @@ function DashboardStrip({
         onClick={onEditFallbacks}
         title={onEditFallbacks ? t('dashboard.editFallbackModels') : undefined}
       />
-      <StatCard icon={<Link2 className="w-5 h-5" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
-      <StatCard icon={<Cpu className="w-5 h-5" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
+      <StatCard icon={<WorkspaceGlyph kind="delegate" size="xs" />} label={t('dashboard.connected')} value={String(connectedCount)} color="green" />
+      <StatCard icon={<WorkspaceGlyph kind="models" size="xs" />} label={t('dashboard.availableModels')} value={String(totalModels)} color="blue" />
       <TokenUsageCard usageStats={usageStats} loading={usageLoading} error={usageLoadError} onRefresh={onRefreshUsage} />
       <StatCard
-        icon={<DollarSign className="w-5 h-5" />}
+        icon={<WorkspaceGlyph kind="coins" size="xs" />}
         label={t('dashboard.totalCost')}
         value={totalCost ?? t('dashboard.noCost')}
         color="amber"

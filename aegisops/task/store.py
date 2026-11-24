@@ -577,6 +577,7 @@ class TaskStore:
     @classmethod
     @_write_operation
     async def create_scheduler(cls, scheduler: TaskScheduler) -> Optional[TaskScheduler]:
+        cls._clear_inactive_next_run(scheduler)
         if scheduler.dedup_key:
             existing = await cls.get_scheduler_by_dedup_key(scheduler.dedup_key)
             if existing is not None:
@@ -681,6 +682,7 @@ class TaskStore:
     @classmethod
     @_write_operation
     async def update_scheduler(cls, scheduler: TaskScheduler) -> TaskScheduler:
+        cls._clear_inactive_next_run(scheduler)
         scheduler.touch()
         db = await cls._writer_db()
         await db.execute(
@@ -1474,6 +1476,16 @@ class TaskStore:
                 WHERE status = 'completed' AND delivery_status != 'viewed'
                 """
             ),
+            "failed_unviewed": await _count(
+                """
+                SELECT COUNT(*) AS c FROM task_executions
+                WHERE status = 'failed' AND delivery_status != 'viewed'
+                  AND (NULLIF(json_extract(retry, '$.blockedReason'), '') IS NOT NULL
+                    OR (json_extract(retry, '$.retryAfter') IS NULL
+                      AND COALESCE(json_extract(retry, '$.retryCount'), 0)
+                        >= COALESCE(json_extract(retry, '$.maxRetries'), 3)))
+                """
+            ),
             "failed_week": await _count(
                 """
                 SELECT COUNT(*) AS c FROM task_executions
@@ -1659,7 +1671,15 @@ class TaskStore:
         data["skills"] = json.loads(data["skills"]) if data.get("skills") else []
         data["tags"] = json.loads(data["tags"]) if data.get("tags") else []
         data.setdefault("context", {})
-        return TaskScheduler(**data)
+        scheduler = TaskScheduler(**data)
+        cls._clear_inactive_next_run(scheduler)
+        return scheduler
+
+    @staticmethod
+    def _clear_inactive_next_run(scheduler: TaskScheduler) -> None:
+        # Also normalize old persisted rows on read without changing their run_at.
+        if scheduler.status != SchedulerStatus.ACTIVE:
+            scheduler.trigger.next_run = None
 
     @classmethod
     def _row_to_execution(cls, row: aiosqlite.Row | Dict[str, Any]) -> TaskExecution:

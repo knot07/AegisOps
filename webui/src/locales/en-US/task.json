@@ -1,4 +1,7 @@
 {
+  "attention": {"badge": "Needs review", "pending_one": "One failed task needs review. Automatic retries have stopped. Open its details in the execution list.", "pending_other": "{{count}} failed tasks need review. Automatic retries have stopped. Open their details in the execution list."},
+  "nodeHistory": {"title": "Workflow node history", "refresh": "Refresh", "attempt": "Execution attempt", "attemptNumber_other": "Attempt {{count}}", "lastNodeAfterError": "Last node recorded before failure", "lastNode": "Last recorded node", "error": "Unable to load node history. Try again.", "empty": "No node history for this run. Older tasks may have no saved records.", "loading": "Loading node history…", "running": "This workflow is running. Node history will appear after this attempt ends.", "recentOnly": "Showing the latest 30 nodes. See workflow history for the full run.", "attemptNumber_one": "Attempt {{count}}"},
+  "executionTrigger": {"run_now": "Run now", "scheduled": "Scheduled", "run_once": "One-off execution", "rerun": "Rerun record", "unknown": "Unknown trigger"},
   "pageTitle": "Tasks",
   "pageDescription": "Manage task queues, scheduled tasks, and published API services",
   "health": {
@@ -127,6 +130,7 @@
     "actionFailed": "Operation failed"
   },
   "scheduled": {
+    "statusArchived": "Archived",
     "emptyTitle": "No Scheduled Tasks",
     "emptyDescription": "Tell the Agent \"run... every day at 9am\" in a conversation to create scheduled tasks",
     "colStatus": "Status",
@@ -219,6 +223,9 @@
     "workflowIdPlaceholder": "Enter Workflow ID"
   },
   "taskSheet": {
+    "basics": "Basic information",
+    "executionConfig": "Execution settings",
+    "viewNodes": "View node history",
     "entityType": "Task",
     "saveFailed": "Save failed",
     "createFailed": "Create failed",

@@ -2,6 +2,36 @@ import client from './client';
 import type { Session } from '@/types';
 import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 
+export interface WorkerStep {
+  id: string;
+  tool: string;
+  status: string;
+  startedAt?: number | null;
+}
+
+export interface WorkerTask {
+  sessionID: string;
+  agent?: string | null;
+  description: string;
+  state: string;
+  created: number | null;
+  updated: number | null;
+  latestStep?: WorkerStep | null;
+}
+
+export interface WorkerProgress {
+  enabled: boolean;
+  tasks: WorkerTask[];
+  hasMore: boolean;
+}
+
+export interface WorkerDetail extends WorkerTask {
+  steps: WorkerStep[];
+  hasOlderSteps: boolean;
+  report: string;
+  reportMayBeTruncated: boolean;
+}
+
 export interface SessionMessagePartPayload {
   id: string;
   messageID: string;
@@ -226,6 +256,16 @@ export interface SessionContextRootPage {
 }
 
 export const sessionApi = {
+  getWorkerProgress: async (sessionId: string, signal: AbortSignal): Promise<WorkerProgress> => {
+    const response = await client.get(`/api/session/${encodeURIComponent(sessionId)}/worker-progress`, { signal });
+    return response.data;
+  },
+
+  getWorkerDetail: async (sessionId: string, signal: AbortSignal): Promise<WorkerDetail> => {
+    const response = await client.get(`/api/session/${encodeURIComponent(sessionId)}/worker-detail`, { signal });
+    return response.data;
+  },
+
   /**
    * 获取会话列表
    */

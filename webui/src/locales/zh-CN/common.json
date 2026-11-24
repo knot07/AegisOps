@@ -1,4 +1,38 @@
 {
+  "worker": {
+    "title": "Worker 执行进度",
+    "detail": "Worker 执行详情",
+    "close": "关闭执行详情",
+    "steps": "执行步骤",
+    "result": "任务结果",
+    "stale": "暂时无法刷新进度",
+    "retry": "重试",
+    "loading": "正在读取执行进度…",
+    "noSteps": "暂未记录工具步骤。",
+    "olderSteps": "仅显示最近的步骤。",
+    "truncated": "报告较长，仅显示已保存的摘要。",
+    "waitingResult": "执行完成后会在这里显示结果。",
+    "noResult": "没有可显示的任务结果。",
+    "activeCount_other": "{{count}} 项执行中",
+    "taskCount_other": "{{count}} 项任务",
+    "defaultName": "执行智能体",
+    "openDetails": "查看详情",
+    "empty": "尚未委派 Worker 任务。",
+    "moreTasks": "仅显示最近的 24 项任务。",
+    "durationMinutes": "{{min}} 分 {{sec}} 秒",
+    "durationSeconds": "{{sec}} 秒",
+    "activeCount_one": "{{count}} 项执行中",
+    "taskCount_one": "{{count}} 项任务",
+    "states": {
+      "queued": "排队中",
+      "running": "执行中",
+      "completed": "已完成",
+      "failed": "失败",
+      "interrupted": "已中断",
+      "stopped": "已停止",
+      "unknown": "未知"
+    }
+  },
   "image": {
     "preview": "图片预览"
   },

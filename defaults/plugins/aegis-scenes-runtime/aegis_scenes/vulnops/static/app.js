@@ -119,7 +119,14 @@ async function render(){
   if(view==='assets'&&assetMode==='topology')window.mountAssetTopology($('#asset-topology'),assets);
  }catch(e){if(token===loadVersion&&$('#content'))$('#content').innerHTML=empty('加载失败',e.message,btn('重新加载','refresh',true));}
 }
-function metric(label,value,foot,ic,go,featured=false){return `<button class="metric ${featured?'featured':''}" data-go="${go}"><div class="metric-label">${label}${icon(ic)}</div><div class="metric-value">${value}<span>项</span></div><div class="metric-foot">${foot}</div></button>`;}
+const overviewMetricArt = {
+ shield:'<path class="metric-emblem-fill" d="M12 3 20 6v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6Z"/><path d="M9 9h6m-6 3h6m-6 3h3"/>',
+ alert:'<path class="metric-emblem-fill" d="M10.5 4.8a1.7 1.7 0 0 1 3 0l7 13a1.6 1.6 0 0 1-1.4 2.3H4.9a1.6 1.6 0 0 1-1.4-2.3Z"/><path d="M12 9v4m0 3.5h.05"/>',
+ clock:'<circle class="metric-emblem-fill" cx="11" cy="12" r="7.5"/><path d="M11 7.8v4.6l2.6 1.7m6.4-7v4.5m0 3h.05"/>',
+ check:'<path class="metric-emblem-fill" d="M7 5.5h10a2 2 0 0 1 2 2V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7.5a2 2 0 0 1 2-2Z"/><rect class="metric-emblem-fill" x="9" y="3" width="6" height="5" rx="1.4"/><path d="m8.5 14 2.4 2.5 4.6-5"/>',
+};
+function overviewMetricIcon(kind){return `<span class="metric-emblem" data-metric-icon="${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="var(--metric-ink)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false">${overviewMetricArt[kind]}</svg></span>`;}
+function metric(label,value,foot,ic,go,featured=false){return `<button class="metric ${featured?'featured':''}" data-go="${go}"><div class="metric-label">${label}${overviewMetricIcon(ic)}</div><div class="metric-value">${value}<span>项</span></div><div class="metric-foot">${foot}</div></button>`;}
 function trendChart(trend){
  const max=Math.max(2,...trend.flatMap(d=>[d.new,d.closed]));
  const total=trend.reduce((n,d)=>n+d.new,0),peak=Math.max(0,...trend.map(d=>d.new)),average=trend.length?total/trend.length:0;

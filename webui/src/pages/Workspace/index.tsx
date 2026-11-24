@@ -4,7 +4,7 @@ import KnowledgeTab from './KnowledgeTab';
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
   X, ChevronRight, ChevronDown, ChevronUp, RefreshCw, FolderPlus,
-  Brain, AlertTriangle, Search, ArrowLeft, Maximize2, Database,
+  Brain, AlertTriangle, Search, ArrowLeft, Maximize2,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -15,6 +15,7 @@ import {
   workspaceAPI, WorkspaceNode, WorkspaceProject, formatBytes, formatDate, fileIcon,
 } from '@/api/workspace';
 import { FilePreviewRenderer, PreviewModal, type PreviewFileAccess } from '@/components/common/FilePreview';
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { WorkspaceFileSplit, FileListTable, FileListRow, FileListActions, PreviewPanelHeader, fileActionClass, previewActionClass } from '@/components/common/WorkspaceFileView';
 import { extractErrorMessage } from '@/utils/error';
 
@@ -126,9 +127,9 @@ export default function WorkspacePage() {
       />
 
       <div className="aegis-module-tabs">
-        <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<FolderOpen className="w-4 h-4" />} label={t('tabs.files')} />
-        <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<Brain className="w-4 h-4" />} label={t('tabs.memory')} />
-        <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<Database className="w-4 h-4" />} label={t('tabs.knowledge')} />
+        <TabButton active={activeTab === 'files'} onClick={() => setActiveTab('files')} icon={<WorkspaceGlyph kind="folder" size="xs" />} label={t('tabs.files')} />
+        <TabButton active={activeTab === 'memory'} onClick={() => setActiveTab('memory')} icon={<WorkspaceGlyph kind="memory" size="xs" />} label={t('tabs.memory')} />
+        <TabButton active={activeTab === 'knowledge'} onClick={() => setActiveTab('knowledge')} icon={<WorkspaceGlyph kind="knowledge" size="xs" />} label={t('tabs.knowledge')} />
       </div>
 
       <div className="aegis-workspace-content aegis-module-section min-h-0 flex-1 overflow-hidden">
@@ -429,10 +430,10 @@ function FilesTab() {
               title={t('files.refresh')}
               className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
+              <WorkspaceGlyph kind="refresh" size="xs" className={loading ? 'motion-safe:[&>svg]:animate-spin' : ''} />
             </button>
             <button onClick={() => setNewDir({ show: true, name: '' })} title={t('files.newDir')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
-              <FolderPlus className="w-4 h-4" />
+              <WorkspaceGlyph kind="folderAdd" size="xs" />
             </button>
             <button
               onClick={() => fileInputRef.current?.click()}
@@ -440,7 +441,7 @@ function FilesTab() {
               title={t('files.upload')}
               className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
             >
-              <Upload className="w-4 h-4" />
+              <WorkspaceGlyph kind="upload" size="xs" />
             </button>
             <input ref={fileInputRef} type="file" multiple className="hidden" onChange={(e) => handleUpload(e.target.files)} />
           </div>
@@ -513,7 +514,7 @@ function FilesTab() {
                     onClick={() => handleSelectNode(item)}
                     selected={panel.node?.path === item.path}
                   >
-                    <td className="px-4 py-2 text-sm">{item.type === 'directory' ? <FolderOpen className="h-4 w-4 text-[#8ba16a]" /> : fileIcon(item)}</td>
+                    <td className="px-4 py-2 text-sm">{item.type === 'directory' ? <WorkspaceGlyph kind="folder" size="xs" /> : fileIcon(item)}</td>
                     <td className="max-w-0 truncate px-2 py-2 font-medium text-gray-800 dark:text-zinc-100">
                       <span className="block truncate">{item.name}</span>
                     </td>
@@ -761,7 +762,7 @@ function MemoryTreeNode({
         ) : (
           <span className="w-3.5 flex-shrink-0" />
         )}
-        <span className="text-sm flex-shrink-0">{node.type === 'directory' ? <FolderOpen className="h-4 w-4 text-[#8ba16a]" /> : fileIcon(node)}</span>
+        <span className="text-sm flex-shrink-0">{node.type === 'directory' ? <WorkspaceGlyph kind="folder" size="xs" /> : fileIcon(node)}</span>
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium truncate">{memoryNodeLabel(node)}</div>
           {isDirectory ? (

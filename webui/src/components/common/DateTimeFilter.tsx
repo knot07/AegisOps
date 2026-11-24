@@ -1,6 +1,7 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
 import { createPortal } from 'react-dom';
-import { CalendarDays, ChevronLeft, ChevronRight, Clock3, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Clock3 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import './date-time-filter.css';
 
@@ -22,9 +23,9 @@ export default function DateTimeFilter({ value, onChange, label, describedBy }: 
  function choose(d:Date){const next=new Date(d.getFullYear(),d.getMonth(),d.getDate(),draft.getHours(),draft.getMinutes());setDraft(next);setMonth(new Date(next.getFullYear(),next.getMonth(),1));}
  function moveMonth(n:number){setMonth(new Date(month.getFullYear(),month.getMonth()+n,1));}
  return <div className="aegis-date-filter">
-  <button ref={trigger} type="button" className={`aegis-date-trigger ${value?'has-value':''}`} aria-label={label} aria-describedby={describedBy} aria-haspopup="dialog" aria-expanded={open} aria-controls={open?id:undefined} onClick={()=>{if(open){close();return;}const d=parse(value);setDraft(d);setMonth(new Date(d.getFullYear(),d.getMonth(),1));setPosition({visibility:'hidden'});setOpen(true);}}><CalendarDays size={15}/><span>{value?value.replace('T',' '):label}</span></button>
+  <button ref={trigger} type="button" className={`aegis-date-trigger ${value?'has-value':''}`} aria-label={label} aria-describedby={describedBy} aria-haspopup="dialog" aria-expanded={open} aria-controls={open?id:undefined} onClick={()=>{if(open){close();return;}const d=parse(value);setDraft(d);setMonth(new Date(d.getFullYear(),d.getMonth(),1));setPosition({visibility:'hidden'});setOpen(true);}}><WorkspaceGlyph kind="schedule" size="xs" /><span>{value?value.replace('T',' '):label}</span></button>
   {open&&createPortal(<div ref={panel} id={id} role="dialog" aria-label={label} className="aegis-date-panel" style={position} onKeyDown={e=>{if(e.key==='Escape'){e.preventDefault();close();}if(e.key==='Tab'){const items=Array.from(panel.current!.querySelectorAll<HTMLElement>('button,input,select'));const first=items[0],last=items[items.length-1];if(e.shiftKey&&document.activeElement===first){e.preventDefault();last.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus();}}}}>
-   <header><div><CalendarDays size={15}/><strong>{label}</strong></div><button type="button" aria-label={text('关闭日历','Close calendar')} onClick={close}><X size={16}/></button></header>
+   <header><div><WorkspaceGlyph kind="schedule" size="xs" /><strong>{label}</strong></div><button type="button" aria-label={text('关闭日历','Close calendar')} onClick={close}><WorkspaceGlyph kind="close" size="xs" /></button></header>
    <div className="aegis-calendar-month"><button type="button" aria-label={text('上个月','Previous month')} onClick={()=>moveMonth(-1)}><ChevronLeft size={16}/></button><span aria-live="polite">{month.toLocaleDateString(locale,{year:'numeric',month:'long'})}</span><button type="button" aria-label={text('下个月','Next month')} onClick={()=>moveMonth(1)}><ChevronRight size={16}/></button></div>
    <div className="aegis-calendar-week" aria-hidden="true">{(zh?['一','二','三','四','五','六','日']:['Mo','Tu','We','Th','Fr','Sa','Su']).map(w=><span key={w}>{w}</span>)}</div>
    <div className="aegis-calendar-grid" role="grid" aria-label={text('选择日期','Choose date')}>

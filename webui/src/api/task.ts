@@ -11,7 +11,7 @@ export type DeliveryStatus = 'unread' | 'notified' | 'viewed';
 export type ExecutionMode = 'agent' | 'workflow';
 export type SchedulerMode = 'once' | 'cron';
 export type TaskSchedulerStatus = 'active' | 'disabled' | 'archived';
-export type ExecutionTriggerType = 'run_once' | 'scheduled' | 'rerun';
+export type ExecutionTriggerType = 'run_once' | 'scheduled' | 'rerun' | 'run_now';
 
 export interface TaskSource {
   sourceType: string;
@@ -162,6 +162,7 @@ export interface DashboardCounts {
   completed_week: number;
   completed_unviewed: number;
   failed_week: number;
+  failed_unviewed?: number;
   scheduled_active: number;
   queue_paused: boolean;
 }

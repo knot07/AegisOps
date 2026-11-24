@@ -12,6 +12,7 @@ from pydantic import BaseModel as _BaseModel
 from aegisops.storage.storage import Storage
 from aegisops.utils.log import Log
 
+from .audit import record_task_action
 from .executor import _TASK_ABSOLUTE_TIMEOUT_S, TaskExecutor, TaskResultPersistenceError
 from .health import ComponentHealth
 from .models import (
@@ -207,6 +208,7 @@ class TaskManager:
         tags: Optional[List[str]] = None,
         created_by: str = "rex",
         dedup_key: Optional[str] = None,
+        enabled: bool = True,
     ) -> TaskScheduler:
         trigger = trigger.model_copy(deep=True) if trigger is not None else TaskTrigger()
         if trigger.cron:
@@ -218,7 +220,7 @@ class TaskManager:
             title=title,
             description=description,
             mode=mode,
-            status=SchedulerStatus.ACTIVE,
+            status=SchedulerStatus.ACTIVE if enabled else SchedulerStatus.DISABLED,
             priority=priority,
             source=source,
             trigger=trigger,
@@ -234,7 +236,7 @@ class TaskManager:
             created_by=created_by,
             dedup_key=dedup_key,
         )
-        if trigger.cron:
+        if enabled and trigger.cron:
             scheduler.trigger.next_run = SchedulerLoop.compute_next_run(
                 trigger.cron, trigger.timezone
             )
@@ -243,13 +245,14 @@ class TaskManager:
             existing = await TaskStore.get_scheduler_by_dedup_key(dedup_key)
             if existing:
                 return existing
-        if scheduler.mode == SchedulerMode.ONCE and scheduler.trigger.run_immediately:
+        if enabled and scheduler.mode == SchedulerMode.ONCE and scheduler.trigger.run_immediately:
             await cls.create_execution_from_scheduler(
                 scheduler,
                 trigger_type=ExecutionTriggerType.RUN_ONCE,
                 enqueue=True,
             )
-        await cls._publish_event("task.created", scheduler.id, "active", scheduler.title)
+        await record_task_action("create", scheduler.id)
+        await cls._publish_event("task.created", scheduler.id, scheduler.status.value, scheduler.title)
         return scheduler
 
     @classmethod
@@ -289,6 +292,7 @@ class TaskManager:
             if hasattr(scheduler, key):
                 setattr(scheduler, key, value)
         scheduler = await TaskStore.update_scheduler(scheduler)
+        await record_task_action("update", scheduler.id)
         await cls._publish_event("task.status", scheduler.id, scheduler.status.value, scheduler.title)
         return scheduler
 
@@ -340,6 +344,7 @@ class TaskManager:
                 scheduler.trigger.cron_description = cron_description or scheduler.trigger.cron_description
                 scheduler.trigger.next_run = SchedulerLoop.compute_next_run(normalized_cron, tz)
         scheduler = await TaskStore.update_scheduler(scheduler)
+        await record_task_action("update", scheduler.id)
         return scheduler
 
     @classmethod
@@ -351,8 +356,12 @@ class TaskManager:
         if scheduler.dedup_key and scheduler.dedup_key.startswith("builtin:"):
             scheduler.status = SchedulerStatus.ARCHIVED
             await TaskStore.update_scheduler(scheduler)
+            await record_task_action("archive", scheduler_id)
             return True
-        return await TaskStore.delete_scheduler(scheduler_id)
+        deleted = await TaskStore.delete_scheduler(scheduler_id)
+        if deleted:
+            await record_task_action("delete", scheduler_id)
+        return deleted
 
     @classmethod
     async def enable_scheduler(cls, scheduler_id: str) -> Optional[TaskScheduler]:
@@ -367,7 +376,9 @@ class TaskManager:
             )
         elif scheduler.mode == SchedulerMode.ONCE:
             scheduler.trigger.next_run = scheduler.trigger.run_at
-        return await TaskStore.update_scheduler(scheduler)
+        scheduler = await TaskStore.update_scheduler(scheduler)
+        await record_task_action("enable", scheduler_id)
+        return scheduler
 
     @classmethod
     async def disable_scheduler(cls, scheduler_id: str) -> Optional[TaskScheduler]:
@@ -375,7 +386,9 @@ class TaskManager:
         if not scheduler:
             return None
         scheduler.status = SchedulerStatus.DISABLED
-        return await TaskStore.update_scheduler(scheduler)
+        scheduler = await TaskStore.update_scheduler(scheduler)
+        await record_task_action("disable", scheduler_id)
+        return scheduler
 
     # ------------------------------------------------------------------
     # Execution APIs
@@ -430,15 +443,19 @@ class TaskManager:
         return execution
 
     @classmethod
-    async def rerun_scheduler(cls, scheduler_id: str) -> Optional[TaskExecution]:
+    async def rerun_scheduler(
+        cls, scheduler_id: str, *, trigger_type: ExecutionTriggerType = ExecutionTriggerType.RERUN
+    ) -> Optional[TaskExecution]:
         scheduler = await TaskStore.get_scheduler(scheduler_id)
         if not scheduler:
             return None
-        return await cls.create_execution_from_scheduler(
+        execution = await cls.create_execution_from_scheduler(
             scheduler,
-            trigger_type=ExecutionTriggerType.RERUN,
+            trigger_type=trigger_type,
             enqueue=True,
         )
+        await record_task_action("run_now", execution.id, resource="execution")
+        return execution
 
     @classmethod
     async def list_executions(
@@ -525,6 +542,7 @@ class TaskManager:
             return execution
         execution.retry.retry_count += 1
         execution.retry.retry_after = None
+        execution.delivery_status = DeliveryStatus.UNREAD
         # A person asked for it to start over: whatever held it is their call.
         execution.retry.blocked_reason = None
         execution.retry.unverified_effects = []

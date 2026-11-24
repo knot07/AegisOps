@@ -1,4 +1,38 @@
 {
+  "worker": {
+    "title": "Worker progress",
+    "detail": "Worker details",
+    "close": "Close execution details",
+    "steps": "Execution steps",
+    "result": "Task result",
+    "stale": "Unable to refresh progress",
+    "retry": "Retry",
+    "loading": "Loading execution progress…",
+    "noSteps": "No tool steps recorded yet.",
+    "olderSteps": "Only recent steps are shown.",
+    "truncated": "The report is long; only the saved excerpt is shown.",
+    "waitingResult": "The result will appear here when execution finishes.",
+    "noResult": "No task result is available.",
+    "activeCount_other": "{{count}} active",
+    "taskCount_other": "{{count}} tasks",
+    "defaultName": "Worker",
+    "openDetails": "View details",
+    "empty": "No Worker tasks have been delegated yet.",
+    "moreTasks": "Only the 24 most recent tasks are shown.",
+    "durationMinutes": "{{min}}m {{sec}}s",
+    "durationSeconds": "{{sec}}s",
+    "activeCount_one": "{{count}} active",
+    "taskCount_one": "{{count}} task",
+    "states": {
+      "queued": "Queued",
+      "running": "Running",
+      "completed": "Completed",
+      "failed": "Failed",
+      "interrupted": "Interrupted",
+      "stopped": "Stopped",
+      "unknown": "Unknown"
+    }
+  },
   "image": {
     "preview": "Image Preview"
   },

@@ -1,7 +1,8 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { Component, Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Link, useInRouterContext } from 'react-router-dom';
-import { ArrowRight, Check, Database, Plus, RefreshCw, X } from 'lucide-react';
+import { ArrowRight, Check, Plus, X } from 'lucide-react';
 import { knowledgebaseAPI, type Dataset, type SessionDatasets } from '@/api/knowledgebase';
 import { useOptionalToast } from '@/components/common/Toast';
 import { Modal } from '@/pages/Workspace/knowledge/ui';
@@ -140,10 +141,10 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
   const manageLabel = <>{t('dataset.manage')}<ArrowRight aria-hidden="true" /></>;
   return <section aria-label={t('dataset.title')} className="session-knowledge">
     <div className="session-knowledge-heading">
-      <Database aria-hidden="true" className="h-4 w-4 text-ui-secondary" />
+      <WorkspaceGlyph kind="dataset" size="xs" />
       <h3 className="truncate text-[13px] font-medium leading-5 text-ui-text">{t('dataset.title')}</h3>
       {binding && <span className="rounded bg-ui-subtle px-1.5 py-0.5 text-xs leading-4 text-ui-muted">{binding.dataset_ids.length}</span>}
-      <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.refresh')} title={t('dataset.refresh')} disabled={loading || saving} onClick={() => void load()}><RefreshCw aria-hidden="true" /></button>
+      <button type="button" className="session-knowledge-icon-button" aria-label={t('dataset.refresh')} title={t('dataset.refresh')} disabled={loading || saving} onClick={() => void load()}><WorkspaceGlyph kind="refresh" size="xs" /></button>
     </div>
     <p className="session-knowledge-hint">{t('dataset.scope')}</p>
     {loading && <p role="status" className="session-knowledge-message">{t('dataset.loading')}</p>}
@@ -152,7 +153,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
     {binding && <>
       {selected.length === 0 && <p className="session-knowledge-empty">{t('dataset.empty')}</p>}
       <ul className="session-knowledge-cards">{selected.map(item => <li key={item.id} className="session-knowledge-card">
-        <span className="session-knowledge-avatar"><Database aria-hidden="true" /></span>
+        <WorkspaceGlyph kind="dataset" size="lg" />
         <div className="session-knowledge-card-body">
           <strong title={item.name}>{item.name}</strong>
           <div className="session-knowledge-card-meta">
@@ -173,7 +174,7 @@ function DatasetBody({ sessionId }: { sessionId: string }) {
         <div className="session-knowledge-options">
           {options.map(item => <label key={item.id} className={`session-knowledge-choice${draft.includes(item.id) ? ' is-selected' : ''}`}>
             <input type="checkbox" aria-label={item.name} disabled={saving} checked={draft.includes(item.id)} onChange={() => { edited.current = true; setDraft(current => current.includes(item.id) ? current.filter(id => id !== item.id) : [...current, item.id]); }} />
-            <Database aria-hidden="true" /><span>{item.name}</span><small>{fileCount(item)}</small>
+            <WorkspaceGlyph kind="dataset" size="xs" /><span className="session-knowledge-choice-name">{item.name}</span><small>{fileCount(item)}</small>
           </label>)}
         </div>
         <div className="session-knowledge-picker-actions">

@@ -1,3 +1,4 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import SchedulingModePicker, { type SchedulingMode } from './SchedulingModePicker';
 /**
  * SessionChat — shared Agent Session conversation component.
@@ -35,15 +36,12 @@ import {
   ImageIcon,
   ListTree,
   Loader2,
-  Paperclip,
   Pencil,
-  Plus,
   RefreshCw,
   Save,
   Send,
   Square,
   Trash2,
-  User,
   Workflow as WorkflowIcon,
   X,
 } from 'lucide-react';
@@ -52,6 +50,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import ChatAvatar from './ChatAvatar';
 import ChatStepIcon from './ChatStepIcon';
+import './session-chat-cards.css';
 import ExtensionSlot from '@/components/extensions/ExtensionSlot';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
@@ -5030,7 +5029,7 @@ export default function SessionChat({
                       <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
-                      <div className={getStandaloneThinkingBubbleClassName(compact)}>
+                      <div className={`${getStandaloneThinkingBubbleClassName(compact)} session-reply-card`}>
                         {isDreaming ? (
                           <div className="flex items-center gap-2 text-sm text-violet-600 dark:text-violet-300">
                             <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" />
@@ -5477,7 +5476,7 @@ export default function SessionChat({
                           : 'text-ui-secondary hover:bg-ui-hover hover:text-ui-text'
                       }`}
                     >
-                      <Plus aria-hidden="true" className="h-[17px] w-[17px]" strokeWidth={2} />
+                      <WorkspaceGlyph kind="add" size="xs" />
                     </button>
 
                     {showComposerAddMenu && (
@@ -5499,7 +5498,7 @@ export default function SessionChat({
                           className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                         >
                           <span className="grid h-7 w-7 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white shrink-0">
-                            <Paperclip aria-hidden="true" className="h-3.5 w-3.5" />
+                            <WorkspaceGlyph kind="attach" size="xs" />
                           </span>
                           <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
                         </button>
@@ -5564,7 +5563,7 @@ export default function SessionChat({
                           title={hasUploadingFiles ? t('chat.upload.waiting') : t('chat.queue.enqueue')}
                           className="inline-flex h-8 w-8 items-center justify-center rounded-lg bg-ui-action text-ui-on-action transition-colors hover:bg-ui-action/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ui-focus focus-visible:ring-offset-2"
                         >
-                          {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
+                          {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <WorkspaceGlyph kind="send" size="xs" />}
                         </button>
                       )
                     ) : (
@@ -5579,7 +5578,7 @@ export default function SessionChat({
                             : 'cursor-not-allowed border border-ui-border bg-ui-subtle text-ui-muted'
                         }`}
                       >
-                        {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <ArrowUp aria-hidden="true" className="w-4 h-4" strokeWidth={2.5} />}
+                        {sending || hasUploadingFiles ? <Loader2 aria-hidden="true" className="w-4 h-4 animate-spin" /> : <WorkspaceGlyph kind="send" size="xs" />}
                       </button>
                     )}
                     {stopButton}
@@ -5909,6 +5908,27 @@ function ChatMessageTimelineInner({
 
 export const ChatMessageTimeline = memo(ChatMessageTimelineInner);
 
+function ProcessStepWave({ running, visible }: { running: boolean; visible: boolean }) {
+  const light = useRef<HTMLSpanElement>(null);
+  const played = useRef(false);
+
+  useEffect(() => {
+    if (!running) {
+      played.current = false;
+      return;
+    }
+    if (!visible || played.current) return;
+    played.current = true;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
+    light.current?.animate?.([
+      { transform: 'translateY(-100%)' },
+      { transform: 'translateY(100%)' },
+    ], { duration: 680, easing: 'ease-out' });
+  }, [running, visible]);
+
+  return <span className="session-process-wave" aria-hidden="true"><span ref={light} /></span>;
+}
+
 function ProcessGroupDetails({
   defaultOpen,
   open,
@@ -5945,11 +5965,11 @@ function ProcessGroupDetails({
     <details
       open={effectiveOpen}
       data-testid="chat-process-group"
-      className="group/process mt-2 w-full first:mt-0 text-[#626874] dark:text-[#aab4bf]"
+      className="session-process-card group/process mt-2 w-full first:mt-0"
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden min-h-7"
+        className="session-process-summary flex cursor-pointer list-none items-center gap-2 text-sm font-medium [&::-webkit-details-marker]:hidden"
       >
         {summary}
         <ChevronDown aria-hidden="true" className="ml-0.5 h-3 w-3 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500 flex-shrink-0" />
@@ -6097,7 +6117,9 @@ function ChatMessageBubbleInner({
   const headerHeight = compact ? 'h-7' : 'h-8';
   const bubble = (
     <div
-      className={`${bubbleClass} aegis-chat-bubble relative`}
+      className={`${bubbleClass} aegis-chat-bubble relative${!isUser ? ' session-reply-card' : instructionDisplayLabel ? '' : ' session-user-card'}`}
+      data-chat-assistant-card={!isUser ? '' : undefined}
+      data-chat-user-card={isUser && !instructionDisplayLabel ? '' : undefined}
       data-process-output={hasProcessOutput ? 'true' : undefined}
       style={{ overflowWrap: 'anywhere' }}
     >
@@ -6267,7 +6289,7 @@ function ChatMessageBubbleInner({
                         {!isExpanded && (
                           <span
                             data-testid="chat-process-reasoning-preview"
-                            className="font-normal text-[#9da29f] dark:text-zinc-500 min-w-0 truncate"
+                            className="font-normal text-ui-secondary min-w-0 truncate"
                           >
                             {getThinkingFirstSentence(thinkingText)}
                           </span>
@@ -6367,7 +6389,7 @@ function ChatMessageBubbleInner({
                     {processDurationMs !== null && (
                       <span
                         data-testid="chat-process-duration"
-                        className="text-xs font-normal text-[#9da29f] dark:text-zinc-500 shrink-0"
+                        className="text-xs font-normal text-ui-secondary shrink-0 tabular-nums"
                       >
                         · {t('chat.process.duration', { duration: formatProcessDuration(processDurationMs) })}
                       </span>
@@ -6375,9 +6397,31 @@ function ChatMessageBubbleInner({
                   </>
                 )}
               >
-                <div data-testid="chat-process-timeline" className="mt-3 grid gap-1 pl-1">
-                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen, true))}
-                </div>
+                <ol data-testid="chat-process-timeline" className="session-process-timeline" data-live={isActive ? '' : undefined}>
+                  {group.map(({ part, index }) => {
+                    const kind = part.type === 'tool' ? 'tool' : part.type === 'text' ? 'text' : 'reasoning';
+                    const status = part.state?.status;
+                    const end = getProcessPartTime(part)?.end;
+                    const running = isActive && (kind === 'tool'
+                      ? status === 'running'
+                      : part === activeTailPart && end == null);
+                    // A stopped/failed stream may also persist an end timestamp for its partial text.
+                    const completed = kind === 'tool' ? status === 'completed'
+                      : Number.isFinite(end) && !message.error;
+                    const state = status === 'error' ? 'error' : running ? 'running' : completed ? 'completed' : undefined;
+                    return (
+                      <li key={part.id || index} className="session-process-step" data-kind={kind} data-state={state}>
+                        <ProcessStepWave running={state === 'running'} visible={effectiveProcessGroupOpen} />
+                        <span className="session-process-node" aria-hidden="true">
+                          {(state === 'completed' || state === 'error') && <svg viewBox="0 0 10 10" fill="none"><path d={state === 'error' ? 'm3 3 4 4M7 3 3 7' : 'm2 5 2 2 4-4'} stroke="currentColor" strokeWidth="1.45" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                        </span>
+                        <div className="session-process-step-body">
+                          {renderPart(part, index, effectiveProcessGroupOpen, true)}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
               </ProcessGroupDetails>
             );
           };
@@ -6632,7 +6676,7 @@ function ChatMessageBubbleInner({
                 className={iconButtonClass}
                 aria-label={t('chat.edit')}
               >
-                <Pencil aria-hidden="true" className="w-3 h-3" />
+                <WorkspaceGlyph kind="edit" size="micro" />
                 <span className={tooltipClass}>{t('chat.edit')}</span>
               </button>
             )}
@@ -6642,7 +6686,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <Copy aria-hidden="true" className="w-3 h-3" />
+              <WorkspaceGlyph kind="copy" size="micro" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>
@@ -6654,7 +6698,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.regenerate')}
             >
-              <RefreshCw aria-hidden="true" className={`w-3 h-3 ${isActionPending ? 'animate-spin' : ''}`} />
+              <WorkspaceGlyph kind="refresh" size="micro" className={isActionPending ? 'animate-spin' : ''} />
               <span className={tooltipClass}>{t('chat.regenerate')}</span>
             </button>}
             <button
@@ -6663,7 +6707,7 @@ function ChatMessageBubbleInner({
               className={iconButtonClass}
               aria-label={t('chat.copy')}
             >
-              <Copy aria-hidden="true" className="w-3 h-3" />
+              <WorkspaceGlyph kind="copy" size="micro" />
               <span className={tooltipClass}>{t('chat.copy')}</span>
             </button>
           </>

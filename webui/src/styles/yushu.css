@@ -503,11 +503,63 @@ select:not([multiple]) { appearance: none; padding-right: 38px !important; backg
 .aegis-metric p { font-size:11px; color:rgb(var(--ui-secondary)); }
 .aegis-small-chart { height:190px; margin-top:16px; }
 .aegis-success-body { display:flex; align-items:center; justify-content:space-around; gap:12px; min-height:210px; }
-.aegis-gauge { position:relative; width:162px; height:162px; border-radius:50%; background:conic-gradient(#97bf73 calc(var(--rate) * 1%),rgb(var(--ui-border)) 0); mask:none; flex-shrink:0; }
-.aegis-gauge:before { content:''; position:absolute; inset:0; border-radius:50%; background:repeating-conic-gradient(transparent 0deg 1deg,rgb(var(--ui-surface)) 1deg 6deg); }
-.aegis-gauge > div { position:absolute; inset:16px; border-radius:50%; background:rgb(var(--ui-surface)); display:flex; flex-direction:column; align-items:center; justify-content:center; }
-.aegis-gauge strong { font-size:28px; font-weight:600; }.aegis-gauge small { font-size:12px; margin-left:2px; color:rgb(var(--ui-muted)); }
-.aegis-gauge span,.aegis-success dt { font-size:10px; color:rgb(var(--ui-muted)); }.aegis-gauge span { margin-top:6px; }
+/* Clock dial: the face, ticks and label stay independent so only lit marks breathe. */
+.aegis-gauge {
+  --gauge-accent:#4b7a29; --gauge-track:#a6b0a1; --gauge-face-tint:#83a95830;
+  position:relative; display:grid; place-items:center; width:min(190px,68%); aspect-ratio:1;
+  flex-shrink:0; border-radius:50%; isolation:isolate;
+  background:radial-gradient(circle at 33% 40%,var(--gauge-face-tint),transparent 74%);
+}
+.dark .aegis-gauge { --gauge-accent:#a7e467; --gauge-track:#657163; --gauge-face-tint:#91c05c30; }
+.aegis-gauge::before {
+  content:''; position:absolute; inset:0; pointer-events:none;
+  background:linear-gradient(to right,rgb(var(--ui-muted) / .15) 1px,transparent 1px),
+    linear-gradient(to bottom,rgb(var(--ui-muted) / .15) 1px,transparent 1px);
+  background-size:20% 20%; background-position:center;
+  mask-image:radial-gradient(circle,#000 10%,transparent 71%);
+}
+.aegis-gauge-dial { position:absolute; inset:0; width:100%; height:100%; stroke-linecap:round; }
+.aegis-gauge-track { stroke:var(--gauge-track); }
+.aegis-gauge-active { stroke:var(--gauge-accent); }
+.aegis-gauge[data-filled][data-motion=on] .aegis-gauge-pulse-layer { will-change:opacity; animation:aegis-gauge-breathe 3.6s ease-in-out infinite; }
+[data-keep-alive-pane=inactive] .aegis-gauge[data-filled][data-motion=on] .aegis-gauge-pulse-layer { animation-play-state:paused; }
+.aegis-gauge-actions { display:flex; align-items:center; gap:.45rem; }
+.aegis-gauge-actions > span { color:var(--text-muted); font-size:.6875rem; white-space:nowrap; }
+.aegis-gauge-motion {
+  display:inline-flex; align-items:center; gap:.2rem; padding:.28rem .44rem; border-radius:.45rem;
+  border:1px solid var(--border-subtle); color:var(--text-secondary); font-size:.6875rem; white-space:nowrap;
+}
+.aegis-gauge-motion:hover { background:var(--bg-hover); color:var(--text-primary); }
+.aegis-gauge-motion:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
+.aegis-gauge-label { position:relative; display:grid; justify-items:center; gap:5px; }
+.aegis-dashboard :is(.aegis-metric,.aegis-quick-start > a,.aegis-resource-list a,.aegis-timeline a):focus-visible {
+  outline:2px solid var(--focus-ring,currentColor); outline-offset:3px;
+}
+@media (prefers-reduced-motion:no-preference) {
+  .aegis-timeline .aegis-status-dot.running { animation:aegis-running-beacon 1.8s ease-out 2; }
+  .aegis-dashboard :is(.aegis-metric,.aegis-quick-start > a > svg:last-child,.aegis-resource-list a > svg:last-child) {
+    transition:transform 160ms ease,border-color 160ms ease;
+  }
+  .aegis-dashboard .aegis-metric:focus-visible { transform:translateY(-2px); }
+  .aegis-dashboard :is(.aegis-quick-start > a,.aegis-resource-list a):focus-visible > svg:last-child { transform:translateX(3px); }
+}
+@media (hover:hover) and (prefers-reduced-motion:no-preference) {
+  .aegis-dashboard .aegis-metric:hover { transform:translateY(-2px); border-color:var(--border-control); }
+  .aegis-dashboard :is(.aegis-quick-start > a,.aegis-resource-list a):hover > svg:last-child { transform:translateX(3px); }
+}
+@keyframes aegis-gauge-breathe {
+  0%,100% { opacity:.55; }
+  50% { opacity:1; }
+}
+@keyframes aegis-running-beacon { from { box-shadow:0 0 0 0 #d6b66c80; } to { box-shadow:0 0 0 6px #d6b66c00; } }
+.aegis-gauge strong {
+  color:var(--text-primary); font-family:ui-monospace,"Cascadia Mono",Consolas,monospace;
+  font-size:clamp(27px,3.5vw,36px); font-weight:700; line-height:1; letter-spacing:-.065em;
+  font-variant-numeric:tabular-nums slashed-zero;
+}
+.aegis-gauge small { font-size:.45em; margin-left:4px; color:var(--text-secondary); letter-spacing:0; }
+.aegis-gauge-label span,.aegis-success dt { font-size:10px; color:var(--text-secondary); }
+.aegis-gauge-label span { letter-spacing:.17em; }
 .aegis-success dd { font-size:17px; margin:5px 0 17px; }.aegis-success dt:last-child { font-size:9px; }
 .aegis-resource-list { display:grid; gap:19px; margin-top:28px; }.aegis-resource-list a { display:flex; align-items:center; gap:11px; font-size:11px; }
 .aegis-resource-list svg { color:#8da17c; flex-shrink:0; }.aegis-resource-list a > div { flex:1; height:5px; border-radius:8px; overflow:hidden; background:rgb(var(--ui-border) / .5); }
@@ -523,9 +575,9 @@ select:not([multiple]) { appearance: none; padding-right: 38px !important; backg
 .aegis-dashboard-notice { display:flex; gap:16px; margin-bottom:16px; padding:12px 16px; border-radius:12px; background:#d5b45514; font-size:12px; color:rgb(var(--ui-secondary)); }.aegis-dashboard-notice button { text-decoration:underline; }
 .dark .aegis-trend { background:radial-gradient(ellipse at 0 0,#83b74b22,transparent 68%),rgb(var(--ui-surface)); }
 @media(min-width:1800px) { .aegis-trend-content { grid-template-columns:280px minmax(0,1fr); }.aegis-main-chart { height:300px; }.aegis-metric { min-height:195px; } }
-@media(max-width:1200px) { .aegis-trend-content { grid-template-columns:185px minmax(0,1fr); gap:10px; }.aegis-trend-facts { gap:13px; }.aegis-card { padding:20px; }.aegis-gauge { width:125px; height:125px; }.aegis-success-body { gap:8px; } }
+@media(max-width:1200px) { .aegis-trend-content { grid-template-columns:185px minmax(0,1fr); gap:10px; }.aegis-trend-facts { gap:13px; }.aegis-card { padding:20px; }.aegis-gauge { width:min(154px,65%); }.aegis-success-body { gap:8px; } }
 @media(max-width:1000px) { .aegis-dashboard-grid { grid-template-columns:repeat(2,minmax(0,1fr)); }.aegis-trend { grid-column:span 2; }.aegis-side-metrics { grid-column:span 2; grid-template-columns:1fr 1fr; grid-template-rows:auto; }.aegis-resources { grid-column:span 2; }.aegis-today { grid-column:span 1; } }
-@media(max-width:600px) { .aegis-dashboard-heading h1 { font-size:23px; }.aegis-dashboard-heading { align-items:flex-start; }.aegis-dashboard-heading > a { padding:9px 12px; }.aegis-dashboard-grid { display:flex; flex-direction:column; gap:14px; }.aegis-card { padding:19px; border-radius:20px; }.aegis-trend-content { display:flex; flex-direction:column; margin-top:22px; gap:20px; }.aegis-trend-summary { min-width:0; }.aegis-big-number { font-size:43px; }.aegis-trend-facts { justify-content:space-between; }.aegis-main-chart { height:210px; }.aegis-range button { padding:6px 9px; font-size:10px; }.aegis-side-metrics { gap:12px; }.aegis-metric { min-height:160px; padding:17px; }.aegis-metric > strong { font-size:29px; }.aegis-metric h2 { font-size:10px; }.aegis-metric > div > svg { width:25px; height:25px; padding:6px; }.aegis-success-body { justify-content:space-evenly; }.aegis-gauge { width:160px; height:160px; } }
+@media(max-width:600px) { .aegis-dashboard-heading h1 { font-size:23px; }.aegis-dashboard-heading { align-items:flex-start; }.aegis-dashboard-heading > a { padding:9px 12px; }.aegis-dashboard-grid { display:flex; flex-direction:column; gap:14px; }.aegis-card { padding:19px; border-radius:20px; }.aegis-trend-content { display:flex; flex-direction:column; margin-top:22px; gap:20px; }.aegis-trend-summary { min-width:0; }.aegis-big-number { font-size:43px; }.aegis-trend-facts { justify-content:space-between; }.aegis-main-chart { height:210px; }.aegis-range button { padding:6px 9px; font-size:10px; }.aegis-side-metrics { gap:12px; }.aegis-metric { min-height:160px; padding:17px; }.aegis-metric > strong { font-size:29px; }.aegis-metric h2 { font-size:10px; }.aegis-metric > div > svg { width:25px; height:25px; padding:6px; }.aegis-success-body { justify-content:space-evenly; }.aegis-gauge { width:min(170px,63%); } }
 @media(prefers-reduced-motion:reduce) { .aegis-card { animation:none; }.aegis-dashboard * { transition:none !important; } }
 
 .yushu-auth form h1 {font-size:22px;line-height:1.4;letter-spacing:-.025em;margin:0;}
@@ -586,3 +638,17 @@ select:not([multiple]) { appearance: none; padding-right: 38px !important; backg
 .yushu-auth .yushu-auth-options button[aria-pressed=true] { color:#a2c67b; }
 .yushu-auth .yushu-auth-footnote { color:#91a69a; }
 @media(max-width:767px) { .yushu-auth .yushu-auth-form > form { padding:24px; } }
+
+[data-yushu-page=channel] button.channel-toolbar-button {
+  display:inline-flex; align-items:center; gap:7px; min-height:36px; padding:6px 10px; border:1px solid var(--channel-btn-line);
+  border-radius:9px; background:var(--channel-btn-bg); color:var(--channel-btn-fg); font-size:13px; font-weight:600;
+  transition:background-color 150ms,border-color 150ms;
+}
+[data-yushu-page=channel] .channel-toolbar-button--primary { --channel-btn-bg:#23539d; --channel-btn-hover:#194480; --channel-btn-fg:#fff; --channel-btn-line:#23539d; }
+[data-yushu-page=channel] .channel-toolbar-button--secondary { --channel-btn-bg:#f7faff; --channel-btn-hover:#e9f1fc; --channel-btn-fg:#2d4c77; --channel-btn-line:#bacbe2; }
+.dark [data-yushu-page=channel] .channel-toolbar-button--primary { --channel-btn-bg:#a5c8fc; --channel-btn-hover:#c2daff; --channel-btn-fg:#172f53; --channel-btn-line:#a5c8fc; }
+.dark [data-yushu-page=channel] .channel-toolbar-button--secondary { --channel-btn-bg:#202c42; --channel-btn-hover:#2a3851; --channel-btn-fg:#cdddf6; --channel-btn-line:#506588; }
+[data-yushu-page=channel] button.channel-toolbar-button:not(:disabled):hover { background:var(--channel-btn-hover); }
+[data-yushu-page=channel] button.channel-toolbar-button:disabled { opacity:.65; cursor:not-allowed; }
+[data-yushu-page=channel] button.channel-toolbar-button:focus-visible { outline:2px solid var(--focus-ring); outline-offset:2px; }
+[data-yushu-page=channel] .channel-toolbar-button .workspace-glyph { --glyph-ink:currentColor; --glyph-pigment:currentColor; }

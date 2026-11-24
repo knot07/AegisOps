@@ -1,8 +1,13 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import './session-context-theme.css';
 import { Suspense, useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
-  ArrowLeft, ChevronDown, Download, FileText, Folder, FolderPlus,
-  Maximize2, RefreshCw, Search, SlidersHorizontal, Sparkles, X,
+  ArrowLeft,
+  ChevronDown,
+  Download,
+  Maximize2,
+  Sparkles,
+  X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
@@ -411,7 +416,7 @@ export default function SessionContextPanel({
             <Maximize2 className="h-4 w-4" />
           </button>
           <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover">
-            <X className="h-4 w-4" />
+            <WorkspaceGlyph kind="close" size="xs" />
           </button>
         </div>
         {actionError && <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError}</div>}
@@ -459,7 +464,7 @@ export default function SessionContextPanel({
             <div className="truncate text-sm font-medium text-ui-text">{root.displayName}</div>
             {rootPath && <div className="truncate text-xs leading-4 text-ui-muted">{rootPath}</div>}
           </div>
-          <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover"><X className="h-4 w-4" /></button>
+          <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover"><WorkspaceGlyph kind="close" size="xs" /></button>
         </div>
         {actionError && <div className="border-b border-red-200 bg-red-50 px-3 py-2 text-xs text-red-600">{actionError}</div>}
         <div className="min-h-0 flex-1 overflow-y-auto p-3">
@@ -482,7 +487,7 @@ export default function SessionContextPanel({
                     : void openRootFile(root, item)}
                   className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left hover:bg-ui-hover"
                 >
-                  {item.type === 'directory' ? <Folder className="h-4 w-4 text-amber-500" /> : <FileText className="h-4 w-4 text-ui-secondary" />}
+                  {item.type === 'directory' ? <WorkspaceGlyph kind="folder" size="xs" /> : <WorkspaceGlyph kind="file" size="xs" />}
                   <span className="min-w-0 flex-1 truncate text-sm leading-5 text-ui-text">{item.name}</span>
                   {item.type === 'file' && item.size != null && <span className="text-xs leading-4 text-ui-muted">{formatBytes(item.size)}</span>}
                 </button>
@@ -505,18 +510,18 @@ export default function SessionContextPanel({
       <div className="context-panel-heading flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-3">
         {previewLoading ? (
           <button type="button" onClick={cancelNavigation} aria-label={t('context.back')} className="rounded p-1.5 text-ui-secondary"><ArrowLeft className="h-4 w-4" /></button>
-        ) : <Sparkles className="h-4 w-4 text-ui-secondary" />}
+        ) : <WorkspaceGlyph kind="layers" size="xs" />}
         <span className="min-w-0 flex-1 truncate text-sm font-medium text-ui-text">{t('context.title')}</span>
         <button type="button" onClick={() => void onRefresh()} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover" title={t('context.refresh')}>
-          <RefreshCw className={`h-4 w-4 ${loading ? 'animate-spin' : ''}`} />
+          <WorkspaceGlyph kind="refresh" size="xs" className={loading ? 'animate-spin' : ''} />
         </button>
-        <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover"><X className="h-4 w-4" /></button>
+        <button type="button" onClick={closePanel} aria-label={t('context.close')} className="rounded p-1.5 text-ui-secondary hover:bg-ui-hover"><WorkspaceGlyph kind="close" size="xs" /></button>
       </div>
 
       {/* In a narrow panel the filters move under the search box instead of squeezing it. */}
       <div className="context-panel-filters flex flex-wrap items-center gap-2 border-b border-ui-border px-3 py-2">
         <div className="relative min-w-[10rem] flex-[1_1_10rem]">
-          <Search className="absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-ui-muted" />
+          <WorkspaceGlyph kind="search" size="xs" className="glyph-search-field" />
           <input
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -526,7 +531,7 @@ export default function SessionContextPanel({
           />
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <SlidersHorizontal className="h-3.5 w-3.5 text-ui-muted" />
+          <WorkspaceGlyph kind="filter" size="xs" />
           <select aria-label={t('context.filter.all')} value={filter} onChange={(event) => setFilter(event.target.value as FileFilter)} className="h-8 rounded-lg border border-ui-control bg-ui-surface px-2 text-[13px] leading-5 text-ui-secondary focus:outline-none focus:ring-2 focus:ring-ui-focus">
             <option value="all">{t('context.filter.all')}</option>
             <option value="outputs">{t('context.outputs')}</option>
@@ -550,11 +555,11 @@ export default function SessionContextPanel({
         )}
         {loading && !snapshot ? <div className="py-10"><LoadingSpinner /></div> : (
           <>
-            <Section title={t('context.progress')} count={snapshot?.progress.length || 0} icon={<SlidersHorizontal className="h-4 w-4" />} defaultOpen={Boolean(snapshot?.progress.length)}>
+            <Section title={t('context.progress')} count={snapshot?.progress.length || 0} icon={<WorkspaceGlyph kind="timeline" size="xs" />} defaultOpen={Boolean(snapshot?.progress.length)}>
               {snapshot?.progress.length ? <TodoList items={snapshot.progress} /> : <EmptySection>{t('context.noProgress')}</EmptySection>}
             </Section>
 
-            <Section title={t('context.outputs')} count={snapshot?.outputs.length || 0} icon={<Sparkles className="h-4 w-4" />}>
+            <Section title={t('context.outputs')} count={snapshot?.outputs.length || 0} icon={<WorkspaceGlyph kind="file" size="xs" />}>
               {outputFiles.length === 0 ? <EmptySection>{t('context.noOutputs')}</EmptySection> : (
                 <FileRows files={outputFiles} onOpen={openResource} onFocusMessage={onFocusMessage} sessionId={sessionId} />
               )}
@@ -563,10 +568,10 @@ export default function SessionContextPanel({
             <Section
               title={t('context.contextFiles')}
               count={(snapshot?.contextFiles.length || 0) + (snapshot?.roots.length || 0)}
-              icon={<Folder className="h-4 w-4" />}
+              icon={<WorkspaceGlyph kind="folder" size="xs" />}
               actions={snapshot?.canManageFolders ? (
                 <button type="button" onClick={() => setShowFolderInput((value) => !value)} className="rounded p-1 text-ui-muted hover:bg-ui-hover hover:text-ui-text" title={t('context.addFolder')}>
-                  <FolderPlus className="h-3.5 w-3.5" />
+                  <WorkspaceGlyph kind="folderAdd" size="xs" />
                 </button>
               ) : undefined}
             >
@@ -582,7 +587,7 @@ export default function SessionContextPanel({
                 {(snapshot?.roots || []).map((item) => (
                   <div key={item.id} className="group flex items-center gap-1 rounded-lg hover:bg-ui-hover">
                     <button type="button" disabled={item.status !== 'available'} onClick={() => void loadRoot(item)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-50">
-                      <Folder className="h-4 w-4 text-amber-500" />
+                      <WorkspaceGlyph kind="folder" size="xs" />
                       <span className="min-w-0 flex-1 truncate text-sm leading-5 text-ui-text">{item.displayName}</span>
                       <span className="text-xs leading-4 text-ui-muted">{item.kind === 'project' ? t('context.project') : t('context.folder')}</span>
                     </button>
@@ -599,7 +604,7 @@ export default function SessionContextPanel({
             </Section>
 
             {(snapshot?.skills.length || 0) > 0 && (
-              <Section title={t('context.skills')} count={snapshot?.skills.length || 0} icon={<Sparkles className="h-4 w-4" />} defaultOpen={false}>
+              <Section title={t('context.skills')} count={snapshot?.skills.length || 0} icon={<WorkspaceGlyph kind="skill" size="xs" />} defaultOpen={false}>
                 <div className="space-y-1">
                   {snapshot!.skills.map((skill) => <SkillRow key={skill.name} skill={skill} />)}
                 </div>
@@ -672,7 +677,7 @@ function FileRows({
       {files.map((file) => (
         <div key={file.fileKey || file.resourceID} className="group flex items-center gap-1 rounded-lg hover:bg-ui-hover">
           <button type="button" disabled={file.status === 'missing'} onClick={() => void onOpen(file)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-1.5 text-left disabled:opacity-50">
-            <FileText className="h-4 w-4 text-ui-secondary" />
+            <WorkspaceGlyph kind="file" size="xs" />
             <span className="min-w-0 flex-1">
               <span className="block truncate text-sm font-medium leading-5 text-ui-text">{file.displayName}</span>
               <span className="block truncate text-xs leading-4 text-ui-muted">{file.logicalPath}</span>

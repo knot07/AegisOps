@@ -1,7 +1,8 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import './cache-usage.css';
 import { useEffect, useId, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Brain, Info } from 'lucide-react';
+import { Info } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { UsageStats } from '@/types';
 import CacheUsagePanel from './CacheUsagePanel';
@@ -102,7 +103,7 @@ export default function TokenUsageCard(props: {
       }}
       className="rounded-lg border border-sky-200 bg-sky-50 p-3 text-left text-sky-800 hover:bg-sky-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 focus-visible:ring-offset-2"
     >
-      <span className="mb-1 flex items-center gap-2 text-xs font-medium opacity-70"><Brain className="h-5 w-5" aria-hidden="true" />{t('dashboard.totalTokens')}</span>
+      <span className="mb-1 flex items-center gap-2 text-xs font-medium opacity-70"><WorkspaceGlyph kind="tokens" size="xs" />{t('dashboard.totalTokens')}</span>
       <span className="block break-words text-lg font-bold">{props.loading && !props.usageStats ? '…' : props.error && !props.usageStats ? '—' : total > 0 ? formatTokenMillions(total) : t('dashboard.noUsage')}</span>
       <span className="mt-0.5 flex items-center gap-1 text-xs opacity-70"><Info className="h-3 w-3" aria-hidden="true" />{t('cacheUsage.details')}</span>
     </button>

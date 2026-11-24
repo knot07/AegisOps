@@ -842,7 +842,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
         <BackendStatusBanner inline />
         <InstallationResultBanner />
         <main className="relative flex-1 overflow-hidden bg-ui-canvas">
-          <KeepAlivePanes panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
+          <KeepAlivePanes key={user?.id} panes={keepAlivePanes} activeHref={activePaneHref} location={location} routes={contentRoutes} />
         </main>
       </div>
     </div>

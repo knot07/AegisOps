@@ -57,6 +57,9 @@ async def upsert_task_specs(specs: Sequence[TaskSpec]) -> int:
                 )
                 continue
         if existing is not None:
+            if existing.status == SchedulerStatus.ARCHIVED:
+                # A deleted built-in task is a tombstone, not a missing default.
+                continue
             existing.title = spec.title
             existing.description = spec.description
             existing.priority = priority
@@ -113,6 +116,7 @@ async def upsert_task_specs(specs: Sequence[TaskSpec]) -> int:
             tags=spec.tags,
             created_by="system",
             dedup_key=spec.dedup_key,
+            enabled=spec.enabled,
         )
         created += 1
 

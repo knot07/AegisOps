@@ -366,23 +366,25 @@ function AIResultBadge({ row, onStart }: { row: TdpRow; onStart: (row: TdpRow) =
 
 function Icon({ name, size = 18 }: { name: string; size?: number }) {
   const paths: Record<string, any> = {
-    activity: <><path d="M3 12h4l3-8 4 16 3-8h4" /></>,
-    bot: <><rect x="5" y="7" width="14" height="11" rx="3" /><path d="M12 3v4M9 12h.01M15 12h.01M8 18l-2 3M16 18l2 3" /></>,
-    chart: <><path d="M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-7" /></>,
-    clock: <><circle cx="12" cy="12" r="8" /><path d="M12 8v5l3 2" /></>,
-    download: <><path d="M12 3v12M7 10l5 5 5-5M5 21h14" /></>,
+    activity: <><rect x="3" y="4" width="18" height="16" rx="4" fill="currentColor" fillOpacity=".15"/><path d="M6 12h3l2-4 2.5 7 1.5-3H18"/></>,
+    bot: <><rect x="4" y="7" width="16" height="13" rx="5" fill="currentColor" fillOpacity=".15"/><path d="M12 4v3m-3 6h.1m5.8 0h.1m-5 3q2 1.5 4 0"/><circle cx="12" cy="3.5" r="1" fill="currentColor"/></>,
+    chart: <><rect x="3" y="4" width="18" height="16" rx="4" fill="currentColor" fillOpacity=".13"/><path d="M7 16v-4m5 4V8m5 8v-6"/></>,
+    clock: <><path d="M12 3a9 9 0 1 0 9 9h-9Z" fill="currentColor" fillOpacity=".14"/><path d="M15 3v6h6a8 8 0 0 0-6-6Z"/></>,
+    download: <><path d="M4 14h4l2 2h4l2-2h4v5H4Z" fill="currentColor" fillOpacity=".14"/><path d="M12 4v9m-3-3 3 3 3-3"/></>,
     calendar: <><rect x="3" y="5" width="18" height="16" rx="2" /><path d="M8 3v4M16 3v4M3 10h18" /></>,
     check: <><path d="M5 12l4 4L19 6" /></>,
     'chevron-down': <><path d="M6 9l6 6 6-6" /></>,
     'chevron-left': <><path d="M15 18l-6-6 6-6" /></>,
     'chevron-right': <><path d="M9 18l6-6-6-6" /></>,
     refresh: <><path d="M20 12a8 8 0 0 1-14 5M4 12a8 8 0 0 1 14-5" /><path d="M18 3v4h-4M6 21v-4h4" /></>,
-    shield: <><path d="M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z" /><path d="M9 12l2 2 4-5" /></>,
-    spark: <><path d="M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" /><path d="M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z" /></>,
+    shield: <><path d="M12 3 20 6v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6Z" fill="currentColor" fillOpacity=".15"/><path d="m8.5 12 2.5 2.5 4.5-5"/></>,
+    spark: <><path d="M11 3c.5 4 3 6.5 7 7-4 .5-6.5 3-7 7-.5-4-3-6.5-7-7 4-.5 6.5-3 7-7Z" fill="currentColor" fillOpacity=".25"/><path d="M18 15v6m-3-3h6"/></>,
+    play: <><path d="m8 5 11 7-11 7Z" fill="currentColor" fillOpacity=".2"/></>,
+    pause: <><path d="M8 6v12m8-12v12"/></>,
     x: <><path d="M6 6l12 12M18 6L6 18" /></>,
   };
   return <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ display: 'block' }}>
-    <g fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{paths[name] || paths.activity}</g>
+    <g fill="none" stroke="currentColor" strokeWidth="1.75" strokeLinecap="round" strokeLinejoin="round">{paths[name] || paths.activity}</g>
   </svg>;
 }
 
@@ -457,15 +459,32 @@ function AttackTypePie({ rows }: { rows: TdpRow[] }) {
     const angle = index * Math.PI * 2 / 72 - Math.PI / 2;
     return {index,category,angle};
   });
+  const [ringOverride, setRingOverride] = useState<boolean | null>(null);
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia?.('(prefers-reduced-motion: reduce)').matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+    const update = () => setReducedMotion(media?.matches ?? false);
+    media?.addEventListener?.('change', update);
+    return () => media?.removeEventListener?.('change', update);
+  }, []);
+  const breathe = ringOverride ?? !reducedMotion;
   return <div className="dt-ring-body">
+    <div className="dt-ring-visual">
+    {sum > 0 && <button type="button" className="dt-ring-motion" aria-label="告警刻度环呼吸动效"
+      aria-pressed={breathe} title={breathe ? '暂停呼吸动效' : '播放呼吸动效'} onClick={() => setRingOverride(!breathe)}>
+      <Icon name={breathe ? 'pause' : 'play'} size={13} />
+    </button>}
     <svg role="img" aria-label="攻击类型占比刻度环" viewBox="0 0 240 240" width="100%" height="156" onPointerLeave={() => setActive(null)} style={{ minWidth: 0, display: 'block' }}>
+      <g className="dt-ring-ticks" data-breathing={sum > 0 && breathe && !active ? 'on' : 'off'}>
       {ticks.map(({index,category,angle}) => <line key={index}
         x1={120+Math.cos(angle)*87} y1={120+Math.sin(angle)*87} x2={120+Math.cos(angle)*(index%6===0?105:101)} y2={120+Math.sin(angle)*(index%6===0?105:101)}
         stroke={category < 0 ? C.borderLight : palette[category%palette.length]} strokeWidth="2.5" strokeLinecap="round"
         opacity={active && entries[category]?.[0] !== active ? .22 : 1} onPointerEnter={() => setActive(entries[category]?.[0] || null)} />)}
+      </g>
       <text x="120" y="118" textAnchor="middle" fill={C.text} fontSize="29" fontWeight="720">{(selected ? selected[1] : sum).toLocaleString()}</text>
       <text x="120" y="141" textAnchor="middle" fill={C.textMuted} fontSize="11">{selected ? selected[0] : '告警总量'}</text>
     </svg>
+    </div>
     <div style={{ display: 'grid', gap: 9, minWidth: 0, padding: '0 3px' }}>
       {entries.length ? entries.map(([label,value],index) => <div key={label} onPointerEnter={() => setActive(label)} onPointerLeave={() => setActive(null)} style={{ display: 'grid', gridTemplateColumns: '48px minmax(40px,1fr) 83px', gap: 9, alignItems: 'center', fontSize: 12, minWidth: 0 }}>
         <span style={{ color: C.textDim, overflowWrap: 'anywhere' }}>{label}</span>
@@ -1031,6 +1050,13 @@ export default function Page() {
       @media (max-width:1080px) { .dt-report-summary { grid-template-columns: minmax(0,1fr); gap: 18px; } .dt-report-columns { grid-template-columns: minmax(0,1fr); } }
       @media (max-width:760px) { .dt-report-summary { padding: 16px; } .dt-report-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .dt-report-content { padding: 18px 16px; } .dt-report-tabs { padding: 0 16px; } .dt-overview-fields { grid-template-columns: minmax(0,1fr); } }
       .dt-trend-body { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 18px; align-items: center; padding: 12px; min-width: 0; }
+      .dt-ring-visual { position: relative; min-width: 0; }
+      .dt-ring-motion { position:absolute; z-index:1; top:0; right:0; display:grid; place-items:center; width:26px; height:26px;
+        color:var(--dt-text-dim); background:var(--dt-panel-soft); border:1px solid var(--dt-border); border-radius:8px; cursor:pointer; }
+      .dt-ring-motion:focus-visible { outline:2px solid var(--dt-blue); outline-offset:2px; }
+      .dt-ring-ticks { transform-origin:120px 120px; }
+      .dt-ring-ticks[data-breathing="on"] { animation:dt-alert-ring-breathe 3.2s ease-in-out infinite; }
+      @keyframes dt-alert-ring-breathe { 0%,100% { opacity:.34; transform:scale(.98); } 50% { opacity:1; transform:scale(1.045); } }
       .dt-ring-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: center; min-width: 0; }
       [data-aegisops-theme] * { font-family: inherit; }
       [data-aegisops-theme] code, [data-aegisops-theme] pre { font-family: Consolas, monospace; }

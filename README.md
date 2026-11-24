@@ -12,11 +12,15 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE.txt)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB)](pyproject.toml)
 
-[下载部署](https://github.com/knot07/AegisOps/releases/latest) · [部署与操作](DEPLOY.md) · [Windows 安装](WINDOWS.md) · [本次更新](docs/CHANGELOG-2026.11.19.md) · [页面导览](#页面导览)
+[下载部署](https://github.com/knot07/AegisOps/releases/latest) · [部署与操作](DEPLOY.md) · [Windows 安装](WINDOWS.md) · [本次更新](docs/CHANGELOG-2026.11.25.md) · [页面导览](#页面导览)
 
 </div>
 
 ![AegisOps 工作台首页](docs/images/pages/home-overview.png)
+
+## 2026.11.25：任务记录与工作台交互升级
+
+任务中心可以追踪工作流的节点执行，Worker 进度与结果在对话旁可见。工作台更新了消息卡片、状态动画、主题对比度和操作图标。详见[本次更新](docs/CHANGELOG-2026.11.25.md)。
 
 ## 2026.11.19：统一主题，完善日常操作
 

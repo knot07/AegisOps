@@ -119,6 +119,7 @@ vi.mock('@/components/common/SessionChat', () => ({
 vi.mock('./components', () => ({
   StatusBadge: ({ status }: { status: string }) => <span>{status}</span>,
   PriorityBadge: ({ priority }: { priority: string }) => <span>{priority}</span>,
+  ExecutionTriggerBadge: ({ type }: { type: string }) => <span>trigger:{type}</span>,
   SourceBadge: ({ sourceType }: { sourceType: string }) => <span>{sourceType}</span>,
   ModeBadge: ({ mode, agent }: { mode: string; agent: string }) => <span>{mode}:{agent}</span>,
   ActionButton: ({ label, onClick }: { label: string; onClick: () => void }) => (

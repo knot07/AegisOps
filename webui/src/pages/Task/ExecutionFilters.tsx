@@ -1,6 +1,6 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import DateTimeFilter from '@/components/common/DateTimeFilter';
 import { useState, type FormEvent } from 'react';
-import { Search, RotateCcw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { TaskListParams, TaskPriority } from '@/api/task';
 
@@ -78,10 +78,10 @@ export default function ExecutionFilters({ onSearch, onReset }: {
         </label>
         <div className="flex gap-2">
           <button type="submit" className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-3 py-2 text-sm text-white hover:bg-slate-700">
-            <Search className="h-4 w-4" />{t('queued.filterSearch')}
+            <WorkspaceGlyph kind="search" size="xs" />{t('queued.filterSearch')}
           </button>
           <button type="button" onClick={handleReset} className="flex items-center gap-1.5 rounded-lg border border-gray-300 px-3 py-2 text-sm text-gray-600 hover:bg-gray-50">
-            <RotateCcw className="h-4 w-4" />{t('queued.filterReset')}
+            <WorkspaceGlyph kind="reset" size="xs" />{t('queued.filterReset')}
           </button>
         </div>
       </div>

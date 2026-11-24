@@ -1,5 +1,6 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { useEffect, useId, useRef, useState, type HTMLAttributes, type ReactNode } from 'react';
-import { GripVertical, Pencil, Plus, Trash2, X, Settings2, Check, ChevronDown } from 'lucide-react';
+import { GripVertical, Plus, X, ChevronDown } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useOptionalToast } from '@/components/common/Toast';
 import { GroupActionCancelled, groupItemLabel, groupLabel, groupName, orderGroupNames, type GroupNavEntry, type GroupNavItem, type GroupSelection } from './groupView';
@@ -271,7 +272,7 @@ export default function GroupNav({
         {(!compact || managing) && <button type="button" {...dropProps()} onClick={() => openCreate()} disabled={busy || !editableItems.length}
           title={!editableItems.length ? t('readOnly.noEditable') : t('create')} aria-label={t('create')}
           className="rounded p-1 text-gray-500 hover:bg-gray-100 disabled:opacity-40"><Plus className="h-4 w-4" /></button>}
-        {compact && <button type="button" aria-pressed={managing} onClick={() => setManaging(value => !value)} className="yushu-manage-groups flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-ui-secondary hover:bg-ui-hover">{managing ? <Check className="h-3.5 w-3.5" /> : <Settings2 className="h-3.5 w-3.5" />}{t(managing ? 'done' : 'manage')}</button>}
+        {compact && <button type="button" aria-pressed={managing} onClick={() => setManaging(value => !value)} className="yushu-manage-groups flex items-center gap-1.5 rounded-lg px-2 py-1.5 text-xs text-ui-secondary hover:bg-ui-hover">{managing ? <WorkspaceGlyph kind="check" size="micro" /> : <WorkspaceGlyph kind="tune" size="micro" />}{t(managing ? 'done' : 'manage')}</button>}
       </div>
       {(!compact || managing) && <p className="mb-2 px-2 text-[11px] leading-4 text-gray-400">{t('countsDescription')}</p>}
       <nav className="space-y-0.5 max-md:max-h-48 max-md:overflow-y-auto">
@@ -299,10 +300,10 @@ export default function GroupNav({
             {navigationButton(group, label, entry.count)}
             {(!compact || managing) && <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('rename')}
               aria-label={t('renameNamed', { name: label })} onClick={() => { setName(group); setError(''); setDialog({ kind: 'rename', name: group }); }}
-              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Pencil className="h-3 w-3" /></button>}
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><WorkspaceGlyph kind="edit" size="micro" /></button>}
             {(!compact || managing) && <button type="button" disabled={busy || !!entry.readOnlyReason} title={entry.readOnlyReason || t('delete')}
               aria-label={t('deleteNamed', { name: label })} onClick={() => void run(() => onDelete(group))}
-              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><Trash2 className="h-3 w-3" /></button>}
+              className="rounded p-1 text-gray-400 hover:bg-gray-100 disabled:opacity-40"><WorkspaceGlyph kind="delete" size="micro" /></button>}
           </div>;
         })}
         <div className="flex" {...dropProps('')}>{navigationButton('', t('ungrouped'), ungroupedCount)}</div>

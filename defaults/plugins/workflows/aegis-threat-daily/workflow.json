@@ -1,19 +1,19 @@
 {
   "name": "aegis-threat-daily",
   "nameCn": "每日情报同步与资产匹配",
-  "description": "直接采集七家官方来源最新情报，匹配近30天情报与资产软件清单；仅生成待核实线索，不自动确认漏洞。",
+  "description": "直接采集漏洞公告和安全报道。仅用近30天漏洞数据匹配资产清单，生成待核实线索。",
   "start": "sync",
   "nodes": [
     {
       "id": "sync",
       "type": "python",
-      "description": "直采官方情报来源 · 分来源校验与增量入库",
-      "code": "from aegis_scenes.threat_intelligence import scheduled_step\nresult=scheduled_step('sync')\noutputs['sync_result']=result\nprint('官方情报直采入库：'+str(result['count'])+' 条')\nfor source,state in result.get('sources',{}).items():\n    print(source+': '+('已更新 '+str(state['count'])+' 条' if state['ok'] else state['error']))\nif result.get('partial'): print('部分来源未更新，历史数据保留；继续匹配现有已采集情报。')"
+      "description": "直采漏洞公告和安全报道 · 分来源校验与增量入库",
+      "code": "from aegis_scenes.threat_intelligence import scheduled_step\nresult=scheduled_step('sync')\noutputs['sync_result']=result\nprint(f\"采集 {result['fetched']} 条；新增 {result['added']} 条，更新 {result['updated']} 条\")\nfor source,state in result['sources'].items():\n    print(f\"{source}：采集 {state['count']} 条，新增 {state['added']} 条，更新 {state['updated']} 条\" + (f\"；{state['error']}\" if state['error'] else ''))\nif result['partial']: print('部分来源采集未完整；保留历史情报，继续匹配现有情报。')"
     },
     {
       "id": "match",
       "type": "python",
-      "description": "匹配近30天情报与资产产品版本",
+      "description": "匹配近30天漏洞公告与资产产品版本",
       "code": "from aegis_scenes.threat_intelligence import scheduled_step\nresult=scheduled_step('match')\noutputs['match_result']=result\nprint('新增或更新待核实线索：'+str(result['count'])+' 条；未自动登记漏洞')"
     }
   ],

@@ -152,7 +152,7 @@ async def test_once_scheduler_tick_creates_execution_and_disables_scheduler(tmp_
     assert updated.status == SchedulerStatus.DISABLED
     assert updated.trigger.next_run is None
     assert total == 1
-    assert executions[0].trigger_type == ExecutionTriggerType.RUN_ONCE
+    assert executions[0].trigger_type == ExecutionTriggerType.SCHEDULED
 
 
 @pytest.mark.asyncio
@@ -972,8 +972,9 @@ async def test_background_task_completion_does_not_resume_running_parent(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed", [False, True])
 async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, failed: bool,
 ):
     from aegisops.workflow import fs_store
     from aegisops.workflow import runner
@@ -993,7 +994,9 @@ async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
     def fake_run_workflow(*, workflow, inputs, **_kwargs):
         captured["workflow"] = workflow
         captured["inputs"] = inputs
-        return SimpleNamespace(error=None, outputs={"ok": True})
+        error = "fixture failure" if failed else None
+        _kwargs["on_step_complete"]({"node_id": "fixture", "node_type": "test", "inputs": {}, "outputs": {"ok": not failed}, "error": error})
+        return SimpleNamespace(status="FAILED" if failed else "SUCCEEDED", error=error, outputs={"ok": not failed}, last_node_id="fixture")
 
     monkeypatch.setattr(fs_store, "read_workflow_from_fs", fake_read_workflow_from_fs)
     monkeypatch.setattr(runner, "run_workflow", fake_run_workflow)
@@ -1016,12 +1019,25 @@ async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
     execution.status = TaskStatus.RUNNING
     await TaskStore.create_execution(execution)
 
-    result = await TaskExecutor._trigger_workflow(execution, scheduler)
+    if failed:
+        with pytest.raises(RuntimeError, match="fixture failure"):
+            await TaskExecutor._trigger_workflow(execution, scheduler)
+    else:
+        assert await TaskExecutor._trigger_workflow(execution, scheduler) == "{'ok': True}"
 
     assert captured["workflow_id"] == "local-script-runner"
     assert captured["workflow"] == workflow_json
     assert captured["inputs"] == {"source": "snapshot"}
-    assert result == "{'ok': True}"
+    from aegisops.workflow.store import WorkflowStore
+
+    rows = await WorkflowStore.list_executions(execution.workflow_id, trigger_id=execution.id, trigger_type="task")
+    assert len(rows) == 1
+    assert rows[0]["status"] == ("error" if failed else "success")
+    assert rows[0]["currentNodeId"] == "fixture"
+    assert rows[0]["stepCount"] == 1
+    steps, _ = await WorkflowStore.list_steps(rows[0]["id"])
+    assert steps[0]["node_id"] == "fixture"
+    assert steps[0].get("error") == ("fixture failure" if failed else None)
 
 
 @pytest.mark.asyncio

@@ -178,6 +178,7 @@ async def schedule_task_create(
         user_prompt=user_prompt,
     )
 
+    call_key = ctx.idempotency_key
     scheduler = await TaskManager.create_scheduler(
         title=title,
         description=description,
@@ -185,9 +186,9 @@ async def schedule_task_create(
         priority=task_priority,
         source=source,
         trigger=trigger,
+        enabled=enabled is not False,
+        dedup_key=f"tool:schedule_task:{call_key}" if call_key else None,
     )
-    if enabled is False:
-        scheduler = await TaskManager.disable_scheduler(scheduler.id) or scheduler
 
     display_tz = resolve_task_timezone_name(scheduler)
     output_lines = [
@@ -682,6 +683,13 @@ async def schedule_task(
                 f"resource_type='{normalized_resource}'. Valid actions: "
                 f"{', '.join(sorted(supported_actions))}"
             ),
+        )
+
+    if normalized_action not in {"list", "status"} and (normalized_action == "create" or task_id):
+        pattern = f"{normalized_resource}:{normalized_action}:{task_id or 'new'}"
+        await ctx.ask(
+            permission="schedule_task", patterns=[pattern], always=[pattern],
+            metadata={"resource": normalized_resource, "action": normalized_action, "task_id": task_id},
         )
 
     if normalized_action == "create":

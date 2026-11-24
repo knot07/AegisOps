@@ -12,13 +12,20 @@ from urllib.parse import urlsplit
 from fastapi import Depends, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, ConfigDict
+from .intelligence_collectors import NEWS_SOURCE_NAMES,THREATBOOK_ARTICLE_URL
 
-HOMEPAGE = 'https://github.com/Aabyss-Team/Threat-Broadcast-Plus'
 MAX_BYTES = 24 * 1024 * 1024
 sync_lock = asyncio.Lock()
 translation_tasks = set()
 _services = {}
-SOURCE_GROUP = "CASE WHEN source LIKE '%阿里%' THEN 'aliyun' WHEN source LIKE '%微步%' THEN 'threatbook' WHEN source LIKE '%斗象%' THEN 'tophant' WHEN source LIKE '%长亭%' THEN 'chaitin' WHEN source LIKE '%NVD%' THEN 'nvd' WHEN source LIKE '%Tenable%' THEN 'tenable' WHEN source LIKE '%CISA%' THEN 'cisa' ELSE 'other' END"
+SOURCE_ALIASES=(('微步','threatbook'),('阿里','aliyun'),('斗象','tophant'),('长亭','chaitin'),('NVD','nvd'),('Tenable','tenable'),('CISA','cisa'))
+NEWS_NAMES=tuple(NEWS_SOURCE_NAMES.values())
+SOURCE_GROUP = 'CASE ' + ' '.join(
+    [f"WHEN source='{name}' THEN '{key}'" for key,name in NEWS_SOURCE_NAMES.items()] +
+    [f"WHEN source LIKE '%{token}%' THEN '{key}'" for token,key in SOURCE_ALIASES]
+) + " ELSE 'other' END"
+ADVISORY_ONLY_SQL='url NOT LIKE ? AND source NOT IN ('+','.join('?' for _ in NEWS_NAMES)+')'
+ADVISORY_ONLY_ARGS=(THREATBOOK_ARTICLE_URL+'%',*NEWS_NAMES)
 
 
 def translated_text(items):
@@ -107,26 +114,45 @@ def read_published(path):
 
 def persist_collected(con, rows, synced):
     """Preserve existing intelligence IDs and their remediation references."""
-    from .intelligence_collectors import SOURCES
+    fields = ('source','cve','title','published','info','url','severity')
     def source_id(value):
-        for token,key in [('微步','threatbook'),('阿里','aliyun'),('斗象','tophant'),('长亭','chaitin'),('NVD','nvd'),('Tenable','tenable'),('CISA','cisa')]:
+        for key,name in NEWS_SOURCE_NAMES.items():
+            if value==name:return key
+        for token,key in SOURCE_ALIASES:
             if token in value:return key
         return 'other'
-    urls={};cves={}
-    for old in con.execute('SELECT id,source,cve,url FROM ti_items'):
+    urls={};cves={};saved={};changes={}
+    for old in con.execute('SELECT id,'+','.join(fields)+' FROM ti_items'):
         group=source_id(old['source']);urls[(group,old['url'].rstrip('/'))]=old['id']
         if old['cve']:cves.setdefault((group,old['cve']),set()).add(old['id'])
+        saved[old['id']]=tuple(old[name] for name in fields)
     for item in rows:
         key=(item['source_id'],item['url'].rstrip('/'));existing=urls.get(key)
         if not existing and item['cve']:
             candidates=cves.get((item['source_id'],item['cve']),set())
             if len(candidates)==1:existing=next(iter(candidates))
         iid=existing or digest(['direct',item['source_id'],item['key']])
-        con.execute('INSERT INTO ti_items VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,cve=excluded.cve,title=excluded.title,published=excluded.published,info=excluded.info,url=excluded.url,severity=excluded.severity,synced=excluded.synced',
-                    (iid,item['source'],item['cve'],item['title'],item['published'],item['info'],safe_url(item['url']),item['severity'],synced))
+        fields_by_name={name:safe_url(item[name]) if name=='url' else item[name] for name in fields}
+        if item.get('coverage')=='homepage' and iid in saved:
+            old=dict(zip(fields,saved[iid]))
+            for name in ('source','info','severity'):
+                if old[name]:fields_by_name[name]=old[name]
+            fields_by_name['cve']=item['cve'] or old['cve']
+            if old['published'][:10]==item['published'][:10] and len(old['published'])>len(item['published']):
+                fields_by_name['published']=old['published']
+        values=tuple(fields_by_name[name] for name in fields)
         urls[key]=iid
         if item['cve']:cves.setdefault((item['source_id'],item['cve']),set()).add(iid)
-    return len(rows)
+        # Resolve duplicate aliases before writing so only the final content counts.
+        changes[iid]=(item['source_id'],values)
+    deltas={}
+    for iid,(source,values) in changes.items():
+        delta=deltas.setdefault(source,{'added':0,'updated':0})
+        if saved.get(iid)==values:continue
+        con.execute('INSERT INTO ti_items VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET source=excluded.source,cve=excluded.cve,title=excluded.title,published=excluded.published,info=excluded.info,url=excluded.url,severity=excluded.severity,synced=excluded.synced',
+                    (iid,*values,synced))
+        delta['updated' if iid in saved else 'added']+=1
+    return deltas
 
 
 def register(native):
@@ -176,6 +202,9 @@ def register(native):
     class Translate(BaseModel):
         ids: list[str] = Field(max_length=24)
 
+    class ThreatBookArticle(BaseModel):
+        url: str = Field(max_length=400)
+
     class Daily(BaseModel):
         enabled: bool
         time: str = Field(default='08:00',pattern=r'^([01]\d|2[0-3]):[0-5]\d$')
@@ -205,7 +234,7 @@ def register(native):
                 if not mapping:raise HTTPException(409,'请使用平台管理员登录后配置每日任务')
                 con.execute("INSERT OR REPLACE INTO ti_meta VALUES('daily_owner',?)",(mapping[0],))
             if not state['id']:
-                scheduler=await TaskManager.create_scheduler(title='威胁情报 · 每日同步与资产匹配',description='直接采集七家官方来源最新情报，匹配近30天情报与资产软件清单；仅生成待核实线索，不自动确认漏洞。',mode=SchedulerMode.CRON,source=TaskSource(source_type='scheduled_trigger'),trigger=TaskTrigger(cron=cron,timezone='Asia/Shanghai',cron_description='每天 '+body.time),execution_mode=ExecutionMode.WORKFLOW,workflow_id='aegis-threat-daily',agent_name='atlas',category='威胁情报',created_by=mapping[0],dedup_key='aegis-threat-daily')
+                scheduler=await TaskManager.create_scheduler(title='威胁情报 · 每日同步与资产匹配',description='直接采集公开漏洞通告与安全报道；仅使用近30天漏洞数据匹配资产清单，不自动确认漏洞。',mode=SchedulerMode.CRON,source=TaskSource(source_type='scheduled_trigger'),trigger=TaskTrigger(cron=cron,timezone='Asia/Shanghai',cron_description='每天 '+body.time),execution_mode=ExecutionMode.WORKFLOW,workflow_id='aegis-threat-daily',agent_name='atlas',category='威胁情报',created_by=mapping[0],dedup_key='aegis-threat-daily')
                 state['id']=scheduler.id
             else:
                 await TaskManager.update_scheduler_with_trigger(state['id'],fields={'execution_mode':ExecutionMode.WORKFLOW,'workflow_id':'aegis-threat-daily'},cron=cron,timezone='Asia/Shanghai',run_once=False)
@@ -240,7 +269,7 @@ def register(native):
         with native.db() as con:
             rows=con.execute(query+' ORDER BY day DESC,source_id LIMIT 24 OFFSET ?',(*args,(max(1,page)-1)*24)).fetchall()
             total=con.execute('SELECT COUNT(*) FROM ('+query+')',args).fetchone()[0]
-            counts=con.execute('SELECT ('+SOURCE_GROUP+') AS source_id,COUNT(*) AS count FROM ti_items GROUP BY source_id').fetchall()
+            counts=con.execute('SELECT ('+SOURCE_GROUP+') AS source_id,COUNT(*) AS count,MAX(published) AS latest FROM ti_items GROUP BY source_id').fetchall()
         return {'items':[dict(r) for r in rows],'total':total,'source_counts':[dict(r) for r in counts]}
 
     @native.app.post('/api/intelligence/translate')
@@ -310,29 +339,64 @@ def register(native):
             count_assets = con.execute('SELECT COUNT(*) FROM assets').fetchone()[0]
             registered = con.execute("SELECT COUNT(*) FROM asset_software WHERE inventory!='[]'").fetchone()[0]
         return {'meta': meta, 'counts': counts, 'total': total, 'assets': count_assets, 'inventoried': registered,
-                'syncing': sync_lock.locked(), 'collection_mode': 'direct', 'upstream': HOMEPAGE, 'can_manage': user['role'] in {'admin', 'security'},'can_schedule':user['role']=='admin'}
+                'syncing': sync_lock.locked(), 'collection_mode': 'direct', 'can_manage': user['role'] in {'admin', 'security'},'can_schedule':user['role']=='admin'}
 
     @native.app.post('/api/intelligence/sync')
     async def sync(user=Depends(native.current_user)):
         native.manager(user)
         if sync_lock.locked():raise HTTPException(409,'同步正在进行，请稍后刷新')
         async with sync_lock:
-            from .intelligence_collectors import collect_all
+            from .intelligence_collectors import SOURCES,collect_all
             rows,states=await collect_all()
             with native.db() as con:
                 previous=con.execute("SELECT value FROM ti_meta WHERE key='collectors'").fetchone()
                 previous=json.loads(previous[0]) if previous else {}
                 for key,state in states.items():
                     if not state['ok']:state['last_success']=previous.get(key,{}).get('last_success','')
-                count=persist_collected(con,rows,native.now())
+                finished=native.now()
+                deltas=persist_collected(con,rows,finished)
+                for key,state in states.items():state.update(deltas.get(key,{'added':0,'updated':0}))
+                added=sum(state['added'] for state in states.values())
+                updated=sum(state['updated'] for state in states.values())
                 failed=[key for key,state in states.items() if not state['ok'] or state.get('partial')]
+                homepage=[key for key in failed if states[key].get('mode')=='homepage']
+                incomplete=[key for key in failed if key not in homepage]
+                status_notes=[]
+                if homepage:status_notes.append('阿里云已从官网首页同步，高危列表采集未完整。')
+                if incomplete:status_notes.append('采集未完整：'+ '、'.join(SOURCES[key] for key in incomplete)+'；历史情报已保留。')
                 values={'collection_mode':'direct','collectors':json.dumps(states,ensure_ascii=False),
-                        'last_attempt':native.now(),'last_error':('部分来源暂未更新：'+ '、'.join(failed)+'；历史情报已保留。') if failed else ''}
-                if rows:values.update(last_sync=native.now(),upstream_latest=max((r['published'] for r in rows),default=''))
+                        'last_attempt':finished,'last_error':' '.join(status_notes)}
+                if rows:values.update(last_sync=finished,upstream_latest=con.execute('SELECT MAX(published) FROM ti_items').fetchone()[0] or '')
                 for key,value in values.items():con.execute('INSERT OR REPLACE INTO ti_meta VALUES(?,?)',(key,value))
-                native.event(con,user['id'],'直采威胁情报',f'官方来源 {7-len(failed)}/7；新增或更新 {count} 条')
+                native.event(con,user['id'],'直采威胁情报',f'完整采集 {len(SOURCES)-len(failed)}/{len(SOURCES)} 个来源；新增 {added} 条，更新 {updated} 条')
             if not rows:raise HTTPException(502,'所有来源采集失败，请查看来源状态；历史情报已保留')
-            return {'ok':True,'partial':bool(failed),'count':count,'sources':states}
+            return {'ok':True,'partial':bool(failed),'count':added+updated,'fetched':len(rows),'added':added,'updated':updated,'sources':states}
+
+    @native.app.post('/api/intelligence/threatbook-article')
+    async def import_threatbook_article(body: ThreatBookArticle,user=Depends(native.current_user)):
+        native.manager(user)
+        import httpx
+        from .intelligence_collectors import error_message,fetch_threatbook_article,threatbook_article_id
+        try:
+            article_id=threatbook_article_id(body.url)
+        except ValueError as exc:
+            raise HTTPException(422,str(exc)) from None
+        if sync_lock.locked():raise HTTPException(409,'情报同步或导入正在进行，请稍后重试')
+        async with sync_lock:
+            try:
+                item=await fetch_threatbook_article(article_id)
+            except (httpx.HTTPError,ValueError) as exc:
+                if isinstance(exc,httpx.HTTPStatusError) and exc.response.is_redirect:
+                    raise HTTPException(502,'微步跳转到其他页面，暂不能导入；请确认文章公开可读') from None
+                raise HTTPException(502,error_message(exc)) from None
+            with native.db() as con:
+                delta=persist_collected(con,[item],native.now())['threatbook']
+                saved=con.execute('SELECT id FROM ti_items WHERE source=? AND url=?',(item['source'],item['url'])).fetchone()
+                latest=con.execute('SELECT MAX(published) FROM ti_items').fetchone()[0]
+                con.execute("INSERT OR REPLACE INTO ti_meta VALUES('upstream_latest',?)",(latest,))
+                if delta['added'] or delta['updated']:
+                    native.event(con,user['id'],'导入微步文章',f'公开文章 {article_id}')
+        return {'id':saved['id'],'title':item['title'],'published':item['published'],**delta}
 
     @native.app.get('/api/intelligence/items')
     def items(q: str='', severity: str='', source: str='', start: str='',end: str='',day: str='',page: int=1, user=Depends(native.current_user)):
@@ -344,6 +408,7 @@ def register(native):
             result=[]
             for r in rows:
                 item=dict(r)
+                item['kind']='article' if item['source'] in NEWS_NAMES or item['url'].startswith(THREATBOOK_ARTICLE_URL) else 'advisory'
                 translated=con.execute('SELECT * FROM ti_translations WHERE item_id=? AND content_hash=?',(r['id'],digest([r['title'],r['info']]))).fetchone()
                 item['translation_status']=translated['status'] if translated else 'not_started'
                 if translated and translated['status']=='completed':item.update(title_zh=translated['title'],info_zh=translated['info'])
@@ -377,7 +442,7 @@ def register(native):
         with native.db() as con:
             if not con.execute('SELECT 1 FROM ti_items LIMIT 1').fetchone():
                 raise HTTPException(409, '请先同步情报')
-            records = con.execute('SELECT * FROM ti_items WHERE substr(published,1,10)>=? ORDER BY published DESC LIMIT 20000', (since,)).fetchall()
+            records = con.execute(f'SELECT * FROM ti_items WHERE substr(published,1,10)>=? AND {ADVISORY_ONLY_SQL} ORDER BY published DESC LIMIT 20000', (since,*ADVISORY_ONLY_ARGS)).fetchall()
             invs = con.execute('SELECT a.*,s.inventory FROM assets a JOIN asset_software s ON s.asset_id=a.id').fetchall()
             count = 0
             for a in invs:

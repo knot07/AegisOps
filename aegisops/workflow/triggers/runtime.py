@@ -32,6 +32,7 @@ from aegisops.workflow.tool_context import (
     cleanup_workflow_tool_context,
 )
 
+from .admission import TriggerAdmission
 from .compat import (
     LEGACY_KAFKA_CONFIG_PREFIX,
     LEGACY_POLLER_CONFIG_PREFIX,
@@ -73,6 +74,7 @@ class TriggerRuntime:
 
     def __init__(self) -> None:
         self._dispatcher = EventDispatcher()
+        self._admission = TriggerAdmission()
         self._custom_adapter_tasks: Dict[tuple[str, str], asyncio.Task[Any]] = {}
         self._custom_adapters: Dict[tuple[str, str], Any] = {}
         self._custom_status: Dict[tuple[str, str], Dict[str, Any]] = {}
@@ -556,13 +558,14 @@ class TriggerRuntime:
         verified_auth: Optional[Dict[str, str]] = None,
     ) -> Dict[str, Any]:
         async def _executor(mapped_inputs: Dict[str, Any]) -> Dict[str, Any]:
-            return await self._execute_workflow(
-                workflow_id=workflow_id,
-                workflow_json=workflow_json,
-                trigger=trigger,
-                mapped_inputs=mapped_inputs,
-                verified_auth=verified_auth,
-            )
+            async with self._admission.slot((workflow_id, trigger.id or trigger.type), trigger.concurrency):
+                return await self._execute_workflow(
+                    workflow_id=workflow_id,
+                    workflow_json=workflow_json,
+                    trigger=trigger,
+                    mapped_inputs=mapped_inputs,
+                    verified_auth=verified_auth,
+                )
 
         return await self._dispatcher.dispatch(trigger=trigger, event=event, executor=_executor)
 

@@ -1,19 +1,16 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   BookOpen,
-  Search,
   Plus,
-  RefreshCw,
   Sparkles,
   FolderOpen,
   CloudDownload,
   AlertTriangle,
   Loader2,
-  Pencil,
   ChevronLeft,
   ChevronRight,
-  Filter,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -374,20 +371,20 @@ export default function SkillPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <WorkspaceGlyph kind="refresh" size="xs" className={refreshing ? 'animate-spin' : ''} />
           </button>
           <button
             onClick={() => setShowInstallDialog(true)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 border border-gray-300 text-gray-700 bg-white rounded-lg hover:bg-gray-50 transition-colors text-sm max-md:whitespace-nowrap"
           >
-            <CloudDownload className="w-4 h-4" />
+            <WorkspaceGlyph kind="download" size="xs" />
             {t('installSkill')}
           </button>
           <button
             onClick={() => setShowCreateSheet(true)}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm max-md:whitespace-nowrap"
           >
-            <Plus className="w-4 h-4" />
+            <WorkspaceGlyph kind="add" size="xs" />
             {t('createSkill')}
           </button>
         </div>}
@@ -399,7 +396,7 @@ export default function SkillPage() {
       <div className="px-4 py-2 border-b border-gray-100 flex flex-wrap items-center gap-3 max-md:px-0">
         {/* 搜索 */}
         <div className="relative min-w-64 flex-1 max-md:w-full">
-          <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none" />
+          <WorkspaceGlyph kind="search" size="xs" className="glyph-search-field" />
           <input
             type="text"
             placeholder={t('searchPlaceholder')}
@@ -818,7 +815,7 @@ function SkillRow({ skill, isSelected, installingDeps, toggling, onSelect, onIns
                        hover:border-slate-300 hover:text-slate-700 hover:bg-gray-50
                        transition-colors"
           >
-            <Pencil className="w-3.5 h-3.5" />
+            <WorkspaceGlyph kind="edit" size="micro" />
           </button>
         </div>
       </td>
@@ -1004,7 +1001,7 @@ function ColumnFilterHeader({
           }`}
           aria-label={`${label} ${t('filter.aria')}`}
         >
-          <Filter className="w-3 h-3" />
+          <WorkspaceGlyph kind="filter" size="micro" />
         </button>
       </div>
       {open && (

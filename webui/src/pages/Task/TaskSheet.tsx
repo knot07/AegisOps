@@ -9,7 +9,7 @@
 
 import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Calendar, Clock, Sparkles } from 'lucide-react';
+import { Calendar, ChevronDown, Clock, FileText, History, Settings2, Sparkles } from 'lucide-react';
 import { taskAPI, TaskScheduler, TaskPriority, TaskCreateParams, ExecutionMode } from '@/api/task';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
@@ -24,7 +24,8 @@ import { agentAPI, Agent } from '@/api/agent';
 import { workflowAPI, WorkflowSummary } from '@/api/workflow';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
-import { StatusBadge } from './components';
+import { ExecutionTriggerBadge, StatusBadge } from './components';
+import WorkflowNodeHistory from './WorkflowNodeHistory';
 import { extractErrorMessage } from '@/utils/error';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -294,6 +295,9 @@ ${fields}
       mode={isEdit ? 'edit' : 'create'}
       entityType={t('taskSheet.entityType')}
       entityName={task?.title}
+      resizable={false}
+      width={720}
+      surfaceClassName="border-l border-ui-border"
       icon={icon}
       rexSystemContext={buildRexContext(formData, isEdit)}
       rexWelcomeMessage={buildRexWelcome(isEdit, task?.title)}
@@ -348,6 +352,7 @@ function TaskFormContent({
 }: TaskFormContentProps) {
   const { t, i18n } = useTranslation('task');
   const { openRex } = useEntitySheet();
+  const [expandedRun, setExpandedRun] = useState<string | null>(null);
   const update = (fields: Partial<TaskFormData>) => onChange({ ...formData, ...fields });
 
   const isImmediate = formData.scheduleKind === 'immediate';
@@ -362,192 +367,188 @@ function TaskFormContent({
   );
 
   return (
-    <div className="space-y-4">
-      {/* Title */}
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.titleLabel')}</label>
-        <input
-          type="text"
-          value={formData.title}
-          onChange={(e) => update({ title: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none text-sm"
-          placeholder={t('form.titlePlaceholder')}
-        />
-      </div>
-
-      {/* Description */}
-      <div>
-        <label className="block text-sm font-medium text-gray-700 mb-1">{t('form.descLabel')}</label>
-        <textarea
-          value={formData.description}
-          onChange={(e) => update({ description: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none resize-none text-sm"
-          rows={2}
-          placeholder={t('form.descPlaceholder')}
-        />
-      </div>
-
-      {/* Priority + Scheduling */}
-      <div className="space-y-2.5">
-        <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.priorityLabel')}</span>
-          <PillGroup
-            options={[
-              { value: 'urgent', label: t('form.urgentLabel'), activeClass: 'bg-amber-500 text-white border-amber-500' },
-              { value: 'high', label: t('form.highLabel'), activeClass: 'bg-orange-500 text-white border-orange-500' },
-              { value: 'normal', label: t('form.normalLabel'), activeClass: 'bg-slate-500 text-white border-slate-500' },
-              { value: 'low', label: t('form.lowLabel'), activeClass: 'bg-gray-500 text-white border-gray-500' },
-            ]}
-            value={formData.priority}
-            onChange={(v) => update({ priority: v })}
+    <div className="space-y-4 text-ui-text">
+      <section className="space-y-3 rounded-xl border border-ui-border bg-ui-surface p-4 sm:p-5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold"><FileText className="size-4 text-ui-action" aria-hidden="true" />{t('taskSheet.basics')}</h3>
+        {/* Title */}
+        <div>
+          <label className="block text-sm font-medium text-ui-text mb-1">{t('form.titleLabel')}</label>
+          <input
+            type="text"
+            value={formData.title}
+            onChange={(e) => update({ title: e.target.value })}
+            className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg focus:ring-2 focus:ring-ui-control outline-none text-sm"
+            placeholder={t('form.titlePlaceholder')}
           />
         </div>
-        <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.scheduleKindLabel')}</span>
-          {isEdit ? (
-            <span className="px-3 py-1.5 bg-gray-50 border border-gray-200 rounded-lg text-sm text-gray-700">
-              {isRunOnce ? t('form.onceAtTimeOption') : t('form.recurringOption')}
-            </span>
-          ) : (
+
+        {/* Description */}
+        <div>
+          <label className="block text-sm font-medium text-ui-text mb-1">{t('form.descLabel')}</label>
+          <textarea
+            value={formData.description}
+            onChange={(e) => update({ description: e.target.value })}
+            className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg focus:ring-2 focus:ring-ui-control outline-none resize-none text-sm"
+            rows={2}
+            placeholder={t('form.descPlaceholder')}
+          />
+        </div>
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-ui-border bg-ui-surface p-4 sm:p-5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold"><Calendar className="size-4 text-ui-action" aria-hidden="true" />{t('form.scheduleConfig')}</h3>
+        <div className="space-y-2.5">
+          <div className="flex items-center gap-3">
+            <span className="w-14 shrink-0 text-sm font-medium text-ui-text">{t('form.priorityLabel')}</span>
             <PillGroup
+              inactiveClass="border-ui-border bg-ui-canvas text-ui-secondary hover:bg-ui-hover"
               options={[
-                { value: 'immediate', label: t('form.immediateOption'), activeClass: 'bg-sky-600 text-white border-sky-600' },
-                { value: 'once', label: t('form.onceAtTimeOption'), activeClass: 'bg-orange-500 text-white border-orange-500' },
-                { value: 'recurring', label: t('form.recurringOption'), activeClass: 'bg-purple-600 text-white border-purple-600' },
+                { value: 'urgent', label: t('form.urgentLabel'), activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
+                { value: 'high', label: t('form.highLabel'), activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
+                { value: 'normal', label: t('form.normalLabel'), activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
+                { value: 'low', label: t('form.lowLabel'), activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
               ]}
-              value={formData.scheduleKind}
-              onChange={(v) => update({ scheduleKind: v, cron: '', runAt: '' })}
+              value={formData.priority}
+              onChange={(v) => update({ priority: v })}
             />
-          )}
-        </div>
-      </div>
-
-      {/* Scheduling config */}
-      {!isImmediate && (
-        <div
-          className={`rounded-xl p-4 space-y-3 border ${
-            isOnce || isRunOnce
-              ? 'bg-orange-50/60 border-orange-100'
-              : 'bg-purple-50/60 border-purple-100'
-          }`}
-        >
-          <p
-            className={`text-sm font-semibold flex items-center gap-1.5 ${
-              isOnce || isRunOnce ? 'text-orange-800' : 'text-purple-800'
-            }`}
-          >
-            <Calendar className="w-4 h-4" /> {t('form.scheduleConfig')}
-          </p>
-
-          {/* Run-once mode: locked badge (edit) */}
-          {isEdit && isRunOnce && (
-            <div className="flex items-center gap-2 px-3 py-2 bg-white border border-orange-200 rounded-lg text-sm text-orange-700 font-medium">
-              <Clock className="w-4 h-4" /> {t('form.runOnce')}
-            </div>
-          )}
-
-          {/* Once: datetime picker */}
-          {(isOnce || isRunOnce) && (
-            <div>
-              <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.execTimeLabel')}</label>
-              <input
-                type="datetime-local"
-                value={formData.runAt}
-                onChange={(e) => update({ runAt: e.target.value })}
-                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-orange-400 outline-none text-sm bg-white"
+          </div>
+          <div className="flex items-center gap-3">
+            <span className="w-14 shrink-0 text-sm font-medium text-ui-text">{t('form.scheduleKindLabel')}</span>
+            {isEdit ? (
+              <span className="px-3 py-1.5 bg-ui-canvas border border-ui-border rounded-lg text-sm text-ui-text">
+                {isRunOnce ? t('form.onceAtTimeOption') : t('form.recurringOption')}
+              </span>
+            ) : (
+              <PillGroup
+                inactiveClass="border-ui-border bg-ui-canvas text-ui-secondary hover:bg-ui-hover"
+                options={[
+                  { value: 'immediate', label: t('form.immediateOption'), activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
+                  { value: 'once', label: t('form.onceAtTimeOption'), activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
+                  { value: 'recurring', label: t('form.recurringOption'), activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
+                ]}
+                value={formData.scheduleKind}
+                onChange={(v) => update({ scheduleKind: v, cron: '', runAt: '' })}
               />
-            </div>
-          )}
-
-          {/* Recurring: cron preset + custom input */}
-          {!isOnce && !isRunOnce && isRecurring && (
-            <>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1.5">
-                  {t('form.freqRecurringLabel')}
-                </label>
-                <select
-                  value={
-                    CRON_PRESETS.find((p) => p.value === formData.cron && p.value !== '__custom__')
-                      ? formData.cron
-                      : formData.cron
-                      ? '__custom__'
-                      : ''
-                  }
-                  onChange={(e) => {
-                    if (e.target.value !== '__custom__') {
-                      update({ cron: e.target.value });
-                    } else {
-                      update({ cron: '' });
-                    }
-                  }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white focus:ring-2 focus:ring-purple-500"
-                >
-                  {!isEdit && <option value="">{t('form.selectFrequency')}</option>}
-                  {CRON_PRESETS.filter((p) => p.value !== '__custom__').map((p) => (
-                    <option key={p.value} value={p.value}>
-                      {t(`cronPresets.${p.key}`)}
-                    </option>
-                  ))}
-                  <option value="__custom__">{t('form.customOption')}</option>
-                </select>
-              </div>
-
-              {showCustomCron && (
-                <input
-                  type="text"
-                  value={formData.cron}
-                  onChange={(e) => update({ cron: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none font-mono text-sm"
-                  placeholder="0 9 * * 1-5"
-                />
-              )}
-
-              {effectiveCron && (
-                <p className="text-xs text-purple-600 font-medium">{describeCron(effectiveCron)}</p>
-              )}
-
-              {/* Timezone + custom description */}
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">{t('form.timezoneLabel')}</label>
-                <select
-                  value={formData.timezone}
-                  onChange={(e) => update({ timezone: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg outline-none text-sm bg-white"
-                >
-                  <option value="Asia/Shanghai">{t('form.timezoneShanghai')}</option>
-                  <option value="UTC">UTC</option>
-                  <option value="America/New_York">America/New_York（UTC-5/4）</option>
-                  <option value="Europe/London">Europe/London（UTC+0/1）</option>
-                  <option value="Asia/Tokyo">Asia/Tokyo（UTC+9）</option>
-                </select>
-              </div>
-              <div>
-                <label className="block text-xs font-medium text-gray-600 mb-1">
-                  {t('form.cronDescLabel')}
-                  <span className="text-gray-400 font-normal ml-1">{t('form.cronDescHint')}</span>
-                </label>
-                <input
-                  type="text"
-                  value={formData.cronDescription}
-                  onChange={(e) => update({ cronDescription: e.target.value })}
-                  placeholder={effectiveCron ? describeCron(effectiveCron) : t('form.cronDescPlaceholder')}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none text-sm bg-white"
-                />
-              </div>
-            </>
-          )}
+            )}
+          </div>
         </div>
-      )}
 
-      {/* Execution mode + Agent/Workflow selector */}
+        {/* Scheduling config */}
+        {!isImmediate && (
+          <div className="space-y-3 border-t border-ui-border pt-3">
+            {/* Run-once mode: locked badge (edit) */}
+            {isEdit && isRunOnce && (
+              <div className="flex items-center gap-2 px-3 py-2 bg-ui-canvas border border-ui-border rounded-lg text-sm text-ui-action font-medium">
+                <Clock className="w-4 h-4" /> {t('form.runOnce')}
+              </div>
+            )}
+
+            {/* Once: datetime picker */}
+            {(isOnce || isRunOnce) && (
+              <div>
+                <label className="block text-xs font-medium text-ui-secondary mb-1">{t('form.execTimeLabel')}</label>
+                <input
+                  type="datetime-local"
+                  value={formData.runAt}
+                  onChange={(e) => update({ runAt: e.target.value })}
+                  className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg focus:ring-2 focus:ring-ui-control outline-none text-sm"
+                />
+              </div>
+            )}
+
+            {/* Recurring: cron preset + custom input */}
+            {!isOnce && !isRunOnce && isRecurring && (
+              <>
+                <div>
+                  <label className="block text-xs font-medium text-ui-secondary mb-1.5">
+                    {t('form.freqRecurringLabel')}
+                  </label>
+                  <select
+                    value={
+                      CRON_PRESETS.find((p) => p.value === formData.cron && p.value !== '__custom__')
+                        ? formData.cron
+                        : formData.cron
+                        ? '__custom__'
+                        : ''
+                    }
+                    onChange={(e) => {
+                      if (e.target.value !== '__custom__') {
+                        update({ cron: e.target.value });
+                      } else {
+                        update({ cron: '' });
+                      }
+                    }}
+                    className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg outline-none text-sm focus:ring-2 focus:ring-ui-control"
+                  >
+                    {!isEdit && <option value="">{t('form.selectFrequency')}</option>}
+                    {CRON_PRESETS.filter((p) => p.value !== '__custom__').map((p) => (
+                      <option key={p.value} value={p.value}>
+                        {t(`cronPresets.${p.key}`)}
+                      </option>
+                    ))}
+                    <option value="__custom__">{t('form.customOption')}</option>
+                  </select>
+                </div>
+
+                {showCustomCron && (
+                  <input
+                    type="text"
+                    value={formData.cron}
+                    onChange={(e) => update({ cron: e.target.value })}
+                    className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg focus:ring-2 focus:ring-ui-control outline-none font-mono text-sm"
+                    placeholder="0 9 * * 1-5"
+                  />
+                )}
+
+                {effectiveCron && showCustomCron && (
+                  <p className="text-xs text-ui-action font-medium">{describeCron(effectiveCron)}</p>
+                )}
+
+                {/* Timezone + custom description */}
+                <div>
+                  <label className="block text-xs font-medium text-ui-secondary mb-1">{t('form.timezoneLabel')}</label>
+                  <select
+                    value={formData.timezone}
+                    onChange={(e) => update({ timezone: e.target.value })}
+                    className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg outline-none text-sm"
+                  >
+                    <option value="Asia/Shanghai">{t('form.timezoneShanghai')}</option>
+                    <option value="UTC">UTC</option>
+                    <option value="America/New_York">America/New_York（UTC-5/4）</option>
+                    <option value="Europe/London">Europe/London（UTC+0/1）</option>
+                    <option value="Asia/Tokyo">Asia/Tokyo（UTC+9）</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-ui-secondary mb-1">
+                    {t('form.cronDescLabel')}
+                    <span className="text-ui-muted font-normal ml-1">{t('form.cronDescHint')}</span>
+                  </label>
+                  <input
+                    type="text"
+                    value={formData.cronDescription}
+                    onChange={(e) => update({ cronDescription: e.target.value })}
+                    placeholder={effectiveCron ? describeCron(effectiveCron) : t('form.cronDescPlaceholder')}
+                    className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg focus:ring-2 focus:ring-ui-control outline-none text-sm"
+                  />
+                </div>
+              </>
+            )}
+          </div>
+        )}
+
+      </section>
+
+      <section className="space-y-3 rounded-xl border border-ui-border bg-ui-surface p-4 sm:p-5">
+        <h3 className="flex items-center gap-2 text-sm font-semibold"><Settings2 className="size-4 text-ui-action" aria-hidden="true" />{t('taskSheet.executionConfig')}</h3>
       <div className="space-y-2.5">
         <div className="flex items-center gap-3">
-          <span className="w-14 shrink-0 text-sm font-medium text-gray-700">{t('form.modeLabel')}</span>
+          <span className="w-14 shrink-0 text-sm font-medium text-ui-text">{t('form.modeLabel')}</span>
           <PillGroup
+            inactiveClass="border-ui-border bg-ui-canvas text-ui-secondary hover:bg-ui-hover"
             options={[
-              { value: 'agent', label: 'Agent', activeClass: 'bg-slate-600 text-white border-slate-600' },
-              { value: 'workflow', label: 'Workflow', activeClass: 'bg-purple-600 text-white border-purple-600' },
+              { value: 'agent', label: 'Agent', activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
+              { value: 'workflow', label: 'Workflow', activeClass: 'border-ui-control bg-ui-selected text-ui-action' },
             ]}
             value={formData.executionMode}
             onChange={(v) => update({ executionMode: v })}
@@ -555,11 +556,11 @@ function TaskFormContent({
         </div>
         {formData.executionMode === 'agent' ? (
           <div className="flex items-center gap-3">
-            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Agent</span>
+            <span className="w-14 shrink-0 text-sm font-medium text-ui-text">Agent</span>
             <select
               value={formData.agentName}
               onChange={(e) => update({ agentName: e.target.value })}
-              className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-slate-400"
+              className="min-w-0 flex-1 px-3 py-1.5 border border-ui-border bg-ui-canvas rounded-lg outline-none text-sm focus:ring-2 focus:ring-ui-control"
             >
               {agents.length === 0 && (
                 <option value={formData.agentName}>{formData.agentName || 'rex'}</option>
@@ -577,11 +578,11 @@ function TaskFormContent({
         ) : (
           <div className="space-y-3">
             <div className="flex items-center gap-3">
-              <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Workflow</span>
+              <span className="w-14 shrink-0 text-sm font-medium text-ui-text">Workflow</span>
               <select
                 value={formData.workflowID}
                 onChange={(e) => update({ workflowID: e.target.value })}
-                className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-purple-500"
+                className="min-w-0 flex-1 px-3 py-1.5 border border-ui-border bg-ui-canvas rounded-lg outline-none text-sm focus:ring-2 focus:ring-ui-control"
               >
                 <option value="">{t('form.selectWorkflow')}</option>
                 {workflows.length === 0 && formData.workflowID && (
@@ -595,14 +596,14 @@ function TaskFormContent({
               </select>
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">
+              <label className="block text-sm font-medium text-ui-text mb-1">
                 {t('form.workflowParamsLabel')}
-                <span className="text-gray-400 font-normal text-xs ml-1">{t('form.workflowParamsHint')}</span>
+                <span className="text-ui-muted font-normal text-xs ml-1">{t('form.workflowParamsHint')}</span>
               </label>
               <textarea
                 value={formData.workflowContext}
                 onChange={(e) => update({ workflowContext: e.target.value })}
-                className="w-full min-h-[120px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-y text-sm font-mono"
+                className="w-full min-h-[120px] px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg focus:ring-2 focus:ring-ui-control outline-none resize-y text-sm font-mono"
                 spellCheck={false}
                 placeholder={t('form.workflowParamsPlaceholder')}
               />
@@ -611,76 +612,86 @@ function TaskFormContent({
         )}
       </div>
 
-      {/* User prompt with Atlas assist */}
-      <div>
-        <div className="flex items-center justify-between mb-1">
-          <label className="text-sm font-medium text-gray-700">
-            {t('form.additionalInfoLabel')}
-            <span className="text-gray-400 font-normal text-xs ml-1">{t('form.additionalInfoHint')}</span>
-          </label>
-          <button
-            type="button"
-            onClick={() =>
-              openRex(
-                formData.title
-                  ? `帮我为「${formData.title}」这个任务写一个详细的执行指令，让 Agent 知道具体要做什么。`
-                  : '帮我描述这个任务的具体执行指令，请先问我任务的目标和要求。',
-              )
-            }
-            className="flex items-center gap-1 text-xs text-sky-600 hover:text-sky-700 transition-colors"
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            {t('form.rexAssist')}
-          </button>
+        {/* User prompt with Atlas assist */}
+        <div>
+          <div className="flex items-center justify-between mb-1">
+            <label className="text-sm font-medium text-ui-text">
+              {t('form.additionalInfoLabel')}
+              <span className="text-ui-muted font-normal text-xs ml-1">{t('form.additionalInfoHint')}</span>
+            </label>
+            <button
+              type="button"
+              onClick={() =>
+                openRex(
+                  formData.title
+                    ? `帮我为「${formData.title}」这个任务写一个详细的执行指令，让 Agent 知道具体要做什么。`
+                    : '帮我描述这个任务的具体执行指令，请先问我任务的目标和要求。',
+                )
+              }
+              className="flex items-center gap-1 text-xs text-ui-action hover:underline transition-colors"
+            >
+              <Sparkles className="w-3.5 h-3.5" />
+              {t('form.rexAssist')}
+            </button>
+          </div>
+          <textarea
+            value={formData.userPrompt}
+            onChange={(e) => update({ userPrompt: e.target.value })}
+            className="w-full px-3 py-2 border border-ui-border bg-ui-canvas rounded-lg focus:ring-2 focus:ring-ui-control outline-none resize-none text-sm"
+            rows={3}
+            placeholder={t('form.additionalInfoPlaceholder')}
+          />
         </div>
-        <textarea
-          value={formData.userPrompt}
-          onChange={(e) => update({ userPrompt: e.target.value })}
-          className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-slate-400 outline-none resize-none text-sm"
-          rows={3}
-          placeholder={t('form.additionalInfoPlaceholder')}
-        />
-      </div>
+
+        {formData.executionMode === 'agent' && isRecurring && <p className="text-xs leading-5 text-ui-secondary">{t('taskSheet.selfContainedHint')}</p>}
+      </section>
 
       {task && (
-        <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4 space-y-3">
-          <p className="text-xs text-slate-600 leading-5">{t('taskSheet.selfContainedHint')}</p>
+        <section className="space-y-3 rounded-xl border border-ui-border bg-ui-surface p-4 sm:p-5">
+          <h3 className="flex items-center gap-2 text-sm font-semibold"><History className="size-4 text-ui-action" aria-hidden="true" />{t('taskSheet.recentRuns')}</h3>
           <div className="space-y-2">
-            <div className="text-sm font-medium text-slate-800">{t('taskSheet.recentRuns')}</div>
             {recordsLoading ? (
-              <div className="text-sm text-slate-500">{t('taskSheet.recentRunsLoading')}</div>
+              <div className="text-sm text-ui-secondary">{t('taskSheet.recentRunsLoading')}</div>
             ) : records.length === 0 ? (
-              <div className="text-sm text-slate-500">{t('taskSheet.recentRunsEmpty')}</div>
+              <div className="text-sm text-ui-secondary">{t('taskSheet.recentRunsEmpty')}</div>
             ) : (
               <div className="space-y-2">
                 {records.map((record) => (
-                  <div key={record.id} className="rounded-lg border border-slate-200 bg-white px-3 py-2">
+                  <div key={record.id} className="rounded-lg border border-ui-border bg-ui-canvas px-3 py-2">
                     <div className="flex items-center justify-between gap-3">
-                      <StatusBadge status={record.status} />
-                      <div className="text-xs text-slate-400">
+                      <div className="flex flex-wrap items-center gap-2"><StatusBadge status={record.status} /><ExecutionTriggerBadge type={record.triggerType} /></div>
+                      <div className="text-xs text-ui-muted">
                         {record.startedAt ? formatTime(record.startedAt) : '--'}
                       </div>
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-slate-500">
+                    <div className="mt-1 flex flex-wrap items-center gap-3 text-xs text-ui-secondary">
                       {record.durationMs != null && (
                         <span>{formatDuration(record.durationMs)}</span>
                       )}
                       {record.sessionID && (
-                        <span className="font-mono text-[11px] text-slate-400">{record.sessionID}</span>
+                        <span className="font-mono text-[11px] text-ui-muted">{record.sessionID}</span>
                       )}
                     </div>
                     {record.resultSummary && (
-                      <div className="mt-1 text-xs text-slate-600 line-clamp-2">{record.resultSummary}</div>
+                      <div className="mt-1 text-xs text-ui-secondary line-clamp-2">{record.resultSummary}</div>
                     )}
                     {record.error && (
-                      <div className="mt-1 text-xs text-red-500 line-clamp-2">{record.error}</div>
+                      <div className="mt-1 text-xs text-rose-700 dark:text-rose-300 line-clamp-2">{record.error}</div>
+                    )}
+                    {record.workflowID && record.executionMode === 'workflow' && record.startedAt && (
+                      <div className="mt-2">
+                        <button type="button" aria-expanded={expandedRun === record.id} onClick={() => setExpandedRun((current) => current === record.id ? null : record.id)} className="inline-flex items-center gap-1 rounded-md border border-ui-border px-2 py-1 text-xs font-medium text-ui-action hover:bg-ui-hover">
+                          {t('taskSheet.viewNodes')}<ChevronDown className={`size-3.5 ${expandedRun === record.id ? 'rotate-180' : ''}`} aria-hidden="true" />
+                        </button>
+                        {expandedRun === record.id && <WorkflowNodeHistory task={record} />}
+                      </div>
                     )}
                   </div>
                 ))}
               </div>
             )}
           </div>
-        </div>
+        </section>
       )}
     </div>
   );

@@ -1,8 +1,9 @@
 import {AgentIdentity, agentStyle} from '@/components/common/VisualIdentity';
 import { useState, useEffect, useMemo } from 'react';
-import { Bot, Plus, Cpu, Search, RefreshCw, Shield, Zap } from 'lucide-react';
+import { Bot, Plus, Cpu, Search, RefreshCw } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ResourceOverview from '@/components/common/ResourceOverview';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
@@ -168,7 +169,7 @@ export default function AgentPage() {
         </div>}
       />
 
-      <ResourceOverview items={[{ label: 'resourceTotal', value: visibleAgents(agents).length }, { label: 'resourcePrimary', value: agents.filter(a => a.mode === 'primary').length }, { label: 'resourceSubagents', value: visibleAgents(agents).filter(a => a.mode !== 'primary').length }, { label: 'resourceDelegatable', value: visibleAgents(agents).filter(a => a.delegatable).length }]} />
+      <ResourceOverview items={[{ label: 'resourceTotal', icon: 'catalog', value: visibleAgents(agents).length }, { label: 'resourcePrimary', icon: 'primary', value: agents.filter(a => a.mode === 'primary').length }, { label: 'resourceSubagents', icon: 'workers', value: visibleAgents(agents).filter(a => a.mode !== 'primary').length }, { label: 'resourceDelegatable', icon: 'delegate', value: visibleAgents(agents).filter(a => a.delegatable).length }]} />
 
       {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar — mirrors the Skill page toolbar style */}
@@ -204,7 +205,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.primary.title')}
                 subtitle={t('section.primary.subtitle')}
-                icon={<Shield className="w-4 h-4" />}
+                icon={<WorkspaceGlyph kind="primary" />}
                 agents={primaryAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}
@@ -221,7 +222,7 @@ export default function AgentPage() {
               <AgentSection
                 title={t('section.sub.title')}
                 subtitle={t('section.sub.subtitle')}
-                icon={<Zap className="w-4 h-4" />}
+                icon={<WorkspaceGlyph kind="workers" />}
                 agents={subAgents}
                 displayLang={i18n.language}
                 selectedAgent={editingAgent}

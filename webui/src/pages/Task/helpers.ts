@@ -1,13 +1,14 @@
+import type { WorkspaceGlyphKind } from '@/components/common/WorkspaceGlyph';
 import { TaskStatus } from '@/api/task';
 import i18n from '@/i18n';
 
-export const STATUS_CONFIG: Record<TaskStatus, { icon: string; color: string }> = {
-  pending:   { icon: '\u23f3', color: 'text-gray-500' },
-  queued:    { icon: '\ud83d\udccb', color: 'text-sky-600' },
-  running:   { icon: '\ud83d\udfe2', color: 'text-green-600' },
-  completed: { icon: '\u2705', color: 'text-green-500' },
-  failed:    { icon: '\u274c', color: 'text-red-500' },
-  cancelled: { icon: '\ud83d\udeab', color: 'text-gray-400' },
+export const STATUS_CONFIG: Record<TaskStatus, { icon: WorkspaceGlyphKind; color: string }> = {
+  pending:   { icon: 'duration', color: 'text-gray-500' },
+  queued:    { icon: 'queue', color: 'text-sky-600' },
+  running:   { icon: 'running', color: 'text-green-600' },
+  completed: { icon: 'check', color: 'text-green-500' },
+  failed:    { icon: 'fail', color: 'text-red-500' },
+  cancelled: { icon: 'paused', color: 'text-gray-400' },
 };
 
 export const PRIORITY_CONFIG: Record<string, { color: string }> = {

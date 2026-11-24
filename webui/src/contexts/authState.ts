@@ -10,7 +10,7 @@ export interface AuthContextValue {
   error: string | null;
   user: LocalUser | null;
   refresh: () => Promise<void>;
-  login: (username: string, password: string) => Promise<void>;
+  login: (username: string, password: string, onAuthenticated?: () => Promise<void>) => Promise<void>;
   bootstrapAdmin: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;

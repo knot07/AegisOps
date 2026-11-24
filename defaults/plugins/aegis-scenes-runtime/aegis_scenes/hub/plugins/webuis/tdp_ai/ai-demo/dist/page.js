@@ -1,4 +1,4 @@
-// D:/aegisops/aegisops/contracts/webui/shims/react.js
+// ../../../../../../../../../aegisops/contracts/webui/shims/react.js
 var React = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__?.React;
 if (!React) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing React).");
@@ -38,7 +38,7 @@ var {
   version
 } = React;
 
-// D:/aegisops/aegisops/contracts/webui/shims/sdk.js
+// ../../../../../../../../../aegisops/contracts/webui/shims/sdk.js
 var sdk = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__;
 if (!sdk) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing SDK).");
@@ -52,7 +52,50 @@ var useLanguage = sdk.useLanguage;
 var usePaneActive = sdk.usePaneActive;
 var useServerEvents = sdk.useServerEvents;
 
-// D:/aegisops/aegisops/contracts/webui/shims/jsx-runtime.js
+// src/model-brands.ts
+var brands = { "deepseek": { "id": "deepseek", "name": "DeepSeek", "accent": "#4267c7", "soft": "#edf2ff", "asset": "deepseek-color" }, "qwen": { "id": "qwen", "name": "\u901A\u4E49\u5343\u95EE", "accent": "#7754c6", "soft": "#f3effc", "asset": "qwen-color" }, "zhipu": { "id": "zhipu", "name": "\u667A\u8C31 GLM", "accent": "#496ec2", "soft": "#eff3fe", "asset": "zhipu-color" }, "minimax": { "id": "minimax", "name": "MiniMax", "accent": "#c16780", "soft": "#fcf0f3", "asset": "minimax-color" }, "stepfun": { "id": "stepfun", "name": "\u9636\u8DC3\u661F\u8FB0", "accent": "#497bd0", "soft": "#eff5ff", "asset": "stepfun-color" }, "doubao": { "id": "doubao", "name": "\u5B57\u8282\u8C46\u5305", "accent": "#4b82ce", "soft": "#edf4ff", "asset": "doubao-color" }, "wenxin": { "id": "wenxin", "name": "\u767E\u5EA6\u6587\u5FC3", "accent": "#426adb", "soft": "#edf1ff", "asset": "wenxin-color" }, "hunyuan": { "id": "hunyuan", "name": "\u817E\u8BAF\u6DF7\u5143", "accent": "#428bd4", "soft": "#edf6ff", "asset": "hunyuan-color" }, "spark": { "id": "spark", "name": "\u8BAF\u98DE\u661F\u706B", "accent": "#3989c4", "soft": "#eef7fc", "asset": "spark-color" }, "yi": { "id": "yi", "name": "\u96F6\u4E00\u4E07\u7269", "accent": "#548ac5", "soft": "#eef5fd", "asset": "yi-color" }, "baichuan": { "id": "baichuan", "name": "\u767E\u5DDD", "accent": "#c77d3b", "soft": "#fff4e8", "asset": "baichuan-color" }, "internlm": { "id": "internlm", "name": "\u4E66\u751F\u6D66\u8BED", "accent": "#5782cc", "soft": "#eef4ff", "asset": "internlm-color" }, "mistral": { "id": "mistral", "name": "Mistral", "accent": "#d17d31", "soft": "#fff2df", "asset": "mistral-color" }, "meta": { "id": "meta", "name": "Meta Llama", "accent": "#327ad3", "soft": "#edf4ff", "asset": "meta-color" }, "nvidia": { "id": "nvidia", "name": "NVIDIA", "accent": "#71a42e", "soft": "#f1f7e7", "asset": "nvidia-color" }, "perplexity": { "id": "perplexity", "name": "Perplexity", "accent": "#328a91", "soft": "#eaf7f7", "asset": "perplexity-color" }, "ai21": { "id": "ai21", "name": "AI21 Labs", "accent": "#91575d", "soft": "#faedef", "asset": "ai21-brand-color" }, "stability": { "id": "stability", "name": "Stability AI", "accent": "#7e55bf", "soft": "#f4effb", "asset": "stability-color" }, "xiaomi": { "id": "xiaomi", "name": "\u5C0F\u7C73 MiMo", "accent": "#d17b32", "soft": "#fff3e8", "asset": "xiaomimimo" }, "longcat": { "id": "longcat", "name": "\u7F8E\u56E2 LongCat", "accent": "#c29725", "soft": "#fff8df", "asset": "longcat-color" }, "huawei": { "id": "huawei", "name": "\u534E\u4E3A\u76D8\u53E4", "accent": "#be5c5a", "soft": "#fcf0ef", "asset": "huawei-color" }, "anthropic": { "id": "anthropic", "name": "Anthropic Claude", "accent": "#ad7354", "soft": "#fcf2e9", "asset": "anthropic" }, "google": { "id": "google", "name": "Google Gemini", "accent": "#4478c8", "soft": "#eff4fe", "asset": "google-color" }, "moonshot": { "id": "moonshot", "name": "\u6708\u4E4B\u6697\u9762 Kimi", "accent": "#546bb3", "soft": "#f0f3fd", "asset": "moonshot" }, "cohere": { "id": "cohere", "name": "Cohere", "accent": "#51876e", "soft": "#eff7ef", "asset": "cohere-color" }, "grok": { "id": "grok", "name": "xAI Grok", "accent": "#526075", "soft": "#f0f3f8", "asset": "grok" }, "openai": { "id": "openai", "name": "OpenAI", "accent": "#25846e", "soft": "#edf7f3", "asset": "openai" }, "azure": { "id": "azure", "name": "Microsoft Azure", "accent": "#258ec0", "soft": "#ebf7fd", "asset": "azure-color" }, "threatbook": { "id": "threatbook", "name": "\u5FAE\u6B65 ThreatBook", "accent": "#c86353", "soft": "#fcf0ec", "asset": "threatbook" }, "ollama": { "id": "ollama", "name": "Ollama", "accent": "#62726e", "soft": "#f1f6f3", "asset": "ollama" }, "openrouter": { "id": "openrouter", "name": "OpenRouter", "accent": "#67658d", "soft": "#f2f1fa", "asset": "openrouter-color" }, "siliconcloud": { "id": "siliconcloud", "name": "\u7845\u57FA\u6D41\u52A8", "accent": "#745fc0", "soft": "#f3effb", "asset": "siliconcloud-color" }, "volcengine": { "id": "volcengine", "name": "\u706B\u5C71\u5F15\u64CE", "accent": "#4186c4", "soft": "#edf5fd", "asset": "volcengine-color" }, "gitee": { "id": "gitee", "name": "Gitee AI", "accent": "#bb575d", "soft": "#fbf0ef", "asset": "giteeai" }, "compatible": { "id": "compatible", "name": "\u517C\u5BB9\u6A21\u578B\u670D\u52A1", "accent": "#8462bf", "soft": "#f4f0fc" }, "cherry": { "id": "cherry", "name": "Cherry", "accent": "#bf5772", "soft": "#fbf0f3" }, "custom": { "id": "custom", "name": "\u81EA\u5B9A\u4E49\u6A21\u578B\u670D\u52A1", "accent": "#738b53", "soft": "#f3f7ed" } };
+function modelBrand(value) {
+  const s = value.toLowerCase();
+  if (/deepseek/i.test(s)) return brands.deepseek;
+  if (/qwen|qwq|qvq|通义|百炼|dashscope/i.test(s)) return brands.qwen;
+  if (/glm|zhipu|智谱/i.test(s)) return brands.zhipu;
+  if (/minimax|abab|海螺/i.test(s)) return brands.minimax;
+  if (/stepfun|step[-_ ]|阶跃/i.test(s)) return brands.stepfun;
+  if (/doubao|豆包|seed[-_ ]/i.test(s)) return brands.doubao;
+  if (/ernie|wenxin|文心|千帆|qianfan/i.test(s)) return brands.wenxin;
+  if (/hunyuan|混元/i.test(s)) return brands.hunyuan;
+  if (/spark|星火|讯飞|iflytek/i.test(s)) return brands.spark;
+  if (/(^|[/ :])yi[-_ ]|零一万物|01ai/i.test(s)) return brands.yi;
+  if (/baichuan|百川/i.test(s)) return brands.baichuan;
+  if (/internlm|书生|浦语/i.test(s)) return brands.internlm;
+  if (/mistral|mixtral|codestral|ministral|devstral/i.test(s)) return brands.mistral;
+  if (/llama|meta[-_ ]/i.test(s)) return brands.meta;
+  if (/nemotron|nvidia/i.test(s)) return brands.nvidia;
+  if (/perplexity|sonar[-_ ]/i.test(s)) return brands.perplexity;
+  if (/ai21|jamba/i.test(s)) return brands.ai21;
+  if (/stability|stable[-_ ]/i.test(s)) return brands.stability;
+  if (/mimo|xiaomi|小米/i.test(s)) return brands.xiaomi;
+  if (/longcat|美团/i.test(s)) return brands.longcat;
+  if (/pangu|盘古|huawei/i.test(s)) return brands.huawei;
+  if (/anthropic|claude/i.test(s)) return brands.anthropic;
+  if (/google|gemini|gemma/i.test(s)) return brands.google;
+  if (/moonshot|kimi|月之暗面/i.test(s)) return brands.moonshot;
+  if (/cohere|command[-_ ]/i.test(s)) return brands.cohere;
+  if (/grok|xai/i.test(s)) return brands.grok;
+  if (/openai|gpt[-_ ]|(^|[/ :])o[1-9]([-_ :]|$)|chatgpt/i.test(s)) return brands.openai;
+  if (/azure/i.test(s)) return brands.azure;
+  if (/threatbook|微步/i.test(s)) return brands.threatbook;
+  if (/ollama/i.test(s)) return brands.ollama;
+  if (/openrouter/i.test(s)) return brands.openrouter;
+  if (/siliconflow|siliconcloud|硅基/i.test(s)) return brands.siliconcloud;
+  if (/volcengine|火山/i.test(s)) return brands.volcengine;
+  if (/gitee/i.test(s)) return brands.gitee;
+  if (/compatible/i.test(s)) return brands.compatible;
+  if (/cherry/i.test(s)) return brands.cherry;
+  return brands.custom;
+}
+
+// ../../../../../../../../../aegisops/contracts/webui/shims/jsx-runtime.js
 var runtime = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__;
 if (!runtime?.jsx || !runtime?.jsxs) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing jsx runtime).");
@@ -234,6 +277,22 @@ function useBrandLogo(storageKey) {
     setLogo(null);
   };
   return { logo, inputRef, chooseLogo, onLogoChange, resetLogo };
+}
+function loadSceneAssistant() {
+  const win = window;
+  if (win.AegisSceneAI) return Promise.resolve(win.AegisSceneAI);
+  if (win.aegisSceneAILoad) return win.aegisSceneAILoad;
+  win.aegisSceneAILoad = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = "/api/scenes/assistant/widget.js";
+    script.onload = () => resolve(win.AegisSceneAI);
+    script.onerror = () => {
+      win.aegisSceneAILoad = null;
+      reject(Error("AI \u52A9\u624B\u52A0\u8F7D\u5931\u8D25\uFF0C\u8BF7\u5237\u65B0\u540E\u91CD\u8BD5"));
+    };
+    document.head.append(script);
+  });
+  return win.aegisSceneAILoad;
 }
 function rowKey(row) {
   return row.row_key || row.aggregation_key || [row.ip, row.ioc || row.ip, row.threat_type || "", row.threat_name || ""].join("|");
@@ -428,17 +487,27 @@ function AIResultBadge({ row, onStart }) {
 }
 function Icon({ name, size = 18 }) {
   const paths = {
-    activity: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M3 12h4l3-8 4 16 3-8h4" }) }),
+    activity: /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsx("rect", { x: "3", y: "4", width: "18", height: "16", rx: "4", fill: "currentColor", fillOpacity: ".15" }),
+      /* @__PURE__ */ jsx("path", { d: "M6 12h3l2-4 2.5 7 1.5-3H18" })
+    ] }),
     bot: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("rect", { x: "5", y: "7", width: "14", height: "11", rx: "3" }),
-      /* @__PURE__ */ jsx("path", { d: "M12 3v4M9 12h.01M15 12h.01M8 18l-2 3M16 18l2 3" })
+      /* @__PURE__ */ jsx("rect", { x: "4", y: "7", width: "16", height: "13", rx: "5", fill: "currentColor", fillOpacity: ".15" }),
+      /* @__PURE__ */ jsx("path", { d: "M12 4v3m-3 6h.1m5.8 0h.1m-5 3q2 1.5 4 0" }),
+      /* @__PURE__ */ jsx("circle", { cx: "12", cy: "3.5", r: "1", fill: "currentColor" })
     ] }),
-    chart: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-7" }) }),
+    chart: /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsx("rect", { x: "3", y: "4", width: "18", height: "16", rx: "4", fill: "currentColor", fillOpacity: ".13" }),
+      /* @__PURE__ */ jsx("path", { d: "M7 16v-4m5 4V8m5 8v-6" })
+    ] }),
     clock: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("circle", { cx: "12", cy: "12", r: "8" }),
-      /* @__PURE__ */ jsx("path", { d: "M12 8v5l3 2" })
+      /* @__PURE__ */ jsx("path", { d: "M12 3a9 9 0 1 0 9 9h-9Z", fill: "currentColor", fillOpacity: ".14" }),
+      /* @__PURE__ */ jsx("path", { d: "M15 3v6h6a8 8 0 0 0-6-6Z" })
     ] }),
-    download: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M12 3v12M7 10l5 5 5-5M5 21h14" }) }),
+    download: /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsx("path", { d: "M4 14h4l2 2h4l2-2h4v5H4Z", fill: "currentColor", fillOpacity: ".14" }),
+      /* @__PURE__ */ jsx("path", { d: "M12 4v9m-3-3 3 3 3-3" })
+    ] }),
     calendar: /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsx("rect", { x: "3", y: "5", width: "18", height: "16", rx: "2" }),
       /* @__PURE__ */ jsx("path", { d: "M8 3v4M16 3v4M3 10h18" })
@@ -452,16 +521,18 @@ function Icon({ name, size = 18 }) {
       /* @__PURE__ */ jsx("path", { d: "M18 3v4h-4M6 21v-4h4" })
     ] }),
     shield: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("path", { d: "M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z" }),
-      /* @__PURE__ */ jsx("path", { d: "M9 12l2 2 4-5" })
+      /* @__PURE__ */ jsx("path", { d: "M12 3 20 6v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6Z", fill: "currentColor", fillOpacity: ".15" }),
+      /* @__PURE__ */ jsx("path", { d: "m8.5 12 2.5 2.5 4.5-5" })
     ] }),
     spark: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("path", { d: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" }),
-      /* @__PURE__ */ jsx("path", { d: "M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z" })
+      /* @__PURE__ */ jsx("path", { d: "M11 3c.5 4 3 6.5 7 7-4 .5-6.5 3-7 7-.5-4-3-6.5-7-7 4-.5 6.5-3 7-7Z", fill: "currentColor", fillOpacity: ".25" }),
+      /* @__PURE__ */ jsx("path", { d: "M18 15v6m-3-3h6" })
     ] }),
+    play: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "m8 5 11 7-11 7Z", fill: "currentColor", fillOpacity: ".2" }) }),
+    pause: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M8 6v12m8-12v12" }) }),
     x: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" }) })
   };
-  return /* @__PURE__ */ jsx("svg", { width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": "true", style: { display: "block" }, children: /* @__PURE__ */ jsx("g", { fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: paths[name] || paths.activity }) });
+  return /* @__PURE__ */ jsx("svg", { width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": "true", style: { display: "block" }, children: /* @__PURE__ */ jsx("g", { fill: "none", stroke: "currentColor", strokeWidth: "1.75", strokeLinecap: "round", strokeLinejoin: "round", children: paths[name] || paths.activity }) });
 }
 function TrendChart({ trend }) {
   const [hovered, setHovered] = useState(null);
@@ -564,25 +635,48 @@ function AttackTypePie({ rows }) {
     const angle = index * Math.PI * 2 / 72 - Math.PI / 2;
     return { index, category, angle };
   });
+  const [ringOverride, setRingOverride] = useState(null);
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    const update = () => setReducedMotion(media?.matches ?? false);
+    media?.addEventListener?.("change", update);
+    return () => media?.removeEventListener?.("change", update);
+  }, []);
+  const breathe = ringOverride ?? !reducedMotion;
   return /* @__PURE__ */ jsxs("div", { className: "dt-ring-body", children: [
-    /* @__PURE__ */ jsxs("svg", { role: "img", "aria-label": "\u653B\u51FB\u7C7B\u578B\u5360\u6BD4\u523B\u5EA6\u73AF", viewBox: "0 0 240 240", width: "100%", height: "156", onPointerLeave: () => setActive(null), style: { minWidth: 0, display: "block" }, children: [
-      ticks.map(({ index, category, angle }) => /* @__PURE__ */ jsx(
-        "line",
+    /* @__PURE__ */ jsxs("div", { className: "dt-ring-visual", children: [
+      sum > 0 && /* @__PURE__ */ jsx(
+        "button",
         {
-          x1: 120 + Math.cos(angle) * 87,
-          y1: 120 + Math.sin(angle) * 87,
-          x2: 120 + Math.cos(angle) * (index % 6 === 0 ? 105 : 101),
-          y2: 120 + Math.sin(angle) * (index % 6 === 0 ? 105 : 101),
-          stroke: category < 0 ? C.borderLight : palette[category % palette.length],
-          strokeWidth: "2.5",
-          strokeLinecap: "round",
-          opacity: active && entries[category]?.[0] !== active ? 0.22 : 1,
-          onPointerEnter: () => setActive(entries[category]?.[0] || null)
-        },
-        index
-      )),
-      /* @__PURE__ */ jsx("text", { x: "120", y: "118", textAnchor: "middle", fill: C.text, fontSize: "29", fontWeight: "720", children: (selected ? selected[1] : sum).toLocaleString() }),
-      /* @__PURE__ */ jsx("text", { x: "120", y: "141", textAnchor: "middle", fill: C.textMuted, fontSize: "11", children: selected ? selected[0] : "\u544A\u8B66\u603B\u91CF" })
+          type: "button",
+          className: "dt-ring-motion",
+          "aria-label": "\u544A\u8B66\u523B\u5EA6\u73AF\u547C\u5438\u52A8\u6548",
+          "aria-pressed": breathe,
+          title: breathe ? "\u6682\u505C\u547C\u5438\u52A8\u6548" : "\u64AD\u653E\u547C\u5438\u52A8\u6548",
+          onClick: () => setRingOverride(!breathe),
+          children: /* @__PURE__ */ jsx(Icon, { name: breathe ? "pause" : "play", size: 13 })
+        }
+      ),
+      /* @__PURE__ */ jsxs("svg", { role: "img", "aria-label": "\u653B\u51FB\u7C7B\u578B\u5360\u6BD4\u523B\u5EA6\u73AF", viewBox: "0 0 240 240", width: "100%", height: "156", onPointerLeave: () => setActive(null), style: { minWidth: 0, display: "block" }, children: [
+        /* @__PURE__ */ jsx("g", { className: "dt-ring-ticks", "data-breathing": sum > 0 && breathe && !active ? "on" : "off", children: ticks.map(({ index, category, angle }) => /* @__PURE__ */ jsx(
+          "line",
+          {
+            x1: 120 + Math.cos(angle) * 87,
+            y1: 120 + Math.sin(angle) * 87,
+            x2: 120 + Math.cos(angle) * (index % 6 === 0 ? 105 : 101),
+            y2: 120 + Math.sin(angle) * (index % 6 === 0 ? 105 : 101),
+            stroke: category < 0 ? C.borderLight : palette[category % palette.length],
+            strokeWidth: "2.5",
+            strokeLinecap: "round",
+            opacity: active && entries[category]?.[0] !== active ? 0.22 : 1,
+            onPointerEnter: () => setActive(entries[category]?.[0] || null)
+          },
+          index
+        )) }),
+        /* @__PURE__ */ jsx("text", { x: "120", y: "118", textAnchor: "middle", fill: C.text, fontSize: "29", fontWeight: "720", children: (selected ? selected[1] : sum).toLocaleString() }),
+        /* @__PURE__ */ jsx("text", { x: "120", y: "141", textAnchor: "middle", fill: C.textMuted, fontSize: "11", children: selected ? selected[0] : "\u544A\u8B66\u603B\u91CF" })
+      ] })
     ] }),
     /* @__PURE__ */ jsx("div", { style: { display: "grid", gap: 9, minWidth: 0, padding: "0 3px" }, children: entries.length ? entries.map(([label, value], index) => /* @__PURE__ */ jsxs("div", { onPointerEnter: () => setActive(label), onPointerLeave: () => setActive(null), style: { display: "grid", gridTemplateColumns: "48px minmax(40px,1fr) 83px", gap: 9, alignItems: "center", fontSize: 12, minWidth: 0 }, children: [
       /* @__PURE__ */ jsx("span", { style: { color: C.textDim, overflowWrap: "anywhere" }, children: label }),
@@ -616,7 +710,7 @@ function downloadCsv(rows) {
   const url = URL.createObjectURL(new Blob([csv], { type: "text/csv;charset=utf-8" }));
   const link = document.createElement("a");
   link.href = url;
-  link.download = `TDP_AI_${Date.now()}.csv`;
+  link.download = `AegisOps_AI_${Date.now()}.csv`;
   link.click();
   URL.revokeObjectURL(url);
 }
@@ -802,6 +896,95 @@ function Page() {
   const [pageSize, setPageSize] = useState(PAGE_SIZE);
   const [detailIp, setDetailIp] = useState(null);
   const [outputOpen, setOutputOpen] = useState(false);
+  const [vulnImports, setVulnImports] = useState({});
+  const importLocks = useRef(/* @__PURE__ */ new Set());
+  const importAlive = useRef(true);
+  useEffect(() => {
+    importAlive.current = true;
+    return () => {
+      importAlive.current = false;
+    };
+  }, []);
+  const askAlertAI = async () => {
+    try {
+      const host = window.parent !== window ? window.parent : window;
+      const ready = await new Promise((resolve) => {
+        const id = crypto.randomUUID();
+        const done2 = (ok) => {
+          clearTimeout(timer);
+          window.removeEventListener("message", receive);
+          resolve(ok);
+        };
+        const receive = (event) => {
+          if (event.origin === location.origin && event.source === host && event.data?.type === "aegis:scene-assistant-ready" && event.data.id === id) done2(true);
+        };
+        const timer = setTimeout(() => done2(false), 1800);
+        window.addEventListener("message", receive);
+        host.postMessage({ type: "aegis:scene-assistant-ping", id }, location.origin);
+      });
+      if (!ready) {
+        const last = Number(host.sessionStorage.getItem("aegis-onboarding-reload") || 0);
+        if (Date.now() - last < 6e4) throw Error("Atlas \u63A5\u5165\u9762\u677F\u672A\u80FD\u52A0\u8F7D\uFF0C\u8BF7\u5237\u65B0\u9875\u9762\u540E\u91CD\u8BD5\u3002");
+        host.sessionStorage.setItem("aegis-onboarding-reload", String(Date.now()));
+        host.sessionStorage.setItem("aegis-onboarding-pending", String(Date.now()));
+        host.location.reload();
+        return;
+      }
+      const assistant = await loadSceneAssistant();
+      assistant.open({ kind: "onboarding", title: "Atlas\u5FEB\u901F\u63A5\u5165\u4F7F\u7528", context: { environment: "demo", visible_rows: rows.slice((page - 1) * pageSize, page * pageSize).map((row) => ({ ip: row.ip, ioc: row.ioc, threat_name: row.threat_name, threat_type: row.threat_type, severity: row.severity, count: row.count, first_time: row.first_time, last_time: row.last_time, dst_ip: row.dst_ip, ai_status: row.ai_status })), scope: "\u4EC5\u5F53\u524D\u5206\u9875\u53EF\u89C1\u6570\u636E", time_range: { start: tdp.start_time, end: tdp.end_time } } });
+    } catch (e) {
+      alert(e.message || "AI \u52A9\u624B\u6682\u4E0D\u53EF\u7528");
+    }
+  };
+  const [irBusy, setIrBusy] = useState(false);
+  const [irMessage, setIrMessage] = useState("");
+  const [irUrl, setIrUrl] = useState("");
+  const transferIncident = async (row) => {
+    if (irBusy || !confirm("\u5C06\u6B64\u6F14\u793A\u544A\u8B66\u8F6C\u5165\u5E94\u6025\u5DE5\u4F5C\u53F0\u9884\u89C8\u8C03\u67E5\u6D41\u7A0B\uFF1F\u4E0D\u4F1A\u67E5\u8BE2\u771F\u5B9E\u8BBE\u5907\u3001\u8FDC\u7A0B\u4E0A\u673A\u6216\u4E0A\u4F20\u6837\u672C\u3002")) return;
+    setIrBusy(true);
+    setIrMessage("");
+    setIrUrl("");
+    try {
+      const response = await fetch("/api/scenes/incident/from-demo-alert", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ row_key: rowKey(row), first_time: row.first_time, confirmed: true }) });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "\u4E0B\u53D1\u5931\u8D25");
+      setIrUrl(result.url);
+      window.location.assign(result.url);
+    } catch (e) {
+      setIrMessage(e.message || "\u5E94\u6025\u4E0B\u53D1\u5931\u8D25");
+    } finally {
+      setIrBusy(false);
+    }
+  };
+  const transferVulnerability = async (row) => {
+    const key = rowKey(row);
+    if (importLocks.current.has(key)) return;
+    importLocks.current.add(key);
+    const update = (state) => {
+      if (importAlive.current) setVulnImports((prev) => ({ ...prev, [key]: state }));
+    };
+    update({ status: "pending" });
+    try {
+      const response = await fetch("/api/scenes/tdp/vulnerability-imports", { method: "POST", credentials: "same-origin", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ source: "ai", row_key: key, first_time: row.first_time, confirmed: true }) });
+      let result = await response.json();
+      if (!response.ok) throw new Error(result.detail || result.message || "\u8F6C\u5165\u5931\u8D25");
+      for (let attempt = 0; result.status === "pending" && attempt < 100; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        if (!importAlive.current) return;
+        const poll = await fetch("/api/scenes/tdp/vulnerability-imports/" + result.id, { credentials: "same-origin" });
+        const next = await poll.json();
+        if (!poll.ok) throw new Error(next.detail || next.message || "\u65E0\u6CD5\u83B7\u53D6\u5199\u5165\u8FDB\u5EA6");
+        result = next;
+      }
+      if (result.status === "pending") throw new Error("AI \u4ECD\u5728\u540E\u53F0\u5904\u7406\uFF0C\u53EF\u518D\u6B21\u70B9\u51FB\u67E5\u770B\u7ED3\u679C\uFF0C\u4E0D\u4F1A\u91CD\u590D\u5EFA\u6863\u3002");
+      if (result.status === "failed") throw new Error(result.error || "AI \u5EFA\u6863\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5");
+      update({ status: "completed", url: result.url });
+    } catch (error2) {
+      update({ status: "failed", error: error2 instanceof Error ? error2.message : "\u8F6C\u5165\u5931\u8D25\uFF0C\u8BF7\u91CD\u8BD5" });
+    } finally {
+      importLocks.current.delete(key);
+    }
+  };
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [updatedAt, setUpdatedAt] = useState(0);
@@ -1084,7 +1267,7 @@ function Page() {
   const detail = detailIp ? rows.find((r) => rowKey(r) === detailIp) : void 0;
   const cards = [
     ["\u6C47\u603B\u653B\u51FB", tdp.event_total ?? rows.reduce((s, r) => s + Number(r.count || 0), 0)],
-    ["\u6D41\u91CF\u68C0\u6D4B TDP", tdp.event_total ?? 0],
+    ["\u8BBE\u5907\u544A\u8B66", tdp.event_total ?? 0],
     ["\u653B\u51FB IP \u6570", rows.length],
     ["AI \u5DF2\u7814\u5224", done],
     ["AI \u7814\u5224\u4E2D", pending],
@@ -1092,7 +1275,7 @@ function Page() {
   ];
   const metricCards = [
     { label: "\u6C47\u603B\u653B\u51FB", value: cards[0][1], hint: "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u4E8B\u4EF6\u603B\u91CF", icon: "activity", accent: C.blue, soft: C.blueDark },
-    { label: "\u6D41\u91CF\u68C0\u6D4B TDP", value: cards[1][1], hint: "TDP \u544A\u8B66\u805A\u5408\u8F93\u51FA", icon: "shield", accent: C.cyan, soft: C.cyanDark },
+    { label: "\u8BBE\u5907\u544A\u8B66", value: cards[1][1], hint: "\u5DF2\u63A5\u5165\u8BBE\u5907\u544A\u8B66\u6C47\u603B", icon: "shield", accent: C.cyan, soft: C.cyanDark },
     { label: "\u653B\u51FB IP \u6570", value: cards[2][1], hint: "\u6309\u653B\u51FB\u6E90\u53BB\u91CD\u7EDF\u8BA1", icon: "chart", accent: C.red, soft: C.redDark },
     { label: "AI \u5DF2\u7814\u5224", value: cards[3][1], hint: "\u5DF2\u5F62\u6210\u5904\u7F6E\u5EFA\u8BAE", icon: "bot", accent: C.green, soft: C.greenDark },
     { label: "AI \u7814\u5224\u4E2D", value: cards[4][1], hint: "\u6B63\u5728\u6392\u961F\u6216\u8FD0\u884C", icon: "spark", accent: C.orange, soft: C.orangeDark },
@@ -1151,6 +1334,13 @@ function Page() {
       @media (max-width:1080px) { .dt-report-summary { grid-template-columns: minmax(0,1fr); gap: 18px; } .dt-report-columns { grid-template-columns: minmax(0,1fr); } }
       @media (max-width:760px) { .dt-report-summary { padding: 16px; } .dt-report-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .dt-report-content { padding: 18px 16px; } .dt-report-tabs { padding: 0 16px; } .dt-overview-fields { grid-template-columns: minmax(0,1fr); } }
       .dt-trend-body { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 18px; align-items: center; padding: 12px; min-width: 0; }
+      .dt-ring-visual { position: relative; min-width: 0; }
+      .dt-ring-motion { position:absolute; z-index:1; top:0; right:0; display:grid; place-items:center; width:26px; height:26px;
+        color:var(--dt-text-dim); background:var(--dt-panel-soft); border:1px solid var(--dt-border); border-radius:8px; cursor:pointer; }
+      .dt-ring-motion:focus-visible { outline:2px solid var(--dt-blue); outline-offset:2px; }
+      .dt-ring-ticks { transform-origin:120px 120px; }
+      .dt-ring-ticks[data-breathing="on"] { animation:dt-alert-ring-breathe 3.2s ease-in-out infinite; }
+      @keyframes dt-alert-ring-breathe { 0%,100% { opacity:.34; transform:scale(.98); } 50% { opacity:1; transform:scale(1.045); } }
       .dt-ring-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: center; min-width: 0; }
       [data-aegisops-theme] * { font-family: inherit; }
       [data-aegisops-theme] code, [data-aegisops-theme] pre { font-family: Consolas, monospace; }
@@ -1159,11 +1349,27 @@ function Page() {
       [data-layout="mobile"] header { padding: 16px 12px !important; }
       [data-layout="mobile"] h1 { font-size: 18px !important; }
       @media (prefers-reduced-motion: reduce) { [data-aegisops-theme] * { transition: none !important; } }
+
+ .review-atlas-entry,.review-refresh{background:linear-gradient(120deg,#b6e583,#9dd464)!important;color:#314e20!important;border:1px solid #9bc967!important;border-radius:10px!important;min-height:38px!important;font-size:13px!important;font-weight:600!important;box-shadow:0 3px 9px #648c351a!important;transition:background .18s,box-shadow .18s,transform .18s}
+ .review-atlas-entry:hover,.review-refresh:hover{background:linear-gradient(120deg,#a8dc71,#90c956)!important;box-shadow:0 4px 12px #648c3529!important;transform:translateY(-1px)}
+ .review-atlas-entry:active,.review-refresh:active{transform:translateY(0)}
+ .review-atlas-entry:focus-visible,.review-refresh:focus-visible{outline:3px solid #99c96766;outline-offset:3px}
+ .review-sync-chip{background:#f0f6e9!important;border-color:#dfe9d3!important;color:#6a844b!important;font-size:12px!important;font-weight:600;min-height:34px!important;border-radius:8px!important}
+ .review-time-chip{background:#f5f7f7!important;border-color:#e4e9e9!important;color:#7c898f!important;font-size:12px!important;font-weight:500;font-variant-numeric:tabular-nums;min-height:34px!important;border-radius:8px!important}
+ [data-tdp-stat]{min-height:48px!important;background:linear-gradient(115deg,#f2f7ec,#fff)!important;border-color:#e1ead9!important;border-radius:10px!important;box-shadow:none!important;padding:9px 13px!important}
+ [data-tdp-stat]>span:first-child{background:#e8f2dc!important;color:#6a9142!important;border-radius:9px!important;width:30px!important;height:30px!important}
+ [data-tdp-stat]>span:last-child>span{color:#4f5e57!important;font-size:13px!important;font-weight:600!important;line-height:1.4!important}
+ [data-tdp-stat] small{color:#839087!important;font-size:12px!important;font-weight:400!important;line-height:1.5!important}
+
     ` }),
+    /* @__PURE__ */ jsxs("nav", { "aria-label": "\u7814\u5224\u73AF\u5883\u5207\u6362", style: { display: "flex", gap: 8, padding: "12px 24px", borderBottom: `1px solid ${C.border}`, background: C.panel }, children: [
+      /* @__PURE__ */ jsx("a", { href: "/contracts/webui/workspaces/tdp_ai/ai", "aria-current": void 0, style: { padding: "7px 18px", borderRadius: 10, textDecoration: "none", fontSize: 13, fontWeight: 600, background: "transparent", color: C.textMuted }, children: "\u6B63\u5F0F\u7814\u5224" }),
+      /* @__PURE__ */ jsx("a", { href: "/contracts/webui/workspaces/tdp_ai/ai-demo", "aria-current": "page", style: { padding: "7px 18px", borderRadius: 10, textDecoration: "none", fontSize: 13, fontWeight: 600, background: "#edf4e5", color: "#526e3d" }, children: "\u6F14\u793A\u5E73\u53F0" })
+    ] }),
     /* @__PURE__ */ jsxs("header", { style: topbarStyle, children: [
       /* @__PURE__ */ jsxs("div", { style: brandStyle, children: [
         /* @__PURE__ */ jsxs("div", { style: { position: "relative" }, children: [
-          /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u66F4\u6362 Logo", title: "\u70B9\u51FB\u66F4\u6362 Logo", onClick: brandLogo.chooseLogo, style: brandLogoStyle, children: brandLogo.logo ? /* @__PURE__ */ jsx("img", { src: brandLogo.logo, alt: "\u5DE5\u4F5C\u53F0 Logo", style: { maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: "contain" } }) : /* @__PURE__ */ jsx("span", { style: { color: C.textDim, fontSize: 12, fontWeight: 600 }, children: "\uFF0B \u4E0A\u4F20 Logo" }) }),
+          /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u66F4\u6362 Logo", title: "\u70B9\u51FB\u66F4\u6362 Logo", onClick: brandLogo.chooseLogo, style: brandLogoStyle, children: brandLogo.logo ? /* @__PURE__ */ jsx("img", { src: brandLogo.logo, alt: "\u5DE5\u4F5C\u53F0 Logo", style: { maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: "contain" } }) : /* @__PURE__ */ jsx("img", { "data-scene-logo": "review", src: "/api/scenes/assistant/logos/review.svg", alt: "\u6001\u52BF\u611F\u77E5 AI \u7814\u5224 Logo", style: { width: 48, height: 48, objectFit: "contain" } }) }),
           /* @__PURE__ */ jsx("input", { ref: brandLogo.inputRef, type: "file", accept: "image/png,image/jpeg,image/webp,image/svg+xml", onChange: brandLogo.onLogoChange, style: { display: "none" } }),
           brandLogo.logo && /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u6062\u590D\u9ED8\u8BA4 Logo", title: "\u6062\u590D\u9ED8\u8BA4 Logo", onClick: brandLogo.resetLogo, style: resetLogoButtonStyle, children: "\xD7" })
         ] }),
@@ -1176,15 +1382,19 @@ function Page() {
         ] })
       ] }),
       /* @__PURE__ */ jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: isMobile ? "flex-start" : "flex-end" }, children: [
-        /* @__PURE__ */ jsxs("span", { style: chipStyle, children: [
+        /* @__PURE__ */ jsxs("button", { type: "button", className: "review-atlas-entry", onClick: () => void askAlertAI(), style: { ...secondaryButton, color: "#526d42", borderColor: "#d8e4cc", background: "#f3f7ee" }, children: [
+          /* @__PURE__ */ jsx(Icon, { name: "spark", size: 15 }),
+          "Atlas\u5FEB\u901F\u63A5\u5165\u4F7F\u7528"
+        ] }),
+        /* @__PURE__ */ jsxs("span", { className: "review-sync-chip", style: chipStyle, children: [
           /* @__PURE__ */ jsx("span", { style: { ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green } }),
           syncText
         ] }),
-        /* @__PURE__ */ jsxs("span", { style: chipStyle, children: [
+        /* @__PURE__ */ jsxs("span", { className: "review-time-chip", style: chipStyle, children: [
           /* @__PURE__ */ jsx(Icon, { name: "clock", size: 16 }),
           error || fmtTime(updatedAt)
         ] }),
-        /* @__PURE__ */ jsxs("button", { type: "button", title: "\u7ACB\u5373\u5237\u65B0", onClick: () => void loadDashboard(), style: primaryButton, children: [
+        /* @__PURE__ */ jsxs("button", { type: "button", className: "review-refresh", title: "\u7ACB\u5373\u5237\u65B0", onClick: () => void loadDashboard(), style: primaryButton, children: [
           /* @__PURE__ */ jsx(Icon, { name: "refresh", size: 16 }),
           loading ? "\u5237\u65B0\u4E2D" : "\u5237\u65B0"
         ] })
@@ -1250,11 +1460,7 @@ function Page() {
           ] }),
           /* @__PURE__ */ jsx("span", { style: { width: 48, height: 26, padding: 3, borderRadius: 999, background: autoJudge ? C.blue : C.borderLight, flex: "0 0 auto", display: "flex", justifyContent: autoJudge ? "flex-end" : "flex-start", transition: ".2s" }, children: /* @__PURE__ */ jsx("span", { style: { display: "block", width: 20, height: 20, borderRadius: "50%", background: "#fff", boxShadow: "0 3px 8px rgba(28,44,66,.18)" } }) })
         ] }),
-        /* @__PURE__ */ jsxs("div", { "aria-label": "\u5F53\u524DAI\u6A21\u578B", title: currentModel.modelId ? `${currentModel.providerId}/${currentModel.modelId}` : currentModel.error, style: syncFieldStyle, children: [
-          /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: "\u5F53\u524DAI\u6A21\u578B" }),
-          /* @__PURE__ */ jsx("span", { style: { display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: currentModel.modelId ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }, children: currentModel.modelId || currentModel.error || "\u8BFB\u53D6\u4E2D" }),
-          currentModel.providerId && /* @__PURE__ */ jsx("small", { style: { color: C.textMuted, marginTop: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: currentModel.providerId })
-        ] }),
+        /* @__PURE__ */ jsx(CurrentModelCard, { model: currentModel }),
         /* @__PURE__ */ jsxs("div", { style: { ...syncFieldStyle, borderColor: error ? C.red : C.border }, children: [
           /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: error ? "\u8FDE\u63A5\u5F02\u5E38" : "\u6700\u8FD1\u66F4\u65B0" }),
           /* @__PURE__ */ jsx("span", { style: { color: error ? C.redLight : C.textMid, fontSize: 14, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, children: error || fmtTime(updatedAt) })
@@ -1297,7 +1503,7 @@ function Page() {
       /* @__PURE__ */ jsxs("section", { style: { ...panelStyle, height: 782, minHeight: 782, maxHeight: 782, boxSizing: "border-box", padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }, children: [
         /* @__PURE__ */ jsxs("div", { style: { ...sectionHeadStyle, marginBottom: 0, padding: "20px 20px 14px", borderBottom: `1px solid ${C.border}`, flex: "0 0 auto" }, children: [
           /* @__PURE__ */ jsxs("div", { style: { minWidth: 0 }, children: [
-            /* @__PURE__ */ jsx("h2", { style: sectionTitleStyle, children: "TDP \u653B\u51FB\u6E90\u5217\u8868" }),
+            /* @__PURE__ */ jsx("h2", { style: sectionTitleStyle, children: "\u544A\u8B66\u4E8B\u4EF6\u5217\u8868" }),
             /* @__PURE__ */ jsxs("p", { style: sectionDescStyle, children: [
               "\u5171 ",
               rows.length,
@@ -1311,7 +1517,7 @@ function Page() {
             ] })
           ] }),
           /* @__PURE__ */ jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }, children: [
-            /* @__PURE__ */ jsx(MiniStat, { icon: "shield", label: "TDP\u5217\u8868", value: `${rows.length} \u4E2A\u7814\u5224\u4E8B\u4EF6` }),
+            /* @__PURE__ */ jsx(MiniStat, { icon: "shield", label: "\u544A\u8B66\u5217\u8868", value: `${rows.length} \u4E2A\u7814\u5224\u4E8B\u4EF6` }),
             /* @__PURE__ */ jsx(MiniStat, { icon: "bot", label: "AI\u7814\u5224", value: `${done} \u5DF2\u5B8C\u6210 / ${pending} \u8FDB\u884C\u4E2D` }),
             /* @__PURE__ */ jsxs("button", { onClick: () => downloadCsv(rows), style: secondaryButton, children: [
               /* @__PURE__ */ jsx(Icon, { name: "download", size: 15 }),
@@ -1352,7 +1558,7 @@ function Page() {
             rows.length > 0 && Array.from({ length: Math.max(0, 10 - pageRows.length) }, (_, index) => /* @__PURE__ */ jsx("tr", { "aria-hidden": "true", style: { height: 58, background: (pageRows.length + index) % 2 ? C.rowAlt : "transparent" }, children: /* @__PURE__ */ jsx("td", { colSpan: 9, style: { ...tdStyle, color: "transparent" }, children: "\xA0" }) }, `empty-row-${index}`))
           ] })
         ] }) }),
-        !rows.length && /* @__PURE__ */ jsx("div", { style: { padding: 38, textAlign: "center", color: C.textMuted }, children: loading ? "\u6B63\u5728\u83B7\u53D6 TDP \u6570\u636E..." : error || "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u6682\u65E0\u6570\u636E" }),
+        !rows.length && /* @__PURE__ */ jsx("div", { style: { padding: 38, textAlign: "center", color: C.textMuted }, children: loading ? "\u6B63\u5728\u83B7\u53D6\u8BBE\u5907\u544A\u8B66..." : error || "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u6682\u65E0\u6570\u636E" }),
         /* @__PURE__ */ jsx("div", { style: { position: "relative", zIndex: 10, display: "flex", justifyContent: "flex-end", alignItems: "center", height: 64, minHeight: 64, maxHeight: 64, boxSizing: "border-box", padding: "10px 18px", borderTop: `1px solid ${C.border}`, background: C.panel, flex: "0 0 auto", overflow: "visible" }, children: /* @__PURE__ */ jsx(Pager, { current: page, total: pages, totalItems: rows.length, pageSize, onChange: setPage, onPageSizeChange: (nextPageSize) => {
           setPageSize(nextPageSize);
           setPage(1);
@@ -1368,7 +1574,7 @@ function Page() {
           /* @__PURE__ */ jsx("strong", { style: { color: C.text, fontSize: 20, lineHeight: 1.25 }, children: "\u544A\u8B66\u7814\u5224\u8BE6\u60C5" }),
           /* @__PURE__ */ jsxs("div", { style: { display: "flex", alignItems: "center", gap: 9, marginTop: 5, color: C.textDim, fontSize: 12, flexWrap: "wrap" }, children: [
             /* @__PURE__ */ jsx("code", { style: inlineCodeStyle, children: detail.ip }),
-            /* @__PURE__ */ jsx("span", { children: detail.threat_name || "TDP \u544A\u8B66\u7814\u5224" }),
+            /* @__PURE__ */ jsx("span", { children: detail.threat_name || "\u544A\u8B66\u7814\u5224" }),
             /* @__PURE__ */ jsx("span", { children: "\xB7" }),
             /* @__PURE__ */ jsx("span", { children: fmtTime(detail.last_time || detail.first_time) })
           ] })
@@ -1379,14 +1585,15 @@ function Page() {
         }, style: closeStyle, children: /* @__PURE__ */ jsx(Icon, { name: "x", size: 20 }) })
       ] }),
       /* @__PURE__ */ jsx(ReviewReport, { row: detail, compact: isCompact }, rowKey(detail)),
+      /* @__PURE__ */ jsx("div", { style: { padding: "10px 20px", borderTop: `1px solid ${C.border}`, background: C.panel, color: C.textMuted, fontSize: 12 }, children: "\u5F53\u524D\u4E3A\u6F14\u793A\u73AF\u5883\uFF0C\u5E94\u6025\u54CD\u5E94\u4EC5\u9884\u89C8\u6D41\u7A0B\uFF0C\u4E0D\u8FDE\u63A5\u771F\u5B9E\u8BBE\u5907\u3002\u6F0F\u6D1E\u5EFA\u6863\u8BF7\u5207\u6362\u6B63\u5F0F\u73AF\u5883\u3002" }),
+      /* @__PURE__ */ jsx("div", { style: { padding: "8px 20px", color: C.textMuted, fontSize: 12 }, "aria-live": "polite", children: irMessage }),
       /* @__PURE__ */ jsxs("div", { style: reportActionsStyle, children: [
+        /* @__PURE__ */ jsx("button", { type: "button", disabled: irBusy, onClick: () => void transferIncident(detail), style: { ...primaryButton, background: "#3f6749", color: "#fff" }, children: irBusy ? "\u6B63\u5728\u8F6C\u5165\u2026" : "\u5E94\u6025\u54CD\u5E94" }),
+        /* @__PURE__ */ jsx("button", { disabled: true, title: "\u6F14\u793A\u6570\u636E\u4E0D\u5199\u5165\u6B63\u5F0F\u53F0\u8D26", style: { ...secondaryButton, opacity: 0.5 }, children: "\u8F6C\u5165\u6F0F\u6D1E\u5E93" }),
         /* @__PURE__ */ jsxs("button", { disabled: detail.ai_status === "pending", title: detail.ai_status === "done" ? "\u91CD\u65B0\u6267\u884C\u56FA\u5B9A\u5DE5\u4F5C\u6D41\u5E76\u7528\u6700\u65B0\u7ED3\u679C\u66F4\u65B0\u5F53\u524D\u8BE6\u60C5" : detail.ai_status === "pending" ? "\u7814\u5224\u6B63\u5728\u6267\u884C" : "\u5F00\u59CBAI\u7814\u5224", onClick: () => detail.ai_status === "done" ? void launchJudgement(detail, true) : detail.ai_status !== "pending" ? void startJudge(detail) : void 0, style: { ...primaryButton, opacity: detail.ai_status === "pending" ? 0.58 : 1, cursor: detail.ai_status === "pending" ? "not-allowed" : "pointer" }, children: [
           /* @__PURE__ */ jsx(Icon, { name: detail.ai_status === "done" ? "spark" : "bot", size: 15 }),
           detail.ai_status === "done" ? "\u4E8C\u6B21\u7814\u5224" : detail.ai_status === "pending" ? "\u7814\u5224\u4E2D" : "AI\u7814\u5224"
-        ] }),
-        /* @__PURE__ */ jsx("button", { onClick: () => void openWorkbench(detail), style: secondaryButton, children: "\u67E5\u770B\u5DE5\u4F5C\u53F0" }),
-        /* @__PURE__ */ jsx("button", { disabled: !detail.ai_raw_output && !detail.ai_progress, onClick: () => setOutputOpen(true), style: { ...secondaryButton, opacity: detail.ai_raw_output || detail.ai_progress ? 1 : 0.45 }, children: "AI\u8F93\u51FA\u5168\u6587" }),
-        /* @__PURE__ */ jsx("button", { onClick: () => setDetailIp(null), style: secondaryButton, children: "\u5173\u95ED" })
+        ] })
       ] })
     ] }) }),
     detail && outputOpen && /* @__PURE__ */ jsx("div", { onClick: () => setOutputOpen(false), style: { ...modalMask, zIndex: 1100 }, children: /* @__PURE__ */ jsxs("div", { onClick: (e) => e.stopPropagation(), style: { ...modalCard, width: "min(920px, 96vw)" }, children: [
@@ -1401,7 +1608,7 @@ function Page() {
 var topbarStyle = { minHeight: 80, boxSizing: "border-box", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 18, padding: "18px 28px", background: C.panel, borderBottom: `1px solid ${C.border}`, position: "sticky", top: 0, zIndex: 10, flexWrap: "wrap" };
 var brandStyle = { display: "flex", alignItems: "center", flexWrap: "wrap", gap: 14, minWidth: 0 };
 var brandTitleStyle = { margin: 0, color: C.text, fontSize: 22, lineHeight: 1.3, fontWeight: 720, letterSpacing: 0 };
-var brandLogoStyle = { minWidth: 44, height: 40, display: "grid", placeItems: "center", borderRadius: 6, padding: "0 10px", background: C.panel, border: `1px solid ${C.borderLight}`, boxShadow: "0 4px 12px rgba(28,44,66,.06)" };
+var brandLogoStyle = { minWidth: 44, height: 52, display: "grid", placeItems: "center", borderRadius: 0, padding: 0, background: "transparent", border: 0, boxShadow: "none" };
 var resetLogoButtonStyle = { position: "absolute", top: -7, right: -7, width: 18, height: 18, display: "grid", placeItems: "center", padding: 0, border: `1px solid ${C.border}`, borderRadius: "50%", background: C.panel, color: C.textDim, cursor: "pointer", fontSize: 14, lineHeight: 1 };
 var chipStyle = { minHeight: 32, maxWidth: "100%", boxSizing: "border-box", padding: "6px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.panelSoft, display: "inline-flex", alignItems: "center", gap: 8, overflowWrap: "anywhere", color: C.textDim, fontSize: 12 };
 var statusDotStyle = { width: 7, height: 7, borderRadius: "50%", flex: "0 0 auto" };
@@ -1462,10 +1669,10 @@ var closeStyle = { width: 32, height: 32, display: "grid", placeItems: "center",
 var primaryButton = { minHeight: 36, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, background: "var(--dt-control)", color: "var(--dt-control-text)", border: "1px solid transparent", borderRadius: 8, padding: "0 14px", cursor: "pointer", fontSize: 13, fontWeight: 650, boxShadow: "0 3px 10px rgba(16,20,24,.16), inset 0 1px 0 rgba(255,255,255,.12)" };
 var secondaryButton = { minHeight: 36, display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 7, background: C.panel, color: C.textMid, border: `1px solid ${C.borderLight}`, borderRadius: 8, padding: "0 13px", cursor: "pointer", fontSize: 13, fontWeight: 600, boxShadow: "0 1px 2px rgba(46,58,62,.04), inset 0 1px 0 rgba(255,255,255,.12)" };
 function MiniStat({ icon, label, value }) {
-  return /* @__PURE__ */ jsxs("div", { style: { minHeight: 36, display: "inline-flex", alignItems: "center", gap: 8, padding: "6px 10px", borderRadius: 6, border: `1px solid ${C.border}`, background: C.panelSoft, color: C.textMid }, children: [
-    /* @__PURE__ */ jsx("span", { style: { color: C.blueLight }, children: /* @__PURE__ */ jsx(Icon, { name: icon, size: 15 }) }),
-    /* @__PURE__ */ jsxs("span", { style: { display: "grid", gap: 1, lineHeight: 1.1 }, children: [
-      /* @__PURE__ */ jsx("b", { style: { color: C.text, fontSize: 12, fontWeight: 800 }, children: label }),
+  return /* @__PURE__ */ jsxs("div", { "data-tdp-stat": true, style: { minHeight: 44, display: "inline-flex", alignItems: "center", gap: 10, padding: "7px 12px", borderRadius: 12, border: `1px solid ${C.border}`, background: C.panel, color: C.textMid }, children: [
+    /* @__PURE__ */ jsx("span", { style: { width: 28, height: 28, display: "grid", placeItems: "center", borderRadius: 9, background: C.greenDark, color: C.greenLight }, children: /* @__PURE__ */ jsx(Icon, { name: icon, size: 15 }) }),
+    /* @__PURE__ */ jsxs("span", { style: { display: "grid", gap: 3, lineHeight: 1.25 }, children: [
+      /* @__PURE__ */ jsx("span", { style: { color: C.textMid, fontSize: 12, fontWeight: 500 }, children: label }),
       /* @__PURE__ */ jsx("small", { style: { color: C.textDim, fontSize: 11, whiteSpace: "nowrap" }, children: value })
     ] })
   ] });
@@ -1625,9 +1832,9 @@ function HttpEvidencePanel({ items }) {
             /* @__PURE__ */ jsxs("div", { style: { padding: 12 }, children: [
               /* @__PURE__ */ jsxs("div", { style: packetHeadStyle, children: [
                 /* @__PURE__ */ jsx("strong", { style: { color: C.text }, children: "\u8BF7\u6C42\u5305" }),
-                /* @__PURE__ */ jsx("span", { style: { ...packetStatusStyle, color: requestAvailable ? C.greenLight : C.orangeLight, background: requestAvailable ? C.greenDark : C.orangeDark }, children: item.request_status || "TDP\u539F\u59CB\u544A\u8B66\u672A\u91C7\u96C6" })
+                /* @__PURE__ */ jsx("span", { style: { ...packetStatusStyle, color: requestAvailable ? C.greenLight : C.orangeLight, background: requestAvailable ? C.greenDark : C.orangeDark }, children: item.request_status || "\u539F\u59CB\u544A\u8B66\u672A\u91C7\u96C6" })
               ] }),
-              requestAvailable ? /* @__PURE__ */ jsx("code", { style: packetLineStyle, children: item.request_line || "\u8BF7\u6C42\u884C\u672A\u91C7\u96C6" }) : /* @__PURE__ */ jsx("div", { style: packetEmptyStyle, children: "TDP \u539F\u59CB\u544A\u8B66\u4E2D\u6CA1\u6709\u8BF7\u6C42\u884C\u548C\u8BF7\u6C42\u4F53\u3002" }),
+              requestAvailable ? /* @__PURE__ */ jsx("code", { style: packetLineStyle, children: item.request_line || "\u8BF7\u6C42\u884C\u672A\u91C7\u96C6" }) : /* @__PURE__ */ jsx("div", { style: packetEmptyStyle, children: "\u8BBE\u5907\u539F\u59CB\u544A\u8B66\u4E2D\u6CA1\u6709\u8BF7\u6C42\u884C\u548C\u8BF7\u6C42\u4F53\u3002" }),
               /* @__PURE__ */ jsxs("div", { style: packetByteStyle, children: [
                 "\u5BA2\u6237\u7AEF\u5230\u670D\u52A1\u7AEF ",
                 item.bytes_to_server || 0,
@@ -1642,12 +1849,12 @@ function HttpEvidencePanel({ items }) {
           /* @__PURE__ */ jsx("div", { style: packetColumnStyle, children: /* @__PURE__ */ jsxs("div", { style: { padding: 12 }, children: [
             /* @__PURE__ */ jsxs("div", { style: packetHeadStyle, children: [
               /* @__PURE__ */ jsx("strong", { style: { color: C.text }, children: "\u54CD\u5E94\u5305" }),
-              /* @__PURE__ */ jsx("span", { style: { ...packetStatusStyle, color: responseAvailable ? C.greenLight : C.orangeLight, background: responseAvailable ? C.greenDark : C.orangeDark }, children: item.response_status || "TDP\u539F\u59CB\u544A\u8B66\u672A\u91C7\u96C6" })
+              /* @__PURE__ */ jsx("span", { style: { ...packetStatusStyle, color: responseAvailable ? C.greenLight : C.orangeLight, background: responseAvailable ? C.greenDark : C.orangeDark }, children: item.response_status || "\u539F\u59CB\u544A\u8B66\u672A\u91C7\u96C6" })
             ] }),
             responseAvailable ? /* @__PURE__ */ jsxs(Fragment2, { children: [
               /* @__PURE__ */ jsx("code", { style: packetLineStyle, children: item.response_line || "\u54CD\u5E94\u884C\u672A\u91C7\u96C6" }),
               /* @__PURE__ */ jsx("pre", { style: { ...packetBodyStyle, marginTop: 8, border: "none", borderRadius: 4 }, children: item.response_body || "\u54CD\u5E94\u4F53\u4E3A\u7A7A" })
-            ] }) : /* @__PURE__ */ jsx("div", { style: packetEmptyStyle, children: "TDP \u539F\u59CB\u544A\u8B66\u7684\u54CD\u5E94\u884C\u548C\u54CD\u5E94\u4F53\u4E3A\u7A7A\uFF0C\u4E0D\u80FD\u636E\u6B64\u5224\u65AD\u653B\u51FB\u662F\u5426\u6210\u529F\u3002" }),
+            ] }) : /* @__PURE__ */ jsx("div", { style: packetEmptyStyle, children: "\u8BBE\u5907\u539F\u59CB\u544A\u8B66\u7684\u54CD\u5E94\u884C\u548C\u54CD\u5E94\u4F53\u4E3A\u7A7A\uFF0C\u4E0D\u80FD\u636E\u6B64\u5224\u65AD\u653B\u51FB\u662F\u5426\u6210\u529F\u3002" }),
             /* @__PURE__ */ jsxs("div", { style: packetByteStyle, children: [
               "\u670D\u52A1\u7AEF\u5230\u5BA2\u6237\u7AEF ",
               item.bytes_to_client || 0,
@@ -1676,6 +1883,28 @@ function EvidenceSection({ title, items, tone }) {
       /* @__PURE__ */ jsx("span", { style: { ...checkStyle, color: C.textMuted, background: C.panelSoft }, children: index + 1 }),
       /* @__PURE__ */ jsx("span", { style: { minWidth: 0 }, children: evidenceText(item) })
     ] }, index)) : /* @__PURE__ */ jsx("div", { style: { color: C.textMuted, fontSize: 13 }, children: "\u65E0" }) })
+  ] });
+}
+function CurrentModelCard({ model }) {
+  const initial = modelBrand(model.modelId || ""), b = initial.id !== "custom" ? initial : modelBrand(model.providerId || "");
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [b.asset]);
+  return /* @__PURE__ */ jsxs("div", { "aria-label": "\u5F53\u524DAI\u6A21\u578B", "data-current-model-brand": b.id, title: model.modelId ? `${model.providerId}/${model.modelId}` : model.error, style: { ...syncFieldStyle, display: "flex", alignItems: "center", gap: 13, background: `linear-gradient(120deg,${b.soft},#fff)`, borderColor: `color-mix(in srgb, ${b.accent} 18%, white)` }, children: [
+    /* @__PURE__ */ jsx("span", { style: { width: 42, height: 42, display: "grid", placeItems: "center", flexShrink: 0, background: "#ffffffb0", borderRadius: 10, padding: 6 }, children: b.asset && !failed ? /* @__PURE__ */ jsx("img", { src: "/model-logos/" + b.asset + ".svg", alt: b.name + " Logo", onError: () => setFailed(true), style: { width: "100%", height: "100%", objectFit: "contain" } }) : /* @__PURE__ */ jsxs("svg", { viewBox: "0 0 32 32", fill: b.accent, width: "28", height: "28", children: [
+      /* @__PURE__ */ jsx("path", { d: "M16 2 29 9v14l-13 7L3 23V9Zm0 6-8 4v8l8 4 8-4v-8Z", fillRule: "evenodd" }),
+      /* @__PURE__ */ jsx("path", { d: "m16 11 5 3v5l-5 3-5-3v-5Z" })
+    ] }) }),
+    /* @__PURE__ */ jsxs("div", { style: { minWidth: 0 }, children: [
+      /* @__PURE__ */ jsxs("span", { style: { ...syncLabelStyle, fontSize: 11 }, children: [
+        "\u5F53\u524D AI \u6A21\u578B \xB7 ",
+        b.name
+      ] }),
+      /* @__PURE__ */ jsx("span", { style: { display: "block", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: b.accent, fontSize: 15, fontWeight: 650, marginTop: 3 }, children: model.modelId || model.error || "\u8BFB\u53D6\u4E2D" }),
+      model.providerId && /* @__PURE__ */ jsxs("small", { style: { display: "block", color: C.textMuted, fontSize: 11, marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }, children: [
+        "\u63A5\u5165\u6E20\u9053 \xB7 ",
+        model.providerId
+      ] })
+    ] })
   ] });
 }
 

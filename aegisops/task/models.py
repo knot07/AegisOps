@@ -44,6 +44,7 @@ class ExecutionTriggerType(str, Enum):
     RUN_ONCE = "run_once"
     SCHEDULED = "scheduled"
     RERUN = "rerun"
+    RUN_NOW = "run_now"
 
 
 class ExecutionMode(str, Enum):

@@ -289,6 +289,11 @@
 .aegis-model-brand-icon.is-composer-choice{width:25px;height:25px;padding:4px;border-radius:8px;box-shadow:none}
 button[data-chat-model-choice]{background:linear-gradient(110deg,var(--brand-soft),#fff 90%)!important;border:1px solid color-mix(in srgb,var(--brand-accent) 12%,white)!important;border-radius:10px!important;margin:3px 0;min-height:38px}
 button[data-chat-model-choice]:hover{border-color:color-mix(in srgb,var(--brand-accent) 40%,white)!important}
+html.dark button[data-chat-model-choice]{background:var(--bg-surface,#1a222d)!important;border-color:var(--border-subtle,#344253)!important;color:var(--text-primary,#edf2f7)}
+html.dark button[data-chat-model-choice]:hover{background:var(--bg-hover,#293645)!important;border-color:var(--border-control,#526478)!important}
+html.dark button[data-chat-model-choice][aria-pressed=true]{background:var(--bg-selected,#2a3c35)!important;border-color:var(--border-control,#526478)!important}
+html.dark button[data-chat-model-choice]:focus-visible{outline:2px solid var(--focus-ring,#a6caf5);outline-offset:2px}
+html.dark button[data-chat-model-choice] svg.lucide-info{color:var(--text-secondary,#bdc9d6)}
 
 /* Shared vendor logos and resource editors. */
 .aegis-resource-vendor-logo{width:26px;height:26px;object-fit:contain;filter:none}

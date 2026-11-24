@@ -1,8 +1,8 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Radio,
-  Save,
   Download,
   Eye,
   EyeOff,
@@ -3173,7 +3173,7 @@ function DetailHeader({
     isBusy ? (
       <Loader2 className="w-4 h-4 animate-spin" />
     ) : (
-      <Save className="w-4 h-4" />
+      <WorkspaceGlyph kind="save" size="xs" />
     );
 
   return (
@@ -3226,12 +3226,12 @@ function DetailHeader({
             onClick={onRestart}
             disabled={restarting || isBusy}
             title={t('restartHint')}
-            className="flex items-center gap-1.5 px-3 py-2 text-sm border border-gray-300 text-gray-600 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+            className="channel-toolbar-button channel-toolbar-button--secondary"
           >
             {restarting ? (
               <Loader2 className="w-4 h-4 animate-spin" />
             ) : (
-              <RotateCcw className="w-4 h-4" />
+              <WorkspaceGlyph kind="reset" size="xs" />
             )}
             {restarting ? t('restarting') : t('restart')}
           </button>
@@ -3239,7 +3239,7 @@ function DetailHeader({
         <button
           onClick={onSave}
           disabled={isBusy}
-          className="flex items-center gap-1.5 px-4 py-2 text-sm bg-slate-800 text-white rounded-lg hover:bg-slate-900 disabled:opacity-50 transition-colors"
+          className="channel-toolbar-button channel-toolbar-button--primary"
         >
           {saveIcon}
           {saveLabel}
@@ -3270,9 +3270,9 @@ function StatsStrip({
   return (
     <div className="flex gap-3 mb-4 max-md:grid max-md:grid-cols-3 max-md:gap-2">
       {[
-        { label: t('stats.total'), value: total, icon: <Radio className="w-4 h-4 text-gray-400" /> },
-        { label: t('stats.enabled'), value: enabled, icon: <CheckCircle className="w-4 h-4 text-slate-500" /> },
-        { label: t('stats.running'), value: running, icon: <Activity className="w-4 h-4 text-green-500" /> },
+        { label: t('stats.total'), value: total, icon: <WorkspaceGlyph kind="radio" size="xs" /> },
+        { label: t('stats.enabled'), value: enabled, icon: <WorkspaceGlyph kind="enabled" size="xs" /> },
+        { label: t('stats.running'), value: running, icon: <WorkspaceGlyph kind="signal" size="xs" /> },
       ].map((stat) => (
         <div
           key={stat.label}
@@ -3672,7 +3672,7 @@ export default function ChannelPage() {
                 : 'border-gray-300 text-gray-600 hover:bg-gray-50'
             }`}
           >
-            <RefreshCw className={`w-4 h-4 transition-transform ${refreshingStatus ? 'animate-spin' : ''}`} />
+            <WorkspaceGlyph kind="refresh" size="xs" className={refreshingStatus ? 'motion-safe:[&>svg]:animate-spin' : ''} />
             {refreshingStatus ? t('refreshing') : refreshDone ? t('refreshed') : t('refreshStatus')}
           </button>
         }

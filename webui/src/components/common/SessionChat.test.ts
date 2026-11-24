@@ -4209,6 +4209,55 @@ describe('SessionChat intermediate process collapse', () => {
     expect(toolStep.querySelector('summary [role="img"]')).toHaveAttribute('aria-label', '已完成');
   });
 
+  it('keeps the same live timeline row as a real tool moves from running to completed', () => {
+    const makeTurn = (status: 'running' | 'completed' | 'error') => makeMessage({
+      id: 'timeline-motion', role: 'assistant', timestamp: 1000,
+      parts: [
+        { id: 'reason', type: 'reasoning', text: '准备读取', time: { start: 1000, end: 1500 } },
+        { id: 'read', type: 'tool', tool: 'read', callID: 'read-1', state: { status, input: { filePath: 'notes.md' } } },
+      ],
+    });
+    const renderTurn = (status: 'running' | 'completed' | 'error', isActive: boolean) => React.createElement(ChatMessageBubble, {
+      message: makeTurn(status), isActive, collapseIntermediateSteps: true, processGroupsDefaultOpen: true,
+    });
+    const { rerender } = render(renderTurn('running', true));
+    const timeline = screen.getByTestId('chat-process-timeline');
+    const row = timeline.querySelector('li[data-kind="tool"]');
+    expect(timeline).toHaveAttribute('data-live');
+    expect(timeline.closest('[data-chat-assistant-card]')).toHaveClass('session-reply-card');
+    expect(row).toHaveAttribute('data-state', 'running');
+    expect(timeline.querySelector('li[data-kind="reasoning"]')).toHaveAttribute('data-state', 'completed');
+    rerender(renderTurn('completed', true));
+    expect(timeline.querySelector('li[data-kind="tool"]')).toBe(row);
+    expect(row).toHaveAttribute('data-state', 'completed');
+    rerender(renderTurn('error', false));
+    expect(row).toHaveAttribute('data-state', 'error');
+    expect(timeline).not.toHaveAttribute('data-live');
+  });
+
+  it('does not highlight a stopped stream or unfinished tool as completed', () => {
+    const message = makeMessage({
+      id: 'stopped-timeline', role: 'assistant', timestamp: 1000,
+      error: { code: 'MessageAbortedError', message: 'Stopped' },
+      parts: [
+        { id: 'partial', type: 'reasoning', text: '尚未结束', time: { start: 1000, end: 1500 } },
+        { id: 'waiting', type: 'tool', tool: 'read', callID: 'read-1', state: { status: 'pending' } },
+      ],
+    });
+    render(React.createElement(ChatMessageBubble, { message, collapseIntermediateSteps: true, processGroupsDefaultOpen: true }));
+    const timeline = screen.getByTestId('chat-process-timeline');
+    expect(timeline.querySelector('[data-state="completed"], [data-state="running"]')).toBeNull();
+  });
+
+  it('wraps an ordinary user message in a single user card without flattening Markdown', () => {
+    const message = makeMessage({ id: 'user-card', role: 'user', parts: [{ id: 'text', type: 'text', text: '**你好**' }] });
+    render(React.createElement(ChatMessageBubble, { message }));
+    const text = screen.getByText('你好');
+    expect(text.tagName).toBe('STRONG');
+    expect(text.closest('[data-chat-user-card]')).toHaveClass('session-user-card');
+    expect(text.closest('[data-chat-assistant-card]')).toBeNull();
+  });
+
   it('hides the reasoning preview while the reasoning body is expanded', () => {
     render(React.createElement(ChatMessageBubble, {
       message: makeMessage({
@@ -4372,7 +4421,7 @@ describe('SessionChat intermediate process collapse', () => {
     expect(summaryStep.querySelector('svg')).not.toBeInTheDocument();
     expect(summaryStep.className).not.toContain('pl-');
     expect(summaryStep.querySelector('.border-l')).not.toBeInTheDocument();
-    expect(summaryStep.parentElement?.parentElement).toBe(reasoningStep.parentElement?.parentElement);
+    expect(summaryStep.closest('li')?.parentElement).toBe(reasoningStep.closest('li')?.parentElement);
   });
 
   it('keeps a user-opened process group open when new tool parts arrive', async () => {

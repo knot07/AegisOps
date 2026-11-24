@@ -385,3 +385,34 @@ async def test_detail_has_stable_url_without_changing_archive_access(client, ses
 
 def test_session_web_url_encodes_one_path_segment() -> None:
     assert session_routes._session_web_url("ses/a?b#c") == "/sessions/ses%2Fa%3Fb%23c"
+
+
+@pytest.mark.asyncio
+async def test_worker_progress_scopes_detail_and_preserves_completed_result(monkeypatch) -> None:
+    from unittest.mock import AsyncMock
+    from fastapi import HTTPException, Response
+    from aegisops.session import superagent_dispatch
+    from aegisops.session.message import Message
+
+    parent = SimpleNamespace(id="p", scheduling_mode="superagent")
+    child = SimpleNamespace(id="c", parent_id="p", category="task", title="Fixture (@worker subagent)", agent="worker")
+    foreign = SimpleNamespace(id="f", parent_id="elsewhere", category="task")
+    record = {"parent": "p", "worker": "c", "state": "completed", "report": "Fixture verified", "scope": "internal instructions"}
+    step = SimpleNamespace(id="step", type="tool", tool="read", state=SimpleNamespace(status="completed", time={"start": 1}, input={"secret": "hidden"}))
+    message = SimpleNamespace(info=SimpleNamespace(role="assistant"), parts=[step])
+    monkeypatch.setattr(session_routes, "require_user", lambda request: "viewer")
+    monkeypatch.setattr(session_routes, "_get_session_by_id_unfiltered", AsyncMock(side_effect={"p": parent, "c": child, "f": foreign}.get))
+    monkeypatch.setattr(session_routes.SessionPolicy, "can_read", lambda session, user: True)
+    monkeypatch.setattr(superagent_dispatch, "records", AsyncMock(return_value=[record, {**record, "worker": "f"}]))
+    monkeypatch.setattr(Message, "list_recent_with_parts", AsyncMock(return_value=([message], False, None)))
+
+    progress = await session_routes.get_worker_progress("p", None, Response())
+    assert [(item["sessionID"], item["state"]) for item in progress["tasks"]] == [("c", "completed")]
+    detail = await session_routes.get_worker_detail("c", None, Response())
+    assert detail["report"] == "Fixture verified"
+    assert detail["steps"] == [{"id": "step", "tool": "read", "status": "completed", "startedAt": 1}]
+    assert "scope" not in detail
+    monkeypatch.setattr(session_routes.SessionPolicy, "can_read", lambda session, user: session.id != "p")
+    with pytest.raises(HTTPException) as error:
+        await session_routes.get_worker_detail("c", None, Response())
+    assert error.value.status_code == 403

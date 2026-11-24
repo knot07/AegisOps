@@ -628,6 +628,9 @@ async def create_execution_record(
     *,
     input_params: Optional[Dict[str, Any]] = None,
     exec_id: Optional[str] = None,
+    trigger_id: Optional[str] = None,
+    trigger_type: Optional[str] = None,
+    attempt: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Build and persist a running workflow execution record.
 
@@ -644,6 +647,9 @@ async def create_execution_record(
         input_params=compacted_params,
         exec_id=exec_id,
     )
+    exec_data.update({key: value for key, value in {
+        "triggerId": trigger_id, "triggerType": trigger_type, "attempt": attempt,
+    }.items() if value is not None})
     await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
     start_renewal(exec_data)
     return exec_data

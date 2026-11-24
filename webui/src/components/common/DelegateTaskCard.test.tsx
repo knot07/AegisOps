@@ -13,7 +13,7 @@ vi.mock('react-i18next', () => ({
       const translations: Record<string, string> = {
         'delegate.delegatedTo': '委派给 {{agent}}',
         'delegate.pending': '等待中',
-        'delegate.running': '执行中',
+        'worker.states.running': '执行中',
         'delegate.completed': '已完成',
         'delegate.background': '后台',
         'delegate.elapsedRunning': '已运行',
@@ -183,11 +183,30 @@ describe('DelegateTaskCard process step', () => {
     expect(processStep).toHaveTextContent('调研 OpenClaw 最新版本');
     expect(processStep).toHaveTextContent('执行中');
     expect(processStep).toHaveTextContent('后台');
-    expect(processStep.querySelector('summary')).toHaveClass('text-sm');
+    expect(processStep.querySelector('summary')).toBeNull();
 
     fireEvent.click(screen.getByRole('button', { name: /查看执行过程/ }));
 
     expect(screen.getByTestId('delegate-detail-sheet')).toHaveTextContent('ses-child');
+  });
+});
+
+describe('themed delegate card', () => {
+  it.each([false, true])('normalizes historical Worker names and exposes details without opening the result (processStep: %s)', (processStep) => {
+    const part = {
+      id: 'part-historic', type: 'tool', tool: 'delegate_task',
+      state: {
+        status: 'completed', input: { subagent_type: 'Rex-junior', description: 'Review scheduler modes' },
+        metadata: { sessionId: 'ses-worker', submitted: true, status: 'completed', result: 'Report ready' },
+      },
+    } as MessagePart;
+    const { container } = render(<DelegateTaskCard part={part} processStep={processStep} />);
+    expect(screen.getByText('委派给 Atlas Worker')).toBeInTheDocument();
+    expect(container).not.toHaveTextContent(/rex-junior/i);
+    expect(container.querySelector('details')).not.toHaveAttribute('open');
+    fireEvent.click(screen.getByRole('button', { name: '查看执行过程' }));
+    expect(screen.getByTestId('delegate-detail-sheet')).toHaveTextContent('ses-worker');
+    expect(container.querySelector('details')).not.toHaveAttribute('open');
   });
 });
 

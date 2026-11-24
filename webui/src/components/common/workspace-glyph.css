@@ -1,0 +1,38 @@
+.workspace-glyph {
+  --glyph-ink:#286858;
+  --glyph-pigment:#40ad8e;
+  display:inline-grid;
+  place-items:center;
+  flex:none;
+  vertical-align:middle;
+  width:25px;
+  height:25px;
+  border-radius:8px;
+  background:color-mix(in srgb,var(--glyph-pigment) 14%,transparent);
+}
+.workspace-glyph[data-tone=violet] { --glyph-ink:#6747ab;--glyph-pigment:#9b72ed; }
+.workspace-glyph[data-tone=blue] { --glyph-ink:#23699b;--glyph-pigment:#4c9fdf; }
+.workspace-glyph[data-tone=amber] { --glyph-ink:#895415;--glyph-pigment:#df9e37; }
+.dark .workspace-glyph { --glyph-ink:#86ddc2; }
+.dark .workspace-glyph[data-tone=violet] { --glyph-ink:#c8b0ff; }
+.dark .workspace-glyph[data-tone=blue] { --glyph-ink:#96cfff; }
+.dark .workspace-glyph[data-tone=amber] { --glyph-ink:#f6cb8c; }
+.workspace-glyph > svg { display:block;width:17px;height:17px; }
+.workspace-glyph .glyph-fill { fill:color-mix(in srgb,var(--glyph-pigment) 29%,transparent); }
+.workspace-glyph .glyph-dot { fill:var(--glyph-ink);stroke:none; }
+.workspace-glyph--xs { width:20px;height:20px;border-radius:6px; }
+.workspace-glyph--xs > svg { width:15px;height:15px; }
+.workspace-glyph--lg { width:36px;height:36px;border-radius:11px; }
+.workspace-glyph--lg > svg { width:22px;height:22px; }
+.workspace-glyph--empty { width:52px;height:52px;border-radius:16px; }
+.workspace-glyph--empty > svg { width:30px;height:30px; }
+.aegis-empty > .workspace-glyph > svg { width:30px;height:30px;padding:0;background:none; }
+.aegis-quick-start > a > .workspace-glyph { display:inline-grid;margin:0; }
+
+.workspace-glyph[data-tone=rose] { --glyph-ink:#a44147;--glyph-pigment:#ee8084; }
+.dark .workspace-glyph[data-tone=rose] { --glyph-ink:#ffadb0; }
+.workspace-glyph--micro { width:16px;height:16px;border-radius:4px; }
+.workspace-glyph--micro > svg { width:12px;height:12px; }
+.workspace-glyph.glyph-search-field { position:absolute; inset-inline-start:10px; top:50%; transform:translateY(-50%); pointer-events:none; }
+.workspace-glyph.animate-spin { animation:none; }
+@media (prefers-reduced-motion:no-preference) { .workspace-glyph.animate-spin > svg { animation:spin 1s linear infinite; } }

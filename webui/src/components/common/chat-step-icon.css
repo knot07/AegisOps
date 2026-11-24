@@ -8,3 +8,5 @@
 @keyframes chat-step-turn{to{transform:rotate(360deg)}}
 @keyframes chat-step-breathe{50%{opacity:.55}}
 @media(prefers-reduced-motion:reduce){.chat-step-icon__orbit,.chat-step-icon--active{animation:none}}
+
+.session-process-timeline .session-process-step .chat-step-icon { color:var(--step-color); }

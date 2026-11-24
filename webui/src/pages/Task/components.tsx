@@ -1,16 +1,22 @@
-import { CheckCircle2, AlertCircle, Loader2, Calendar, Bot, Workflow } from 'lucide-react';
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
+import { Workflow } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import { TaskStatus, ExecutionMode, DashboardCounts } from '@/api/task';
+import { TaskStatus, ExecutionMode, DashboardCounts, ExecutionTriggerType } from '@/api/task';
 import { STATUS_CONFIG, PRIORITY_CONFIG, SOURCE_CONFIG } from './helpers';
 
 export function StatusBadge({ status }: { status: TaskStatus }) {
   const { t } = useTranslation('task');
-  const cfg = STATUS_CONFIG[status] ?? { icon: '·', color: 'text-gray-500' };
+  const cfg = STATUS_CONFIG[status] ?? { icon: 'paused', color: 'text-ui-secondary' };
   return (
     <span className={`inline-flex items-center gap-1 text-sm font-medium ${cfg.color}`}>
-      {cfg.icon} {t(`status.${status}`, { defaultValue: status })}
+      <WorkspaceGlyph kind={cfg.icon} size="micro" /> {t(`status.${status}`, { defaultValue: status })}
     </span>
   );
+}
+
+export function ExecutionTriggerBadge({ type }: { type: ExecutionTriggerType }) {
+  const { t } = useTranslation('task');
+  return <span className="inline-flex rounded-full bg-ui-hover px-2 py-0.5 text-xs text-ui-secondary">{t(`executionTrigger.${type}`, { defaultValue: t('executionTrigger.unknown') })}</span>;
 }
 
 export function PriorityBadge({ priority }: { priority: string }) {
@@ -35,8 +41,8 @@ export function SourceBadge({ sourceType }: { sourceType: string }) {
 
 export function ModeBadge({ mode, agent }: { mode: ExecutionMode; agent: string }) {
   if (mode === 'workflow')
-    return <span className="inline-flex items-center gap-1 text-xs text-purple-600"><Workflow className="w-3 h-3" /> Workflow</span>;
-  return <span className="inline-flex items-center gap-1 text-xs text-slate-600"><Bot className="w-3 h-3" /> {agent}</span>;
+    return <span className="inline-flex items-center gap-1 text-xs text-purple-600"><WorkspaceGlyph kind="flow" size="micro" /> Workflow</span>;
+  return <span className="inline-flex items-center gap-1 text-xs text-slate-600"><WorkspaceGlyph kind="agent" size="micro" /> {agent}</span>;
 }
 
 export function ActionButton({ icon, label, onClick, color }: {
@@ -59,16 +65,16 @@ export function ActionButton({ icon, label, onClick, color }: {
 export function DashboardCards({ counts }: { counts: DashboardCounts | null }) {
   const { t } = useTranslation('task');
   const cards = [
-    { label: t('dashboard.completedWeek'),   value: counts?.completed_week ?? 0,  icon: <CheckCircle2 className="w-5 h-5 text-emerald-500" />, bg: 'bg-emerald-50' },
-    { label: t('dashboard.scheduledActive'), value: counts?.scheduled_active ?? 0, icon: <Calendar className="w-5 h-5 text-purple-500" />,     bg: 'bg-purple-50' },
-    { label: t('dashboard.running'),         value: counts?.running ?? 0,          icon: <Loader2 className="w-5 h-5 text-sky-600" />,         bg: 'bg-sky-50' },
-    { label: t('dashboard.failedWeek'),      value: counts?.failed_week ?? 0,      icon: <AlertCircle className="w-5 h-5 text-red-500" />,      bg: 'bg-red-50' },
+    { label: t('dashboard.completedWeek'),   value: counts?.completed_week ?? 0,  icon: <WorkspaceGlyph kind="check" size="lg" />, bg: 'bg-emerald-50' },
+    { label: t('dashboard.scheduledActive'), value: counts?.scheduled_active ?? 0, icon: <WorkspaceGlyph kind="schedule" size="lg" />,     bg: 'bg-purple-50' },
+    { label: t('dashboard.running'),         value: counts?.running ?? 0,          icon: <WorkspaceGlyph kind="running" size="lg" />,         bg: 'bg-sky-50' },
+    { label: t('dashboard.failedWeek'),      value: counts?.failed_week ?? 0,      icon: <WorkspaceGlyph kind="fail" size="lg" />,      bg: 'bg-red-50' },
   ];
   return (
     <div className="yushu-task-overview grid grid-cols-2 md:grid-cols-4 gap-3">
       {cards.map(card => (
         <div key={card.label} className={`${card.bg} rounded-xl p-4 flex items-center gap-3 max-md:gap-2 max-md:p-3`}>
-          <div className="p-2 bg-white rounded-lg shadow-sm">{card.icon}</div>
+          {card.icon}
           <div>
             <p className="text-xl font-bold text-gray-900">{card.value}</p>
             <p className="text-xs text-gray-500">{card.label}</p>

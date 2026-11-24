@@ -37,7 +37,7 @@ html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-skin-options>button[ari
 html[data-theme-skin]:not([data-theme-skin=sage]) .yushu-theme-preview i:nth-child(2){background:var(--skin-buttonTo)!important}
 /* Dashboard graphics must follow the same palette as its primary actions. */
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-trend{background:radial-gradient(ellipse at 0 0,var(--skin-selected),transparent 72%),var(--skin-surface)!important}
-html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-gauge{background:conic-gradient(var(--skin-accent) calc(var(--rate) * 1%),var(--skin-border) 0)!important}
+html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-gauge{--gauge-accent:var(--skin-accent);--gauge-track:var(--skin-border)}
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-resource-list i{background:var(--skin-buttonTo)}
 html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-resource-list svg,.aegis-quick-start>a>svg:first-child){color:var(--skin-accent)}
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-quick-start>a>svg:first-child{background:var(--skin-selected)}

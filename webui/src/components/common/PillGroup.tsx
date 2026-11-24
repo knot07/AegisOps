@@ -10,11 +10,13 @@ export default function PillGroup<T extends string>({
   value,
   onChange,
   disabled,
+  inactiveClass = 'bg-white text-gray-500 border-gray-300 hover:border-gray-400 hover:text-gray-700',
 }: {
   options: PillOption<T>[];
   value: T;
   onChange: (v: T) => void;
   disabled?: boolean;
+  inactiveClass?: string;
 }) {
   return (
     <div className="flex flex-wrap gap-2">
@@ -23,11 +25,12 @@ export default function PillGroup<T extends string>({
           key={opt.value}
           type="button"
           disabled={disabled}
+          aria-pressed={value === opt.value}
           onClick={() => onChange(opt.value)}
           className={`px-3 py-1.5 rounded-full text-sm font-medium border transition-colors ${
             value === opt.value
               ? opt.activeClass
-              : 'bg-white text-gray-500 border-gray-300 hover:border-gray-400 hover:text-gray-700'
+              : inactiveClass
           } ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
         >
           {opt.label}

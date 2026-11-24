@@ -1,17 +1,16 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Archive,
-  CheckSquare,
   ChevronDown,
   ChevronRight,
   Copy,
   Download,
   Folder,
   FolderInput,
-  FolderPlus,
   History,
   Loader2,
   MessageSquarePlus,
@@ -818,14 +817,14 @@ export default function SessionHistoryPanel({ collapsed, hideHeading = false, on
       <div className="flex items-center gap-0.5 px-2 pb-1.5">
         <span className="flex-1 text-xs font-medium uppercase tracking-wide text-ui-secondary">{!hideHeading && t('history.title')}</span>
         <button type="button" onClick={() => { setSearchOpen((open) => !open); setTimeout(() => searchInputRef.current?.focus(), 0); }} className={iconButtonClass} title={t('history.search')} aria-label={t('history.search')} aria-expanded={searchOpen}>
-          <Search className="h-4 w-4" />
+          <WorkspaceGlyph kind="search" size="xs" />
         </button>
         <button type="button" onClick={() => setFolderDialog({ mode: 'create' })} className={iconButtonClass} title={t('history.newFolder')} aria-label={t('history.newFolder')}>
-          <FolderPlus className="h-4 w-4" />
+          <WorkspaceGlyph kind="folderAdd" size="xs" />
         </button>
         <button type="button" onClick={() => (selecting ? exitSelecting() : setSelecting(true))} className={`${iconButtonClass} ${selecting ? 'bg-ui-selected text-ui-text' : ''}`}
           title={t('history.selectMode')} aria-label={t('history.selectMode')} aria-pressed={selecting}>
-          <CheckSquare className="h-4 w-4" />
+          <WorkspaceGlyph kind="check" size="xs" />
         </button>
       </div>
 

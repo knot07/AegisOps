@@ -1,3 +1,4 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ModelReasoningBadge from '@/components/common/ModelReasoningBadge';
 import ModelPreferencesDialog from '@/components/common/ModelPreferencesDialog';
 import './session-header.css';
@@ -7,27 +8,15 @@ import {ModelBrandIcon, brandStyle, AgentIdentity, agentStyle} from '@/component
 import { useContext, useState, useEffect, useLayoutEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Plus,
-  History,
   ChevronDown,
   ChevronRight,
-  SlidersHorizontal,
   Sparkles,
-  Shield,
-  Search,
-  AlertTriangle,
-  Bot,
   Loader2,
-  Workflow as WorkflowIcon,
-  Cpu,
   Info,
   X,
   Check,
   FolderGit2,
   FolderPlus,
-  BookOpen,
-  Hammer,
-  ClipboardList,
-  Target,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams, useParams } from 'react-router-dom';
@@ -38,6 +27,7 @@ import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type ComposerPrefill, type PromptDisplayOptions, type SendWelcomePrompt, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import SessionContextPanel from './SessionContextPanel';
+import WorkerProgressPanel from '@/components/common/WorkerProgressPanel';
 import SessionHistoryPanel from '@/components/layout/SessionHistoryPanel';
 import { getInitialSidePanelWidth, getMaxSidePanelWidth, SIDE_PANEL_MIN_WIDTH } from '@/components/common/sidePanelSizing';
 import SuiteInstallProgressPanel, {
@@ -102,16 +92,8 @@ const TASK_SESSION_GROUP_ID = 'tasks';
 const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 
-function ExecutionModeIcon({
-  mode,
-  className = 'h-3 w-3',
-}: {
-  mode: SessionExecutionMode;
-  className?: string;
-}) {
-  if (mode === 'plan') return <ClipboardList className={className} />;
-  if (mode === 'goal') return <Target className={className} />;
-  return <Hammer className={className} />;
+function ExecutionModeIcon({ mode }: { mode: SessionExecutionMode }) {
+  return <WorkspaceGlyph kind={mode === 'plan' ? 'list' : mode === 'goal' ? 'goal' : 'build'} size="xs" />;
 }
 type ProjectSummary = {
   id: string;
@@ -149,7 +131,6 @@ function ComposerResourcePicker({
   label,
   title,
   emptyText,
-  icon: Icon,
   resourceKind,
   items,
   loading,
@@ -160,7 +141,6 @@ function ComposerResourcePicker({
   label: string;
   title: string;
   emptyText: string;
-  icon: React.ComponentType<{ className?: string }>;
   resourceKind: 'skill' | 'workflow';
   items: ComposerResourceItem[];
   loading: boolean;
@@ -185,7 +165,7 @@ function ComposerResourcePicker({
         aria-expanded={open}
       >
         <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-          <Icon className="h-3.5 w-3.5" />
+          <WorkspaceGlyph kind={resourceKind === 'skill' ? 'skill' : 'flow'} size="xs" />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
@@ -1808,9 +1788,9 @@ export default function SessionPage() {
         {/* Header */}
         <header className="aegis-session-header relative flex h-[52px] flex-shrink-0 items-center gap-2 border-b border-ui-border px-4 text-[13px]">
           <button type="button" onClick={() => setHistoryOpen((open) => !open)} aria-expanded={historyOpen} aria-label={tNav('history.title')} title={tNav('history.title')} className={`session-header-action flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs transition-colors ${historyOpen ? 'bg-ui-selected text-ui-text' : 'text-ui-secondary hover:bg-ui-hover'}`}>
-            <History className="h-4 w-4" /><span className="hidden sm:inline">{tNav('history.title')}</span>
+            <WorkspaceGlyph kind="duration" size="xs" /><span className="hidden sm:inline">{tNav('history.title')}</span>
           </button>
-          <button type="button" onClick={() => { selectSession(null); setHistoryOpen(false); }} aria-label={tNav('newChat')} className="session-header-action session-header-new flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-ui-secondary hover:bg-ui-hover"><Plus className="h-4 w-4" /><span className="hidden sm:inline">{t('newSession')}</span></button>
+          <button type="button" onClick={() => { selectSession(null); setHistoryOpen(false); }} aria-label={tNav('newChat')} className="session-header-action session-header-new flex h-8 shrink-0 items-center gap-1.5 rounded-lg px-2.5 text-xs text-ui-secondary hover:bg-ui-hover"><WorkspaceGlyph kind="add" size="xs" /><span className="hidden sm:inline">{t('newSession')}</span></button>
           <span className="mx-1 h-4 border-l border-ui-border" aria-hidden="true" />
           <div className="flex min-w-0 items-center">
             <h2 className="session-header-title truncate text-sm font-medium text-ui-secondary">
@@ -1836,7 +1816,7 @@ export default function SessionPage() {
               aria-label={t('context.title')}
               title={t('context.title')}
             >
-              <Sparkles className="h-3.5 w-3.5" />
+              <WorkspaceGlyph kind="layers" size="xs" />
               <span>{t('context.title')}</span>
               {(contextSnapshot?.counts.total || 0) > 0 && (
                 <span className="rounded-full bg-ui-hover px-1.5 py-0.5 text-xs">
@@ -1847,7 +1827,8 @@ export default function SessionPage() {
           </div>
         </header>
 
-        <div className="relative flex min-h-0 flex-1 overflow-hidden">
+        <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden lg:flex-row">
+        <div className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
         {/* Chat — powered by unified SessionChat */}
         {activeSessionError ? (
           <div role="alert" className="flex flex-1 flex-col items-center justify-center gap-4 p-6 text-center">
@@ -1953,7 +1934,7 @@ export default function SessionPage() {
                 aria-expanded={showAgentOptions}
               >
                 <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
-                  <Bot className="h-3.5 w-3.5" />
+                  <WorkspaceGlyph kind="agent" size="xs" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
                 <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
@@ -2061,7 +2042,6 @@ export default function SessionPage() {
               label={t('chat.addMenu.skills')}
               title={t('chat.addMenu.selectSkill')}
               emptyText={t('chat.addMenu.noSkills')}
-              icon={BookOpen}
               resourceKind="skill"
               items={composerSkills.map((skill) => ({
                 id: skill.name,
@@ -2085,7 +2065,6 @@ export default function SessionPage() {
               label={t('chat.addMenu.workflows')}
               title={t('chat.addMenu.selectWorkflow')}
               emptyText={t('chat.addMenu.noWorkflows')}
-              icon={WorkflowIcon}
               resourceKind="workflow"
               items={composerWorkflows.map((workflow) => ({
                 id: workflow.id,
@@ -2154,7 +2133,7 @@ export default function SessionPage() {
                         selected={selectedExecutionMode === mode}
                         label={t(`executionMode.options.${mode}.label`)}
                         description={t(`executionMode.options.${mode}.description`)}
-                        icon={<ExecutionModeIcon mode={mode} className="h-3.5 w-3.5 shrink-0" />}
+                        icon={<ExecutionModeIcon mode={mode} />}
                         onClick={() => handleSelectExecutionMode(mode)}
                       />
                     ))}
@@ -2291,7 +2270,7 @@ export default function SessionPage() {
                   contentClassName="p-1.5"
                   footer={(
                     <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
-                      <button type="button" onClick={() => { setShowModelOptions(false); setSelectorTooltip(null); setShowModelPreferences(true); }} className="model-preferences-launch"><SlidersHorizontal className="h-3.5 w-3.5" />{i18n.language.startsWith('zh') ? '模型管理' : 'Model preferences'}</button>
+                      <button type="button" onClick={() => { setShowModelOptions(false); setSelectorTooltip(null); setShowModelPreferences(true); }} className="model-preferences-launch"><WorkspaceGlyph kind="tune" size="xs" />{i18n.language.startsWith('zh') ? '模型管理' : 'Model preferences'}</button>
 
                       <button
                         type="button"
@@ -2359,6 +2338,7 @@ export default function SessionPage() {
                                 key={option.key}
                                 style={brandStyle(option.modelID)}
                                 data-chat-model-choice={option.modelID}
+                                aria-pressed={selectedModelOption?.key === option.key}
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
                                 title={`${option.label}\n${option.providerName} / ${option.modelID}\n${option.pricingLabel}\n${option.contextLabel}`}
@@ -2444,6 +2424,10 @@ export default function SessionPage() {
               />
             </aside>
           </>
+        )}
+        </div>
+        {activeChatSessionId && !resolvingSelectedSession && (
+          <WorkerProgressPanel key={activeChatSessionId} sessionId={activeChatSessionId} accelerated={sseStatus === 'connected'} />
         )}
         </div>
       </div>

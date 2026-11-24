@@ -1,4 +1,4 @@
-// ../../../../../../projects/aegisops/aegisops/contracts/webui/shims/react.js
+// ../../../../../../aegisops/contracts/webui/shims/react.js
 var React = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__?.React;
 if (!React) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing React).");
@@ -38,7 +38,7 @@ var {
   version
 } = React;
 
-// ../../../../../../projects/aegisops/aegisops/contracts/webui/shims/sdk.js
+// ../../../../../../aegisops/contracts/webui/shims/sdk.js
 var sdk = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__;
 if (!sdk) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing SDK).");
@@ -52,7 +52,7 @@ var useLanguage = sdk.useLanguage;
 var usePaneActive = sdk.usePaneActive;
 var useServerEvents = sdk.useServerEvents;
 
-// ../../../../../../projects/aegisops/aegisops/contracts/webui/shims/jsx-runtime.js
+// ../../../../../../aegisops/contracts/webui/shims/jsx-runtime.js
 var runtime = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__;
 if (!runtime?.jsx || !runtime?.jsxs) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing jsx runtime).");
@@ -397,6 +397,79 @@ function caseSource(detail) {
 }
 function eventMessage(e) {
   return e.message === "\u8BBE\u5907\u65E5\u5FD7\u67E5\u8BE2\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u5DF2\u63A5\u5165 TDP \u7684\u8FDE\u63A5\u548C\u6743\u9650\u3002\u539F\u544A\u8B66\u8BC1\u636E\u5DF2\u4FDD\u7559\u3002" ? "\u6765\u6E90\u8BBE\u5907\u65E5\u5FD7\u67E5\u8BE2\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u672C\u4E8B\u4EF6\u7ED1\u5B9A\u8BBE\u5907\u7684\u8FDE\u63A5\u4E0E\u67E5\u8BE2\u6743\u9650\u3002\u539F\u544A\u8B66\u8BC1\u636E\u5DF2\u4FDD\u7559\u3002" : e.message;
+}
+function logCoverage(value) {
+  let meta = {};
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) meta = parsed;
+  } catch {
+  }
+  const query = meta.query && typeof meta.query === "object" ? meta.query : {};
+  const count = (value2) => typeof value2 === "number" && Number.isSafeInteger(value2) && value2 >= 0 ? value2 : null;
+  const returned = count(meta.returned), total = count(meta.total), limit = count(meta.page_limit);
+  const epoch = (v) => typeof v === "number" && v > 0 && v < 1e11 ? new Date(v * 1e3).toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", hour12: false }) : "";
+  const local = (v) => typeof v === "string" && /^\d{4}[/\-]\d{2}[/\-]\d{2} \d{2}:\d{2}:\d{2}$/.test(v) ? v : "";
+  const from = epoch(query.time_from) || local(query.time_start);
+  const to = epoch(query.time_to) || local(query.time_end);
+  if (meta.truncated === true || returned !== null && total !== null && total > returned) return { label: "\u7ED3\u679C\u5DF2\u622A\u65AD", from, to, returned, total, limit, note: "\u672A\u8FD4\u56DE\u7684\u65E5\u5FD7\u4E0D\u5728\u672C\u6B21\u8BC1\u636E\u5185\uFF0C\u4E0D\u80FD\u636E\u6B64\u6392\u9664\u5176\u4ED6\u884C\u4E3A\u3002" };
+  if (limit !== null) return { label: "\u4EC5\u9996\u6279 \xB7 \u8986\u76D6\u672A\u786E\u8BA4", from, to, returned, total, limit, note: "\u53EF\u80FD\u8FD8\u6709\u540E\u7EED\u5206\u9875\uFF1B\u672C\u6B21\u8BC1\u636E\u4E0D\u80FD\u4EE3\u8868\u5B8C\u6574\u67E5\u8BE2\u7ED3\u679C\u3002" };
+  const requested = count(query.size);
+  if (requested !== null && requested > 0 && returned !== null && returned >= requested) return { label: "\u8FBE\u5230\u67E5\u8BE2\u4E0A\u9650 \xB7 \u8986\u76D6\u672A\u786E\u8BA4", from, to, returned, total, limit, note: "\u8FD4\u56DE\u6761\u6570\u8FBE\u5230\u8BF7\u6C42\u4E0A\u9650\uFF0C\u65E0\u6CD5\u786E\u8BA4\u662F\u5426\u8FD8\u6709\u66F4\u591A\u5339\u914D\u65E5\u5FD7\u3002" };
+  if (meta.truncated === false && returned !== null && total === returned) return { label: returned === 0 ? "\u672C\u6B21\u8FD4\u56DE 0 \u6761" : "\u672A\u8BB0\u5F55\u622A\u65AD", from, to, returned, total, limit, note: "\u4EC5\u4EE3\u8868\u8FD9\u53F0\u8BBE\u5907\u5728\u6307\u5B9A\u65F6\u95F4\u548C\u8FC7\u6EE4\u6761\u4EF6\u4E0B\u7684\u8FD4\u56DE\uFF0C\u4E0D\u4EE3\u8868\u4E8B\u4EF6\u8BC1\u636E\u5B8C\u6574\u3002" };
+  return { label: "\u8986\u76D6\u672A\u77E5", from, to, returned, total, limit, note: "\u8FD9\u4EFD\u8BC1\u636E\u6CA1\u6709\u8DB3\u591F\u7684\u8303\u56F4\u6216\u8BA1\u6570\u8BB0\u5F55\uFF0C\u4E0D\u80FD\u636E\u6B64\u5224\u65AD\u662F\u5426\u67E5\u5168\u3002" };
+}
+function DeviceLogCoverage({ detail }) {
+  const records = (detail.evidence || []).filter((e) => e.kind === "device_logs").slice().reverse();
+  const latest = (detail.events || []).filter((e) => e.stage === "logs").slice(-1)[0];
+  return /* @__PURE__ */ jsxs("section", { "aria-label": "\u65E5\u5FD7\u8BC1\u636E\u8986\u76D6", style: { marginBottom: 16 }, children: [
+    /* @__PURE__ */ jsxs("div", { className: "work-section-head", style: { marginBottom: 8 }, children: [
+      /* @__PURE__ */ jsxs("div", { children: [
+        /* @__PURE__ */ jsx("h3", { children: "\u65E5\u5FD7\u8BC1\u636E\u8986\u76D6" }),
+        /* @__PURE__ */ jsx("small", { children: "\u5F52\u6863\u8BC1\u636E\u6309\u65F6\u95F4\u5012\u5E8F\uFF1B\u8986\u76D6\u8303\u56F4\u4E0D\u662F\u4E8B\u4EF6\u5B8C\u6574\u5EA6\u3002" })
+      ] }),
+      latest && /* @__PURE__ */ jsxs("span", { className: "badge", children: [
+        "\u6700\u8FD1\u8BB0\u5F55\uFF1A",
+        labels[latest.status] || latest.status
+      ] })
+    ] }),
+    /* @__PURE__ */ jsxs("div", { className: "device-results", children: [
+      records.map((e) => {
+        const coverage = logCoverage(e.metadata);
+        return /* @__PURE__ */ jsxs("div", { className: "evidence compact-log", style: { flexWrap: "wrap" }, children: [
+          /* @__PURE__ */ jsx(Icon, { type: "file" }),
+          /* @__PURE__ */ jsxs("div", { className: "body", style: { minWidth: 0, overflowWrap: "anywhere" }, children: [
+            /* @__PURE__ */ jsxs("strong", { children: [
+              e.label,
+              " \xB7 ",
+              coverage.label
+            ] }),
+            /* @__PURE__ */ jsxs("small", { children: [
+              "\u5F52\u6863\uFF1A",
+              new Date(e.created).toLocaleString(),
+              " \xB7 ",
+              (e.size / 1024).toFixed(1),
+              " KB"
+            ] }),
+            /* @__PURE__ */ jsxs("small", { children: [
+              "\u67E5\u8BE2\u8303\u56F4\uFF1A",
+              coverage.from && coverage.to ? `${coverage.from} \u81F3 ${coverage.to}\uFF08UTC+8\uFF09` : "\u672A\u8BB0\u5F55"
+            ] }),
+            /* @__PURE__ */ jsxs("small", { children: [
+              "\u8FD4\u56DE ",
+              coverage.returned ?? "\u672A\u77E5",
+              " \u6761 \xB7 \u8BB0\u5F55\u603B\u6570 ",
+              coverage.total ?? "\u672A\u77E5",
+              coverage.limit !== null ? ` \xB7 \u9996\u6279\u4E0A\u9650 ${coverage.limit} \u6761` : ""
+            ] }),
+            /* @__PURE__ */ jsx("p", { style: { margin: "5px 0 0", fontSize: 12 }, children: coverage.note })
+          ] }),
+          /* @__PURE__ */ jsx("a", { href: BASE + "/cases/" + detail.id + "/evidence/" + e.id, children: "\u4E0B\u8F7D\u539F\u59CB\u65E5\u5FD7" })
+        ] }, e.id);
+      }),
+      records.length === 0 && /* @__PURE__ */ jsx("div", { className: "compact-empty", children: caseSource(detail) ? "\u6682\u65E0\u5F52\u6863\u65E5\u5FD7\u3002\u672A\u91C7\u96C6\u4E0D\u7B49\u4E8E\u6CA1\u6709\u5F02\u5E38\uFF0C\u8BF7\u5148\u67E5\u8BE2\u5173\u8054\u65E5\u5FD7\u3002" : "\u5C1A\u672A\u7ED1\u5B9A\u544A\u8B66\u6765\u6E90\u8BBE\u5907\uFF0C\u65E0\u6CD5\u5224\u65AD\u65E5\u5FD7\u8986\u76D6\u3002" })
+    ] })
+  ] });
 }
 function IncidentPage() {
   const [cases, setCases] = useState([]), [selected, setSelected] = useState(new URLSearchParams(location.search).get("case") || ""), [detail, setDetail] = useState(null), [tab, setTab] = useState("overview"), [settings, setSettings] = useState({ hosts: [] }), [error, setError] = useState(""), [busy, setBusy] = useState(""), [query, setQuery] = useState(""), [modal, setModal] = useState(false), [remote, setRemote] = useState(""), [path, setPath] = useState("");
@@ -1087,21 +1160,7 @@ function IncidentPage() {
                 /* @__PURE__ */ jsx("button", { className: "primary", disabled: !!busy || locked || !caseSource(detail), onClick: () => action("\u5173\u8054\u8BBE\u5907\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: "\u67E5\u8BE2\u5173\u8054\u65E5\u5FD7" })
               ] })
             ] }),
-            /* @__PURE__ */ jsxs("div", { className: "device-results", children: [
-              detail.evidence.filter((e) => e.kind === "device_logs").map((e) => /* @__PURE__ */ jsxs("div", { className: "evidence compact-log", children: [
-                /* @__PURE__ */ jsx(Icon, { type: "file" }),
-                /* @__PURE__ */ jsxs("div", { className: "body", children: [
-                  /* @__PURE__ */ jsx("strong", { children: e.label }),
-                  /* @__PURE__ */ jsxs("small", { children: [
-                    (e.size / 1024).toFixed(1),
-                    " KB \xB7 ",
-                    new Date(e.created).toLocaleString()
-                  ] })
-                ] }),
-                /* @__PURE__ */ jsx("a", { href: BASE + "/cases/" + detail.id + "/evidence/" + e.id, children: "\u4E0B\u8F7D\u65E5\u5FD7" })
-              ] }, e.id)),
-              !detail.evidence.some((e) => e.kind === "device_logs") && /* @__PURE__ */ jsx("div", { className: "compact-empty", children: caseSource(detail) ? "\u6682\u65E0\u5173\u8054\u65E5\u5FD7\uFF0C\u70B9\u51FB\u67E5\u8BE2\u5F00\u59CB\u3002" : "\u8BF7\u5148\u9009\u62E9\u4EA7\u751F\u672C\u4E8B\u4EF6\u544A\u8B66\u7684\u8BBE\u5907\u3002" })
-            ] }),
+            /* @__PURE__ */ jsx(DeviceLogCoverage, { detail }),
             detail.events.some((e) => e.stage === "logs") && /* @__PURE__ */ jsxs("details", { className: "work-help", open: detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "blocked" || detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "failed", children: [
               /* @__PURE__ */ jsx("summary", { children: "\u67E5\u8BE2\u8BB0\u5F55\u4E0E\u5F02\u5E38" }),
               /* @__PURE__ */ jsx(ActivityTimeline, { compact: true, events: detail.events.filter((e) => e.stage === "logs") })

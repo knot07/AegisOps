@@ -236,3 +236,37 @@ async def test_a_stale_failed_snapshot_does_not_requeue_over_a_newer_failure(tmp
     stored = await TaskStore.get_execution(execution.id)
     assert (stored.retry.retry_count, stored.retry.blocked_reason) == (2, "unverified_effects")
     assert await TaskStore.get_queue_ref(execution.id) is None
+
+
+async def test_inactive_scheduler_clears_next_run_and_enable_recomputes(tmp_path):
+    scheduler = await TaskManager.create_scheduler(
+        title="Fixture schedule", mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(cron="0 8 * * *", timezone="UTC"),
+    )
+    assert scheduler.trigger.next_run is not None
+    disabled = await TaskManager.disable_scheduler(scheduler.id)
+    assert disabled.trigger.next_run is None
+    assert (await TaskStore.get_scheduler(scheduler.id)).trigger.next_run is None
+
+    edited = await TaskManager.update_scheduler_with_trigger(scheduler.id, fields={}, cron="0 9 * * *")
+    assert edited.trigger.next_run is None
+    enabled = await TaskManager.enable_scheduler(scheduler.id)
+    assert enabled.trigger.next_run > datetime.now(timezone.utc)
+    assert enabled.trigger.next_run.hour == 9
+
+
+async def test_failure_attention_only_counts_terminal_unviewed_runs(tmp_path):
+    from aegisops.task.models import RetryConfig
+
+    scheduler = await _idle_scheduler(tmp_path)
+    terminal = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.SCHEDULED)
+    retrying = await TaskManager.create_execution_from_scheduler(scheduler, trigger_type=ExecutionTriggerType.SCHEDULED)
+    for run in (terminal, retrying):
+        run.status = TaskStatus.FAILED
+        run.retry = RetryConfig(max_retries=1, retry_count=1)
+    retrying.retry.retry_after = datetime.now(timezone.utc) + timedelta(minutes=1)
+    await TaskStore.update_execution(terminal)
+    await TaskStore.update_execution(retrying)
+    assert (await TaskStore.dashboard_counts())["failed_unviewed"] == 1
+    await TaskStore.mark_execution_viewed(terminal.id)
+    assert (await TaskStore.dashboard_counts())["failed_unviewed"] == 0

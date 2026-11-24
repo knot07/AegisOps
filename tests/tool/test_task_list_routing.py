@@ -218,3 +218,17 @@ async def test_explicit_execution_type_with_completed_status():
         result = await schedule_task_list(_ctx(), status="completed", type="execution")
     assert result.success
     assert "Task executions" in result.output
+
+
+@pytest.mark.asyncio
+async def test_scheduler_write_asks_permission_before_mutating():
+    async def deny(request):
+        assert request.permission == "schedule_task"
+        assert request.patterns == ["scheduler:disable:sched_1"]
+        raise PermissionError("confirmation refused")
+
+    ctx = ToolContext(session_id="test", message_id="test", permission_callback=deny)
+    with patch("aegisops.task.manager.TaskManager.disable_scheduler", new_callable=AsyncMock) as disable:
+        with pytest.raises(PermissionError, match="confirmation refused"):
+            await schedule_task(ctx, action="disable", task_id="sched_1", resource_type="scheduler")
+        disable.assert_not_awaited()

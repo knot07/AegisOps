@@ -11,14 +11,20 @@ import { useConfirm } from '@/components/common/ConfirmDialog';
 import { useTaskExecutions } from '@/hooks/useTasks';
 import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
 import { copyText } from '@/utils/clipboard';
-import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
+import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton, ExecutionTriggerBadge } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 import { extractErrorMessage } from '@/utils/error';
 import ModuleEmblem from '@/components/common/ModuleEmblem';
 import './execution-detail.css';
+import WorkflowNodeHistory from './WorkflowNodeHistory';
 import ExecutionFilters, { type ExecutionSearchParams } from './ExecutionFilters';
 
 const DETAIL_POLL_INTERVAL_MS = 30000;
+
+function needsFailureReview(task: TaskExecution) {
+  const retry = task.retry;
+  return task.status === 'failed' && Boolean(retry && (retry.blockedReason || (!retry.retryAfter && retry.retryCount >= retry.maxRetries)));
+}
 const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
 
 function SessionChatFallback() {
@@ -91,7 +97,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   }, [effectiveTasks]);
 
   const markViewedIfNeeded = useCallback(async (task: TaskExecution) => {
-    if (task.status !== 'completed' || task.deliveryStatus !== 'unread') {
+    if ((task.status !== 'completed' && !needsFailureReview(task)) || task.deliveryStatus === 'viewed') {
       return task;
     }
     try {
@@ -327,8 +333,9 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                       <input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleSelect(task.id)} className="rounded border-gray-300" />
                     </td>
                     <td className="px-3 py-3"><StatusBadge status={task.status} /></td>
-                    <td className="px-3 py-3"><SourceBadge sourceType={task.source?.sourceType ?? 'user_conversation'} /></td>
+                    <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><ExecutionTriggerBadge type={task.triggerType} /><SourceBadge sourceType={task.source?.sourceType ?? 'user_conversation'} /></div></td>
                     <td className="px-3 py-3 font-medium text-gray-900 max-w-[200px] truncate">
+                      {task.deliveryStatus !== 'viewed' && needsFailureReview(task) && <span className="mr-1.5 rounded-full bg-rose-500/10 px-2 py-0.5 text-xs text-rose-800 dark:text-rose-200">{t('attention.badge')}</span>}
                       {task.deliveryStatus === 'unread' && task.status === 'completed' && (
                         <span className="w-1.5 h-1.5 bg-sky-500 rounded-full inline-block mr-1.5 mb-0.5 align-middle" />
                       )}
@@ -418,6 +425,7 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
         <div className="execution-meta px-6 py-4 border-b border-gray-100 flex-shrink-0 space-y-2.5">
           <div className="flex items-center gap-2 flex-wrap">
             <StatusBadge status={task.status} />
+            <ExecutionTriggerBadge type={task.triggerType} />
             <PriorityBadge priority={task.priority} />
             <ModeBadge mode={task.executionMode} agent={task.agentName} />
             {task.durationMs != null && (
@@ -537,6 +545,7 @@ function QueuedWorkflowDetail({ task, emptyText }: { task: TaskExecution; emptyT
           <div><small>执行耗时</small><strong>{task.durationMs != null ? formatDuration(task.durationMs) : '—'}</strong></div>
         </div>
       </section>
+      <WorkflowNodeHistory key={task.id} task={task} />
       <section className="execution-result">
         <div className="execution-section-title"><span className="execution-result-mark">{task.status === 'completed' ? '✓' : task.status === 'failed' ? '!' : '…'}</span><div><h4>{t('queued.workflowResult')}</h4><small>{task.status === 'completed' ? '本次执行已完成，以下为实际返回结果' : '以执行状态与实际输出为准'}</small></div></div>
         {metrics && <div className="execution-metrics">

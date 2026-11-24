@@ -95,11 +95,7 @@ class TaskScheduler:
         if active is not None:
             return
 
-        trigger_type = (
-            ExecutionTriggerType.RUN_ONCE
-            if scheduler.mode == SchedulerMode.ONCE
-            else ExecutionTriggerType.SCHEDULED
-        )
+        trigger_type = ExecutionTriggerType.SCHEDULED
         trigger = scheduler.trigger.model_copy(deep=True)
         status = scheduler.status
         if scheduler.mode == SchedulerMode.CRON and trigger.cron:

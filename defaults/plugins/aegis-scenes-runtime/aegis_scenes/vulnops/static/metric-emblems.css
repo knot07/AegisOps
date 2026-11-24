@@ -1,0 +1,19 @@
+body[data-aegis-scene=vulnops] .metric-label { gap: 6px; }
+body[data-aegis-scene=vulnops] .metric-emblem {
+  display: inline-grid; place-items: center; flex: none; width: 30px; height: 30px; border-radius: 9px;
+  --metric-ink: #206b97; --metric-pigment: #489bde;
+  background: color-mix(in srgb,var(--metric-pigment) 15%,transparent);
+}
+body[data-aegis-scene=vulnops] .metric-emblem[data-metric-icon=alert] { --metric-ink:#a53442;--metric-pigment:#e06b78; }
+body[data-aegis-scene=vulnops] .metric-emblem[data-metric-icon=clock] { --metric-ink:#87500b;--metric-pigment:#e9a64a; }
+body[data-aegis-scene=vulnops] .metric-emblem[data-metric-icon=check] { --metric-ink:#216c55;--metric-pigment:#46b58d; }
+html.dark body[data-aegis-scene=vulnops] .metric-emblem { --metric-ink:#9dd5ff; }
+html.dark body[data-aegis-scene=vulnops] .metric-emblem[data-metric-icon=alert] { --metric-ink:#ffacb9; }
+html.dark body[data-aegis-scene=vulnops] .metric-emblem[data-metric-icon=clock] { --metric-ink:#ffd195; }
+html.dark body[data-aegis-scene=vulnops] .metric-emblem[data-metric-icon=check] { --metric-ink:#96e5c5; }
+body[data-aegis-scene=vulnops] .metric-emblem > svg { display:block; width:20px; height:20px; }
+.metric-emblem-fill { fill:color-mix(in srgb,var(--metric-pigment) 25%,transparent); }
+@media (max-width:600px) {
+  body[data-aegis-scene=vulnops] .metric-emblem { width:24px;height:24px;border-radius:7px; }
+  body[data-aegis-scene=vulnops] .metric-emblem > svg { width:16px;height:16px; }
+}

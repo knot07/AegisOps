@@ -1,5 +1,5 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import type { HTMLAttributes, MouseEvent, ReactNode, CSSProperties } from 'react';
-import { Pencil, Trash2 } from 'lucide-react';
 
 /**
  * One card layout for plugin resources (agents, skills, tools): icon, title,
@@ -110,7 +110,7 @@ export default function PluginCard({
             aria-label={deleteLabel}
             className={`${iconButtonClass} hover:text-red-600 enabled:hover:bg-red-50`}
           >
-            <Trash2 className="h-3.5 w-3.5" />
+            <WorkspaceGlyph kind="delete" size="micro" />
           </button>
         )}
         {groupButton}
@@ -123,7 +123,7 @@ export default function PluginCard({
           aria-label={editLabel}
           className={iconButtonClass}
         >
-          <Pencil className="h-3.5 w-3.5" />
+          <WorkspaceGlyph kind="edit" size="micro" />
         </button>
       </div>
     </article>

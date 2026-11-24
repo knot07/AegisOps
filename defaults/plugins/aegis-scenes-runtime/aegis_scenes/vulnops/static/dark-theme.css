@@ -282,3 +282,7 @@ html.dark .aegis-device-config .aegis-device-tab[aria-pressed=true]{background:v
 html.dark .aegis-device-config .aegis-vendor-badge{background:var(--night-raised)!important;color:var(--night-secondary)!important}
 html.dark .aegis-device-config .aegis-device-save{background:linear-gradient(115deg,color-mix(in srgb,var(--device-accent,#789b56) 35%,white),color-mix(in srgb,var(--device-accent,#789b56) 52%,white))!important;color:#172b3c!important;border-color:var(--night-control)!important;box-shadow:none!important}
 html.dark .aegis-device-config .aegis-device-save:hover:not(:disabled){filter:brightness(1.06)}
+
+/* Asset-card footer actions: retain their semantic colors and give each a rounded hit area. */
+html.dark [data-aegis-scene="vulnops"] .asset-card-actions > button.table-link{border-radius:8px;min-height:30px;padding:4px 8px}
+html.dark [data-aegis-scene="vulnops"] .asset-card-actions > button.table-link:focus-visible{outline:2px solid var(--focus-ring,#a6caf5);outline-offset:2px}

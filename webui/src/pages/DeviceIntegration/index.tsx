@@ -1,10 +1,11 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Shield, CheckCircle, XCircle, AlertTriangle, RefreshCw,
   Plug, PlugZap, WifiOff, Plus, Settings, Loader2,
   Eye, EyeOff, Save, Trash2, Activity, X, Server, Pencil, Check,
-  Wrench, ChevronRight, ChevronLeft, ChevronDown, Building2, ServerCog, Sparkles,
+  Wrench, ChevronRight, ChevronLeft, ChevronDown, ServerCog, Sparkles,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -1889,7 +1890,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
           className="p-1 rounded text-zinc-400 hover:text-zinc-700 transition-colors"
           title={t('sidebar.addRoom')}
         >
-          <Plus className="w-3.5 h-3.5" />
+          <WorkspaceGlyph kind="add" size="xs" />
         </button>
       </div>
 
@@ -1907,7 +1908,7 @@ function GroupSidebar({ groups, devices, selectedGroupId, onSelect, onRename, on
               : 'text-zinc-500 hover:bg-zinc-100 hover:text-zinc-700'
           }`}
         >
-          <Building2 className="w-3.5 h-3.5 flex-shrink-0" />
+          <WorkspaceGlyph kind="building" size="xs" />
           <span className="text-sm flex-1 font-medium truncate">{t('sidebar.allRooms')}</span>
           <span className={`text-[11px] font-semibold tabular-nums ${
             selectedGroupId === null ? 'text-blue-500' : 'text-zinc-400'
@@ -2542,7 +2543,7 @@ export default function DeviceIntegrationPage() {
               <div className="px-6 py-3 border-b border-zinc-100 flex items-center gap-3 flex-shrink-0 max-md:flex-wrap max-md:gap-x-3 max-md:gap-y-1 max-md:px-0">
                 {selectedGroup ? (
                   <>
-                    <Server className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <WorkspaceGlyph kind="server" size="xs" />
                     <span className="text-sm font-semibold text-zinc-800">{selectedGroup.name}</span>
                     <span className="text-xs text-zinc-400">{t('header.devices', { count: filteredDevices.length })}</span>
                     {connectedCount > 0 && (
@@ -2560,7 +2561,7 @@ export default function DeviceIntegrationPage() {
                   </>
                 ) : (
                   <>
-                    <Building2 className="w-4 h-4 text-zinc-400 flex-shrink-0" />
+                    <WorkspaceGlyph kind="building" size="xs" />
                     <span className="text-sm font-semibold text-zinc-800">{t('header.allRooms')}</span>
                     <span className="text-xs text-zinc-400">
                       {t('header.deviceCount', { count: filteredDevices.length, rooms: groups.length })}
@@ -2634,7 +2635,7 @@ export default function DeviceIntegrationPage() {
                             <ChevronDown
                               className={`w-3.5 h-3.5 text-zinc-400 transition-transform ${collapsed ? '-rotate-90' : ''}`}
                             />
-                            <Server className="w-4 h-4 text-zinc-400" />
+                            <WorkspaceGlyph kind="server" size="xs" />
                             <h3 className="text-sm font-semibold text-zinc-700 group-hover/sec:text-zinc-900">{group.name}</h3>
                             <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                               {gDevices.length}
@@ -2718,7 +2719,7 @@ export default function DeviceIntegrationPage() {
                   /* ── Specific room, has devices ── */
                   <section>
                     <div className="flex items-center gap-2 mb-4">
-                      <PlugZap className="w-4 h-4 text-blue-600" />
+                      <WorkspaceGlyph kind="device" size="xs" />
                       <h3 className="text-sm font-semibold text-zinc-800">{t('section.activeDevices')}</h3>
                       <span className="text-xs text-zinc-400 bg-zinc-100 px-1.5 py-0.5 rounded-md">
                         {filteredDevices.length}

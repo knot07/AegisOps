@@ -94,6 +94,7 @@ from aegisops.workflow.triggers import (
 )
 from aegisops.workflow.triggers.models import TriggerType
 from aegisops.workflow.triggers.dispatcher import TriggerDispatchError, evaluate_trigger_filter
+from aegisops.workflow.triggers.admission import TriggerBusy
 from aegisops.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 from aegisops.workflow.triggers.compat import (
     kafka_trigger_to_legacy_config,
@@ -3632,6 +3633,8 @@ async def _dispatch_trigger_event(
             event=event,
             verified_auth=verified_auth,
         )
+    except TriggerBusy as exc:
+        raise HTTPException(status_code=429, detail=str(exc), headers={"Retry-After": "1"}) from exc
     except TriggerDispatchError as exc:
         raise HTTPException(status_code=400, detail=f"Trigger filter error: {exc}") from exc
     except ExecutionStopped as exc:

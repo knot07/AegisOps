@@ -62,8 +62,10 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     return () => window.removeEventListener('aegisops:auth-expired', onAuthExpired);
   }, []);
 
-  const login = useCallback(async (username: string, password: string) => {
+  const login = useCallback(async (username: string, password: string, onAuthenticated?: () => Promise<void>) => {
     const me = await authApi.login({ username, password });
+    // Optional presentation runs only after the server has authenticated the account.
+    try { await onAuthenticated?.(); } catch { /* A visual error cannot invalidate login. */ }
     setBootstrapped(true);
     setError(null);
     setUser(me);

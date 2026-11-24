@@ -1,15 +1,14 @@
 import ModuleEmblem from '@/components/common/ModuleEmblem';
 import ResourceDetailSummary from '@/components/common/ResourceDetailSummary';
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ResourceOverview from '@/components/common/ResourceOverview';
 import { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   Wrench,
-  Search,
   RefreshCw,
   TestTube,
-  Grid,
   Database,
   Cloud,
   X,
@@ -23,8 +22,6 @@ import {
   Power,
   PowerOff,
   FileText,
-  ChevronDown,
-  ChevronUp,
   Server,
   ArrowUp,
   ArrowDown,
@@ -34,12 +31,9 @@ import {
   Clock,
   Shield,
   Zap,
-  Plus,
-  Code,
   Download,
   Star,
   ExternalLink,
-  Tag,
   Trash2,
   Eye,
   EyeOff,
@@ -176,10 +170,10 @@ export default function ToolPage() {
   const toast = useToast();
 
   const TABS: TabConfig[] = [
-    { key: 'all', label: t('tabs.all'), icon: <Grid className="w-5 h-5" /> },
-    { key: 'mcp', label: t('tabs.mcp'), icon: <Database className="w-5 h-5" /> },
-    { key: 'api', label: t('tabs.api'), icon: <Cloud className="w-5 h-5" /> },
-    { key: 'local', label: t('tabs.local'), icon: <Code className="w-5 h-5" /> },
+    { key: 'all', label: t('tabs.all'), icon: <WorkspaceGlyph kind="catalog" size="xs" /> },
+    { key: 'mcp', label: t('tabs.mcp'), icon: <WorkspaceGlyph kind="mcp" size="xs" /> },
+    { key: 'api', label: t('tabs.api'), icon: <WorkspaceGlyph kind="api" size="xs" /> },
+    { key: 'local', label: t('tabs.local'), icon: <WorkspaceGlyph kind="local" size="xs" /> },
   ];
 
   const [activeTab, setActiveTab] = useState<TabKey>(DEFAULT_TOOL_TAB);
@@ -636,27 +630,27 @@ export default function ToolPage() {
                 : 'border-gray-300 text-gray-700 bg-white hover:bg-gray-50 disabled:opacity-50'
             }`}
           >
-            <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+            <WorkspaceGlyph kind="refresh" size="xs" className={refreshing ? 'animate-spin' : ''} />
           </button>
           <button
             onClick={() => setShowMCPSheet(true)}
             className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
           >
-            <Database className="w-4 h-4 mr-1.5" />
+            <WorkspaceGlyph kind="mcp" size="xs" className="mr-1.5" />
             {t('button.addMCP')}
           </button>
           <button
             onClick={() => setShowAPISheet(true)}
             className="inline-flex items-center px-4 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
           >
-            <Cloud className="w-4 h-4 mr-1.5" />
+            <WorkspaceGlyph kind="api" size="xs" className="mr-1.5" />
             {t('button.addAPI')}
           </button>
           <button
             onClick={() => setShowGenerateSheet(true)}
             className="inline-flex items-center px-4 py-2 border border-transparent rounded-lg text-sm font-medium text-white bg-red-600 hover:bg-red-700 transition-colors shadow-sm"
           >
-            <Plus className="w-4 h-4 mr-1.5" />
+            <WorkspaceGlyph kind="add" size="xs" className="mr-1.5" />
             {t('button.createTool')}
           </button>
         </div>
@@ -699,7 +693,7 @@ export default function ToolPage() {
 
           {/* Query controls stay on the left; native actions remain above on the right. */}
           <div className="relative mb-px order-first max-md:w-full">
-            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <WorkspaceGlyph kind="search" size="xs" className="glyph-search-field" />
             <input
               type="text"
               placeholder={t('search.placeholder')}
@@ -999,7 +993,7 @@ function SortFilterHeader({
           onClick={() => setOpen((v) => !v)}
           className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${hasFilter ? 'text-slate-600' : 'text-gray-400'}`}
         >
-          <Filter className="w-3 h-3" />
+          <WorkspaceGlyph kind="filter" size="micro" />
         </button>
       </div>
 
@@ -1734,7 +1728,7 @@ function MCPServerDetailPanel({
                   title={t('detail.refreshTools')}
                   className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-200 rounded-md disabled:opacity-40 transition-colors"
                 >
-                  <RefreshCw className={`w-4 h-4 ${refreshing ? 'animate-spin' : ''}`} />
+                  <WorkspaceGlyph kind="refresh" size="xs" className={refreshing ? 'animate-spin' : ''} />
                 </button>
               </div>
               <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2">
@@ -4143,7 +4137,7 @@ function EnabledBadge({ enabled }: { enabled: boolean }) {
   const { t } = useTranslation('tool');
   return enabled ? (
     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800">
-      <CheckCircle className="w-3 h-3 mr-1" />{t('enabledBadge.enabled')}
+      <WorkspaceGlyph kind="check" size="micro" className="mr-1" />{t('enabledBadge.enabled')}
     </span>
   ) : (
     <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">

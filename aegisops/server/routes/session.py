@@ -965,6 +965,111 @@ async def get_session_status_by_id(
     return await _build_session_runtime_status(session)
 
 
+_ACTIVE_WORKER_STATES = {"queued", "running"}
+
+
+def _worker_summary(child: SessionModel, record: Dict[str, Any]) -> Dict[str, Any]:
+    # Historical delegate sessions store the submitted description in their title.
+    description = child.title.rsplit(" (@", 1)[0] if child.title.endswith(" subagent)") else child.title
+    return {
+        "sessionID": child.id,
+        "agent": record.get("agent") or child.agent,
+        "description": description,
+        "state": record.get("state", "pending"),
+        "created": int(record["created"] * 1000) if record.get("created") else None,
+        "updated": int(record["updated"] * 1000) if record.get("updated") else None,
+    }
+
+
+def _worker_steps(messages) -> List[Dict[str, Any]]:
+    return [
+        {"id": part.id, "tool": part.tool, "status": part.state.status,
+         "startedAt": (getattr(part.state, "time", None) or {}).get("start")}
+        for message in reversed(messages)
+        if message.info.role == "assistant"
+        for part in reversed(message.parts)
+        if part.type == "tool"
+    ]
+
+
+@router.get("/{sessionID}/worker-progress", summary="List this Router's Worker tasks")
+async def get_worker_progress(sessionID: str, request: Request, response: Response) -> Dict[str, Any]:
+    from aegisops.session import superagent_dispatch
+    from aegisops.session.message import Message
+
+    response.headers["Cache-Control"] = "no-store"
+    user = require_user(request)
+    parent = await _get_session_by_id_unfiltered(sessionID)
+    if not parent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Session not found")
+    _require_session_read_access(parent, user)
+    rows = sorted(await superagent_dispatch.records(sessionID), key=lambda row: (
+        row.get("state") in _ACTIVE_WORKER_STATES, row.get("updated") or 0,
+    ), reverse=True)
+    tasks: List[Dict[str, Any]] = []
+    seen_workers = set()
+    for row in rows:
+        worker = row.get("worker")
+        if row.get("parent") != sessionID or not worker or worker in seen_workers:
+            continue
+        child = await _get_session_by_id_unfiltered(worker)
+        if not child or child.parent_id != sessionID or child.category != "task" or not SessionPolicy.can_read(child, user):
+            continue
+        if len(tasks) == 24:
+            return {"enabled": True, "tasks": tasks, "hasMore": True}
+        seen_workers.add(worker)
+        summary = _worker_summary(child, row)
+        if summary["state"] == "running":
+            messages, _, _ = await Message.list_recent_with_parts(worker, limit=3)
+            steps = _worker_steps(messages)
+            # A continued mandate can reuse the same Worker session. Do not
+            # present earlier runs' activity as the current run's tool call.
+            steps = [step for step in steps if (step["startedAt"] or 0) >= (summary["updated"] or 0)]
+            summary["latestStep"] = next((step for step in steps if step["status"] == "running"), steps[0] if steps else None)
+        tasks.append(summary)
+    return {"enabled": parent.scheduling_mode == "superagent" or bool(tasks), "tasks": tasks, "hasMore": False}
+
+
+@router.get("/{sessionID}/worker-detail", summary="Read a delegated task's steps and result")
+async def get_worker_detail(sessionID: str, request: Request, response: Response) -> Dict[str, Any]:
+    from aegisops.session import superagent_dispatch
+    from aegisops.session.message import Message
+
+    response.headers["Cache-Control"] = "no-store"
+    user = require_user(request)
+    child = await _get_session_by_id_unfiltered(sessionID)
+    if not child or not child.parent_id or child.category != "task":
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Worker task not found")
+    _require_session_read_access(child, user)
+    parent = await _get_session_by_id_unfiltered(child.parent_id)
+    if not parent:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parent session not found")
+    _require_session_read_access(parent, user)
+
+    record = next((row for row in await superagent_dispatch.records(parent.id)
+                   if row.get("parent") == parent.id and row.get("worker") == sessionID), {})
+    messages, has_more, _ = await Message.list_recent_with_parts(sessionID, limit=30)
+    steps = _worker_steps(messages)
+    last = messages[-1] if messages and messages[-1].info.role == "assistant" else None
+    summary = _worker_summary(child, record)
+    report = ""
+    if record:
+        if summary["state"] in {"completed", "failed", "interrupted"}:
+            report = record.get("report") or ""
+    else:
+        # The inline delegation entry also serves non-Router child tasks.
+        runtime = (await _build_session_runtime_status(child)).status.type
+        if runtime != "idle":
+            summary["state"] = "queued" if runtime == "queued" else "running"
+        elif last and last.info.error:
+            summary["state"] = "failed"
+        elif last and last.info.time.get("completed"):
+            summary["state"] = "completed"
+            report = "\n".join(part.text for part in last.parts if part.type == "text" and not part.synthetic and not part.ignored)
+    return {**summary, "steps": steps[:80], "hasOlderSteps": has_more or len(steps) > 80,
+            "report": report[:12000], "reportMayBeTruncated": len(report) >= 12000}
+
+
 @router.get(
     "/{sessionID}/turn/{turnID}",
     summary="Get how a turn stands",

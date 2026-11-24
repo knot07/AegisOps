@@ -1,3 +1,4 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import HubFilters from './HubFilters';
 import './hub-filters.css';
@@ -18,7 +19,6 @@ import {
   Loader2,
   RefreshCw,
   Search,
-  Table2,
   Trash2,
   X,
 } from 'lucide-react';
@@ -609,7 +609,7 @@ export default function HubPage() {
               onClick={() => setViewMode(viewMode === 'table' ? 'tree' : 'table')}
               className="inline-flex items-center gap-2 px-3 py-2 border border-gray-300 rounded-lg text-sm hover:bg-gray-50"
             >
-              {viewMode === 'table' ? <Folder className="w-4 h-4" /> : <Table2 className="w-4 h-4" />}
+              <WorkspaceGlyph kind={viewMode === 'table' ? 'folder' : 'catalog'} size="xs" />
               {viewMode === 'table' ? text.treeView : text.tableView}
             </button>
             {canManageHub && (

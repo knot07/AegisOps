@@ -1,3 +1,4 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ResourceIdentity, {resourceStyle} from '@/components/common/ResourceIdentity';
 import { useState, useMemo, useEffect, useId, useCallback, useRef } from 'react';
 import { createPortal } from 'react-dom';
@@ -6,10 +7,6 @@ import {
   Workflow as WorkflowIcon,
   Search,
   Plus,
-  RefreshCw,
-  Sparkles,
-  FolderOpen,
-  Clock,
   ChevronRight,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -206,13 +203,13 @@ export default function WorkflowPage() {
                 : 'border-gray-200 text-gray-400 hover:bg-gray-50 hover:text-gray-600 disabled:opacity-50'
             }`}
           >
-            <RefreshCw className={`w-3.5 h-3.5 ${refreshing ? 'animate-spin' : ''}`} />
+            <WorkspaceGlyph kind="refresh" size="xs" className={refreshing ? 'animate-spin' : ''} />
           </button>
           <button
             onClick={openFreshCreate}
             className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-red-600 text-white rounded-lg hover:bg-red-700 transition-colors text-sm"
           >
-            <Plus className="w-4 h-4" />
+            <WorkspaceGlyph kind="add" size="xs" />
             {t('createWorkflow')}
           </button>
         </div>}
@@ -223,7 +220,7 @@ export default function WorkflowPage() {
       {error && <p role="alert" className="px-4 py-2 text-sm text-red-600">{error}</p>}
       {/* Toolbar */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3 max-md:px-0">
-        <label className="relative min-w-0 flex-1"><Search className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-ui-muted" /><input aria-label={i18n?.language?.startsWith('zh') ? '搜索工作流' : 'Search workflows'} placeholder={i18n?.language?.startsWith('zh') ? '搜索工作流名称、描述…' : 'Search workflows…'} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className="h-10 w-full rounded-xl border border-ui-border bg-ui-surface pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-ui-focus" /></label>
+        <label className="relative min-w-0 flex-1"><WorkspaceGlyph kind="search" size="xs" className="glyph-search-field" /><input aria-label={i18n?.language?.startsWith('zh') ? '搜索工作流' : 'Search workflows'} placeholder={i18n?.language?.startsWith('zh') ? '搜索工作流名称、描述…' : 'Search workflows…'} value={searchQuery} onChange={(event) => setSearchQuery(event.target.value)} className="h-10 w-full rounded-xl border border-ui-border bg-ui-surface pl-9 pr-3 text-sm outline-none focus:ring-2 focus:ring-ui-focus" /></label>
 
       </div>
 
@@ -254,7 +251,7 @@ export default function WorkflowPage() {
             {showCustom && (
               <WorkflowSection
                 title={t('section.custom')}
-                icon={<FolderOpen className="w-4 h-4" />}
+                icon={<WorkspaceGlyph kind="folder" size="xs" />}
                 workflows={customWorkflows}
                 groupSelection={groupSelection}
                 groupDrag={groupDrag}
@@ -264,7 +261,7 @@ export default function WorkflowPage() {
             {showBuiltin && (
               <WorkflowSection
                 title={t('section.builtin')}
-                icon={<Sparkles className="w-4 h-4" />}
+                icon={<WorkspaceGlyph kind="layers" size="xs" />}
                 workflows={builtinWorkflows}
                 groupSelection={groupSelection}
                 groupDrag={groupDrag}
@@ -559,7 +556,7 @@ function WorkflowCard({ workflow, grouping, layout = 'cards' }: { workflow: Work
         </div>
         <div>
           <div className="text-base font-bold text-gray-900 tabular-nums flex items-center gap-0.5">
-            <Clock className="w-3 h-3 text-gray-400 shrink-0" />
+            <WorkspaceGlyph kind="duration" size="micro" />
             {workflow.stats.avgRuntime > 0 ? `${workflow.stats.avgRuntime.toFixed(1)}s` : '—'}
           </div>
           <div className="text-[10px] text-gray-500">{t('stats.avgRuntime')}</div>

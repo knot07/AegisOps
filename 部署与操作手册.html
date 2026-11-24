@@ -1,4 +1,4 @@
-<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AegisOps 部署与操作</title><style>body{font:15px/1.85 system-ui,"Microsoft YaHei",sans-serif;max-width:960px;margin:40px auto;padding:0 24px;background:#f8faf5;color:#394831}h1,h2,h3{color:#426531}h2{margin-top:36px;border-bottom:1px solid #dce6d3;padding-bottom:8px}pre{padding:18px;border:1px solid #dce6d3;border-radius:12px;background:white;overflow:auto}code{font-family:Consolas,monospace}a{color:#648e41}</style><body><h1>AegisOps 2026.11.19 部署与操作</h1>
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AegisOps 部署与操作</title><style>body{font:15px/1.85 system-ui,"Microsoft YaHei",sans-serif;max-width:960px;margin:40px auto;padding:0 24px;background:#f8faf5;color:#394831}h1,h2,h3{color:#426531}h2{margin-top:36px;border-bottom:1px solid #dce6d3;padding-bottom:8px}pre{padding:18px;border:1px solid #dce6d3;border-radius:12px;background:white;overflow:auto}code{font-family:Consolas,monospace}a{color:#648e41}</style><body><h1>AegisOps 2026.11.25 部署与操作</h1>
 <p>发行版只需选择 Windows、Linux、源码三个包之一。首次部署自行创建管理员，没有默认账号密码；发行包不包含业务数据库、会话、设备凭据或模型密钥。</p>
 <h2>Windows 10/11 x64</h2>
 <ol>
@@ -43,7 +43,7 @@ start.cmd --data-dir D:\AegisOpsData
 <p>主包不携带 REA、Ghidra、JDK 离线环境。未安装时，在样本区域点击安装入口，由 Atlas 协助发起已授权的固定安装任务，查看实际进度和日志，通过环境自检后才能使用。</p>
 <p>本机隔离 REA worker 需要 Linux x64 / WSL2 及所需系统权限。原生 Windows 用户可使用 WSL2 部署 Linux 后端；当前不宣称支持原生 Windows REA worker。微步和 VirusTotal 支持哈希查询及明确确认后的样本上传，也保留官方网页入口。</p>
 <h2>更新与备份</h2>
-<p>在账号管理的在线更新区检查新版本。托管启动的安装包在兼容性检查通过后，可以下载、校验、备份并更新；开发运行或 Docker 使用手工部署方式。2026.11.19 保留上一版核心依赖锁文件，避免仅因本次业务功能更新强制更换已有依赖。</p>
+<p>在账号管理的在线更新区检查新版本。托管启动的安装包在兼容性检查通过后，可以下载、校验、备份并更新；开发运行或 Docker 使用手工部署方式。2026.11.25 保留上一版核心依赖锁文件，避免仅因本次业务功能更新强制更换已有依赖。</p>
 <p>手工更新时，停止旧服务，备份完整数据目录，将新包解压到新目录，以相同 <code>--data-dir</code> 启动。Windows 首次启动会检查自身私有依赖。不要用空白目录覆盖已有数据，也不要同时启动两个写入同一数据目录的实例。</p>
 <h2>故障检查</h2>
 <ul>

@@ -268,7 +268,12 @@ class TaskExecutor:
     async def _trigger_workflow(
         cls, execution: TaskExecution, scheduler: TaskScheduler
     ) -> Optional[str]:
+        from aegisops.workflow.execution_store import (
+            ExecutionStepRecorder, create_execution_record, record_execution_result,
+            resolve_execution_outcome,
+        )
         from aegisops.workflow.fs_store import read_workflow_from_fs
+        from aegisops.workflow.ownership import abandon_execution
         from aegisops.workflow.tool_context import build_workflow_tool_context
         from aegisops.hooks.execution import current_execution_context
 
@@ -283,9 +288,36 @@ class TaskExecutor:
             _workflow_cancel_events[execution.id] = cancel_event
             _workflow_done_events[execution.id] = done_event
         handed_off = False
+        history = None
+        recorder = ExecutionStepRecorder()
+
+        async def finish_history(state: str, error: Optional[str], node: Optional[str] = None) -> None:
+            if history is None:
+                return
+            history.update(recorder.summary)
+            if node:
+                history["currentNodeId"] = node
+            history.update(
+                status=state, currentPhase=state, errorMessage=error,
+                finishedAt=int(datetime.now(timezone.utc).timestamp() * 1000),
+                stepCount=recorder.step_count, currentStepIndex=recorder.step_count,
+            )
+            try:
+                await record_execution_result(execution.workflow_id, history["id"], history, steps=recorder.take_steps())
+            except Exception:
+                # History diagnostics must not cause a successful run to be retried.
+                log.warning("task.workflow_history.finish_failed", {"execution_id": execution.id})
+
         try:
             if not await cls._still_running(execution.id):
                 raise TaskExecutionStopped("Cancelled before the workflow started")
+            try:
+                history = await create_execution_record(
+                    execution.workflow_id, trigger_id=execution.id,
+                    trigger_type="task", attempt=execution.retry.retry_count + 1,
+                )
+            except Exception:
+                log.warning("task.workflow_history.create_failed", {"execution_id": execution.id})
             workflow_data = read_workflow_from_fs(execution.workflow_id)
             if workflow_data is None:
                 raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
@@ -315,6 +347,8 @@ class TaskExecutor:
                     tool_context,
                     cancel_event,
                     done_event,
+                    history["id"] if history else None,
+                    recorder.on_step_complete if history else None,
                 ),
             )
             handed_off = True
@@ -328,16 +362,26 @@ class TaskExecutor:
                 # registered until it exits, so later cancels still reach it.
                 cancel_event.set()
                 raise
+        except asyncio.CancelledError:
+            # The thread can still be writing steps; leave it alone and close the record.
+            if history is not None:
+                await abandon_execution(history["id"])
+            raise
+        except Exception as exc:
+            await finish_history("cancelled" if isinstance(exc, TaskExecutionStopped) else "error", str(exc))
+            raise
         finally:
             if not handed_off:
                 _release_workflow_run(execution.id, cancel_event, done_event)
-        result_status = getattr(result, "status", None)
-        if result_status == "CANCELLED":
-            raise RuntimeError(result.error or "Workflow execution cancelled")
-        if result_status == "TIMED_OUT":
-            raise TimeoutError(result.error or "Workflow execution timed out")
-        if result.error:
-            raise RuntimeError(f"Workflow failed: {result.error}")
+
+        result_status, error = resolve_execution_outcome(result)
+        await finish_history(result_status, error, result.last_node_id)
+        if result_status == "cancelled":
+            raise TaskExecutionStopped(error or "Workflow execution cancelled")
+        if result_status == "timeout":
+            raise TimeoutError(error or "Workflow execution timed out")
+        if result_status != "success":
+            raise RuntimeError(f"Workflow failed: {error or result_status}")
         return str(result.outputs) if result.outputs else None
 
     @classmethod
@@ -349,8 +393,11 @@ class TaskExecutor:
         tool_context: Any = None,
         cancel_event: Optional[threading.Event] = None,
         done_event: Optional[threading.Event] = None,
+        run_id: Optional[str] = None,
+        on_step_complete: Any = None,
     ):
         """Run the workflow with the events _trigger_workflow registered; release them on exit."""
+        from aegisops.workflow.ownership import execution_cancelled
         from aegisops.workflow.runner import run_workflow
 
         cancel = cancel_event if cancel_event is not None else threading.Event()
@@ -364,8 +411,10 @@ class TaskExecutor:
                 workflow=workflow,
                 inputs=inputs,
                 timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
-                cancel=cancel.is_set,
+                cancel=lambda: cancel.is_set() or (run_id is not None and execution_cancelled(run_id)),
                 tool_context=tool_context,
+                run_id=run_id,
+                on_step_complete=on_step_complete,
             )
         finally:
             _release_workflow_run(execution_id, cancel, done)

@@ -1,4 +1,4 @@
-// ../../../../../../projects/aegisops/aegisops/contracts/webui/shims/react.js
+// ../../../../../../aegisops/contracts/webui/shims/react.js
 var React = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__?.React;
 if (!React) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing React).");
@@ -38,7 +38,7 @@ var {
   version
 } = React;
 
-// ../../../../../../projects/aegisops/aegisops/contracts/webui/shims/sdk.js
+// ../../../../../../aegisops/contracts/webui/shims/sdk.js
 var sdk = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__;
 if (!sdk) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing SDK).");
@@ -95,7 +95,7 @@ function modelBrand(value) {
   return brands.custom;
 }
 
-// ../../../../../../projects/aegisops/aegisops/contracts/webui/shims/jsx-runtime.js
+// ../../../../../../aegisops/contracts/webui/shims/jsx-runtime.js
 var runtime = globalThis.__AEGISOPS_WEBUI_CONTRACT_SDK__;
 if (!runtime?.jsx || !runtime?.jsxs) {
   throw new Error("AegisOps WebUI page runtime is not initialized (missing jsx runtime).");
@@ -487,17 +487,27 @@ function AIResultBadge({ row, onStart }) {
 }
 function Icon({ name, size = 18 }) {
   const paths = {
-    activity: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M3 12h4l3-8 4 16 3-8h4" }) }),
+    activity: /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsx("rect", { x: "3", y: "4", width: "18", height: "16", rx: "4", fill: "currentColor", fillOpacity: ".15" }),
+      /* @__PURE__ */ jsx("path", { d: "M6 12h3l2-4 2.5 7 1.5-3H18" })
+    ] }),
     bot: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("rect", { x: "5", y: "7", width: "14", height: "11", rx: "3" }),
-      /* @__PURE__ */ jsx("path", { d: "M12 3v4M9 12h.01M15 12h.01M8 18l-2 3M16 18l2 3" })
+      /* @__PURE__ */ jsx("rect", { x: "4", y: "7", width: "16", height: "13", rx: "5", fill: "currentColor", fillOpacity: ".15" }),
+      /* @__PURE__ */ jsx("path", { d: "M12 4v3m-3 6h.1m5.8 0h.1m-5 3q2 1.5 4 0" }),
+      /* @__PURE__ */ jsx("circle", { cx: "12", cy: "3.5", r: "1", fill: "currentColor" })
     ] }),
-    chart: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M4 19V5M4 19h16M8 15v-4M12 15V8M16 15v-7" }) }),
+    chart: /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsx("rect", { x: "3", y: "4", width: "18", height: "16", rx: "4", fill: "currentColor", fillOpacity: ".13" }),
+      /* @__PURE__ */ jsx("path", { d: "M7 16v-4m5 4V8m5 8v-6" })
+    ] }),
     clock: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("circle", { cx: "12", cy: "12", r: "8" }),
-      /* @__PURE__ */ jsx("path", { d: "M12 8v5l3 2" })
+      /* @__PURE__ */ jsx("path", { d: "M12 3a9 9 0 1 0 9 9h-9Z", fill: "currentColor", fillOpacity: ".14" }),
+      /* @__PURE__ */ jsx("path", { d: "M15 3v6h6a8 8 0 0 0-6-6Z" })
     ] }),
-    download: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M12 3v12M7 10l5 5 5-5M5 21h14" }) }),
+    download: /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsx("path", { d: "M4 14h4l2 2h4l2-2h4v5H4Z", fill: "currentColor", fillOpacity: ".14" }),
+      /* @__PURE__ */ jsx("path", { d: "M12 4v9m-3-3 3 3 3-3" })
+    ] }),
     calendar: /* @__PURE__ */ jsxs(Fragment2, { children: [
       /* @__PURE__ */ jsx("rect", { x: "3", y: "5", width: "18", height: "16", rx: "2" }),
       /* @__PURE__ */ jsx("path", { d: "M8 3v4M16 3v4M3 10h18" })
@@ -511,16 +521,18 @@ function Icon({ name, size = 18 }) {
       /* @__PURE__ */ jsx("path", { d: "M18 3v4h-4M6 21v-4h4" })
     ] }),
     shield: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("path", { d: "M12 3l7 3v5c0 5-3 8-7 10-4-2-7-5-7-10V6l7-3z" }),
-      /* @__PURE__ */ jsx("path", { d: "M9 12l2 2 4-5" })
+      /* @__PURE__ */ jsx("path", { d: "M12 3 20 6v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6Z", fill: "currentColor", fillOpacity: ".15" }),
+      /* @__PURE__ */ jsx("path", { d: "m8.5 12 2.5 2.5 4.5-5" })
     ] }),
     spark: /* @__PURE__ */ jsxs(Fragment2, { children: [
-      /* @__PURE__ */ jsx("path", { d: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8L12 3z" }),
-      /* @__PURE__ */ jsx("path", { d: "M19 16l.8 2.2L22 19l-2.2.8L19 22l-.8-2.2L16 19l2.2-.8L19 16z" })
+      /* @__PURE__ */ jsx("path", { d: "M11 3c.5 4 3 6.5 7 7-4 .5-6.5 3-7 7-.5-4-3-6.5-7-7 4-.5 6.5-3 7-7Z", fill: "currentColor", fillOpacity: ".25" }),
+      /* @__PURE__ */ jsx("path", { d: "M18 15v6m-3-3h6" })
     ] }),
+    play: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "m8 5 11 7-11 7Z", fill: "currentColor", fillOpacity: ".2" }) }),
+    pause: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M8 6v12m8-12v12" }) }),
     x: /* @__PURE__ */ jsx(Fragment2, { children: /* @__PURE__ */ jsx("path", { d: "M6 6l12 12M18 6L6 18" }) })
   };
-  return /* @__PURE__ */ jsx("svg", { width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": "true", style: { display: "block" }, children: /* @__PURE__ */ jsx("g", { fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round", children: paths[name] || paths.activity }) });
+  return /* @__PURE__ */ jsx("svg", { width: size, height: size, viewBox: "0 0 24 24", "aria-hidden": "true", style: { display: "block" }, children: /* @__PURE__ */ jsx("g", { fill: "none", stroke: "currentColor", strokeWidth: "1.75", strokeLinecap: "round", strokeLinejoin: "round", children: paths[name] || paths.activity }) });
 }
 function TrendChart({ trend }) {
   const [hovered, setHovered] = useState(null);
@@ -623,25 +635,48 @@ function AttackTypePie({ rows }) {
     const angle = index * Math.PI * 2 / 72 - Math.PI / 2;
     return { index, category, angle };
   });
+  const [ringOverride, setRingOverride] = useState(null);
+  const [reducedMotion, setReducedMotion] = useState(() => window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false);
+  useEffect(() => {
+    const media = window.matchMedia?.("(prefers-reduced-motion: reduce)");
+    const update = () => setReducedMotion(media?.matches ?? false);
+    media?.addEventListener?.("change", update);
+    return () => media?.removeEventListener?.("change", update);
+  }, []);
+  const breathe = ringOverride ?? !reducedMotion;
   return /* @__PURE__ */ jsxs("div", { className: "dt-ring-body", children: [
-    /* @__PURE__ */ jsxs("svg", { role: "img", "aria-label": "\u653B\u51FB\u7C7B\u578B\u5360\u6BD4\u523B\u5EA6\u73AF", viewBox: "0 0 240 240", width: "100%", height: "156", onPointerLeave: () => setActive(null), style: { minWidth: 0, display: "block" }, children: [
-      ticks.map(({ index, category, angle }) => /* @__PURE__ */ jsx(
-        "line",
+    /* @__PURE__ */ jsxs("div", { className: "dt-ring-visual", children: [
+      sum > 0 && /* @__PURE__ */ jsx(
+        "button",
         {
-          x1: 120 + Math.cos(angle) * 87,
-          y1: 120 + Math.sin(angle) * 87,
-          x2: 120 + Math.cos(angle) * (index % 6 === 0 ? 105 : 101),
-          y2: 120 + Math.sin(angle) * (index % 6 === 0 ? 105 : 101),
-          stroke: category < 0 ? C.borderLight : palette[category % palette.length],
-          strokeWidth: "2.5",
-          strokeLinecap: "round",
-          opacity: active && entries[category]?.[0] !== active ? 0.22 : 1,
-          onPointerEnter: () => setActive(entries[category]?.[0] || null)
-        },
-        index
-      )),
-      /* @__PURE__ */ jsx("text", { x: "120", y: "118", textAnchor: "middle", fill: C.text, fontSize: "29", fontWeight: "720", children: (selected ? selected[1] : sum).toLocaleString() }),
-      /* @__PURE__ */ jsx("text", { x: "120", y: "141", textAnchor: "middle", fill: C.textMuted, fontSize: "11", children: selected ? selected[0] : "\u544A\u8B66\u603B\u91CF" })
+          type: "button",
+          className: "dt-ring-motion",
+          "aria-label": "\u544A\u8B66\u523B\u5EA6\u73AF\u547C\u5438\u52A8\u6548",
+          "aria-pressed": breathe,
+          title: breathe ? "\u6682\u505C\u547C\u5438\u52A8\u6548" : "\u64AD\u653E\u547C\u5438\u52A8\u6548",
+          onClick: () => setRingOverride(!breathe),
+          children: /* @__PURE__ */ jsx(Icon, { name: breathe ? "pause" : "play", size: 13 })
+        }
+      ),
+      /* @__PURE__ */ jsxs("svg", { role: "img", "aria-label": "\u653B\u51FB\u7C7B\u578B\u5360\u6BD4\u523B\u5EA6\u73AF", viewBox: "0 0 240 240", width: "100%", height: "156", onPointerLeave: () => setActive(null), style: { minWidth: 0, display: "block" }, children: [
+        /* @__PURE__ */ jsx("g", { className: "dt-ring-ticks", "data-breathing": sum > 0 && breathe && !active ? "on" : "off", children: ticks.map(({ index, category, angle }) => /* @__PURE__ */ jsx(
+          "line",
+          {
+            x1: 120 + Math.cos(angle) * 87,
+            y1: 120 + Math.sin(angle) * 87,
+            x2: 120 + Math.cos(angle) * (index % 6 === 0 ? 105 : 101),
+            y2: 120 + Math.sin(angle) * (index % 6 === 0 ? 105 : 101),
+            stroke: category < 0 ? C.borderLight : palette[category % palette.length],
+            strokeWidth: "2.5",
+            strokeLinecap: "round",
+            opacity: active && entries[category]?.[0] !== active ? 0.22 : 1,
+            onPointerEnter: () => setActive(entries[category]?.[0] || null)
+          },
+          index
+        )) }),
+        /* @__PURE__ */ jsx("text", { x: "120", y: "118", textAnchor: "middle", fill: C.text, fontSize: "29", fontWeight: "720", children: (selected ? selected[1] : sum).toLocaleString() }),
+        /* @__PURE__ */ jsx("text", { x: "120", y: "141", textAnchor: "middle", fill: C.textMuted, fontSize: "11", children: selected ? selected[0] : "\u544A\u8B66\u603B\u91CF" })
+      ] })
     ] }),
     /* @__PURE__ */ jsx("div", { style: { display: "grid", gap: 9, minWidth: 0, padding: "0 3px" }, children: entries.length ? entries.map(([label, value], index) => /* @__PURE__ */ jsxs("div", { onPointerEnter: () => setActive(label), onPointerLeave: () => setActive(null), style: { display: "grid", gridTemplateColumns: "48px minmax(40px,1fr) 83px", gap: 9, alignItems: "center", fontSize: 12, minWidth: 0 }, children: [
       /* @__PURE__ */ jsx("span", { style: { color: C.textDim, overflowWrap: "anywhere" }, children: label }),
@@ -1281,6 +1316,13 @@ function Page() {
       @media (max-width:1080px) { .dt-report-summary { grid-template-columns: minmax(0,1fr); gap: 18px; } .dt-report-columns { grid-template-columns: minmax(0,1fr); } }
       @media (max-width:760px) { .dt-report-summary { padding: 16px; } .dt-report-metrics { grid-template-columns: repeat(2,minmax(0,1fr)); } .dt-report-content { padding: 18px 16px; } .dt-report-tabs { padding: 0 16px; } .dt-overview-fields { grid-template-columns: minmax(0,1fr); } }
       .dt-trend-body { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 18px; align-items: center; padding: 12px; min-width: 0; }
+      .dt-ring-visual { position: relative; min-width: 0; }
+      .dt-ring-motion { position:absolute; z-index:1; top:0; right:0; display:grid; place-items:center; width:26px; height:26px;
+        color:var(--dt-text-dim); background:var(--dt-panel-soft); border:1px solid var(--dt-border); border-radius:8px; cursor:pointer; }
+      .dt-ring-motion:focus-visible { outline:2px solid var(--dt-blue); outline-offset:2px; }
+      .dt-ring-ticks { transform-origin:120px 120px; }
+      .dt-ring-ticks[data-breathing="on"] { animation:dt-alert-ring-breathe 3.2s ease-in-out infinite; }
+      @keyframes dt-alert-ring-breathe { 0%,100% { opacity:.34; transform:scale(.98); } 50% { opacity:1; transform:scale(1.045); } }
       .dt-ring-body { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; align-items: center; min-width: 0; }
       [data-aegisops-theme] * { font-family: inherit; }
       [data-aegisops-theme] code, [data-aegisops-theme] pre { font-family: Consolas, monospace; }

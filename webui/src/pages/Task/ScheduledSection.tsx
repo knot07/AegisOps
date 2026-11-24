@@ -89,14 +89,15 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                   const cronDesc = runOnce
                     ? t('scheduled.runOnce')
                     : (task.trigger?.cronDescription || describeCron(cron));
-                  const nextRun = task.trigger?.nextRun ?? (runOnce ? task.trigger?.runAt : undefined);
+                  const archived = task.status === 'archived';
+                  const nextRun = enabled ? task.trigger?.nextRun ?? (runOnce ? task.trigger?.runAt : undefined) : undefined;
 
                   return (
                     <tr key={task.id} onClick={() => setEditingTask(task)} className="hover:bg-gray-50 transition-colors cursor-pointer">
                       <td className="px-4 py-3 whitespace-nowrap">
                         <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${enabled ? 'text-green-700' : 'text-gray-400'}`}>
                           <span className={`w-2 h-2 rounded-full flex-shrink-0 ${enabled ? 'bg-green-500' : 'bg-gray-300'}`} />
-                          {enabled ? t('scheduled.statusEnabled') : t('scheduled.statusDisabled')}
+                          {t(archived ? 'scheduled.statusArchived' : enabled ? 'scheduled.statusEnabled' : 'scheduled.statusDisabled')}
                         </span>
                       </td>
                       <td className="px-4 py-3">
@@ -139,6 +140,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
                       <td className="px-4 py-3" onClick={(e) => e.stopPropagation()}>
                         <div className="flex items-center justify-end gap-1">
                           <button
+                            disabled={archived}
                             onClick={(e) => { e.stopPropagation(); handleToggle(task); }}
                             title={enabled ? t('scheduled.toggleDisable') : t('scheduled.toggleEnable')}
                             className={`p-1.5 rounded transition-colors ${
