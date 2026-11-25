@@ -16,11 +16,11 @@
 
 </div>
 
-![AegisOps 工作台首页](docs/images/pages/home-overview.png)
+![AegisOps 工作台首页](docs/images/2026.11.25/dashboard-dial.png)
 
 ## 2026.11.25：任务记录与工作台交互升级
 
-任务中心可以追踪工作流的节点执行，Worker 进度与结果在对话旁可见。工作台更新了消息卡片、状态动画、主题对比度和操作图标。详见[本次更新](docs/CHANGELOG-2026.11.25.md)。
+任务中心可以追踪工作流的节点执行，Worker 进度与结果在对话旁可见。工作台更新了消息卡片、状态动画、主题对比度和操作图标。详见[本次更新](docs/CHANGELOG-2026.11.25.md)与[25 号版界面截图](docs/SCREENSHOTS-2026.11.25.md)。
 
 ## 2026.11.19：统一主题，完善日常操作
 
@@ -106,19 +106,19 @@ Linux 与源码包使用同一套核心文件。主包均不包含 REA、Ghidra 
 
 ## 页面导览
 
-以下均为 2026.11.18 重新拍摄的页面；展开可查看各功能模块。
+首页和原生对话已更新为 2026.11.25 截图；未更新的模块保留旧版截图。展开可查看各功能模块。
 
 <details>
 <summary><b>工作台首页</b> — 运营趋势与常用功能入口。</summary>
 
-![工作台首页](docs/images/pages/home-overview.png)
+![工作台首页](docs/images/2026.11.25/dashboard-dial.png)
 
 </details>
 
 <details>
 <summary><b>原生对话</b> — 通过 Atlas、模型、技能和工具协作；保留标准与 Super-agent 两种调度模式。</summary>
 
-![原生对话](docs/images/pages/chat.png)
+![原生对话](docs/images/2026.11.25/chat-worker.png)
 
 </details>
 
