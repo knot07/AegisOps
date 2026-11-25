@@ -1,3 +1,14 @@
+/* Keep the counter and its caption inside the card, even when the caption wraps. */
+body[data-aegis-scene=vulnops] .metric-grid > .metric {
+  display: grid;
+  align-content: start;
+  gap: 4px;
+  height: auto !important;
+  padding-block: 12px !important;
+}
+body[data-aegis-scene=vulnops] .metric-grid > .metric > :is(.metric-value, .metric-foot) {
+  margin: 0 !important;
+}
 body[data-aegis-scene=vulnops] .metric-label { gap: 6px; }
 body[data-aegis-scene=vulnops] .metric-emblem {
   display: inline-grid; place-items: center; flex: none; width: 30px; height: 30px; border-radius: 9px;
