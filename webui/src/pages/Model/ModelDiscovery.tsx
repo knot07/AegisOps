@@ -1,7 +1,8 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { Loader2, Pencil, Plus, RefreshCw, Search, Trash2 } from 'lucide-react';
+import { Loader2, Plus, RefreshCw, Search } from 'lucide-react';
 import { providerAPI } from '@/api/provider';
 import { extractErrorMessage } from '@/utils/error';
 import type {
@@ -554,7 +555,7 @@ export default function ModelDiscovery({
             {visible.map((row) => (
               <li key={row.id} style={brandStyle(`${row.id} ${row.name}`)} className="aegis-discovery-row flex items-center gap-2 px-3 py-3">
                 <ModelBrandIcon value={`${row.id} ${row.name}`} />
-                <span className="min-w-0 flex-1 break-all text-sm text-gray-800">
+                <span className="aegis-discovery-name min-w-0 flex-1 break-all">
                   {row.name || row.id}
                 </span>
                 <button
@@ -563,9 +564,9 @@ export default function ModelDiscovery({
                   title={t('compact.editModel')}
                   disabled={busy || !row.selectable}
                   onClick={() => setEditor(row)}
-                  className="p-1 text-gray-400 hover:text-gray-700 disabled:opacity-40"
+                  className="aegis-model-icon-action"
                 >
-                  <Pencil className="h-4 w-4" />
+                  <WorkspaceGlyph kind="edit" size="xs" />
                 </button>
                 <button
                   type="button"
@@ -577,9 +578,9 @@ export default function ModelDiscovery({
                     if (row.existing) setDeleted((previous) => [...previous, row.id]);
                     setDirty(true);
                   }}
-                  className="p-1 text-gray-400 hover:text-red-600 disabled:opacity-40"
+                  className="aegis-model-icon-action aegis-discovery-delete"
                 >
-                  <Trash2 className="h-4 w-4" />
+                  <WorkspaceGlyph kind="delete" size="xs" />
                 </button>
                 <button
                   type="button"
@@ -595,10 +596,10 @@ export default function ModelDiscovery({
                     );
                     setDirty(true);
                   }}
-                  className={`relative ml-1 h-5 w-9 shrink-0 rounded-full transition-colors disabled:opacity-40 ${row.enabled ? 'bg-violet-600' : 'bg-gray-300'}`}
+                  className="aegis-discovery-toggle"
                 >
                   <span
-                    className={`absolute left-0.5 top-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${row.enabled ? 'translate-x-4' : ''}`}
+                    className="aegis-discovery-toggle-thumb"
                   />
                 </button>
               </li>

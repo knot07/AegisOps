@@ -4,15 +4,17 @@ import './model-editor.css';
 import ContextBudgetSlider from '@/components/common/ContextBudgetSlider';
 import { refreshChatModelResources } from '@/hooks/useChatModelResources';
 import {ModelBrandIcon, brandStyle} from '@/components/common/VisualIdentity';
+import ModuleEmblem from '@/components/common/ModuleEmblem';
+import './provider-dialog.css';
 import { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
-  Brain, Cog, TestTube, Trash2, Search,
+  Brain, TestTube, Trash2, Search,
   Zap, Eye, EyeOff, Wrench, MessageSquare,
   Link2, Link2Off, Plus, ToggleLeft, ToggleRight,
   ChevronDown, Check, AlertCircle, Loader2,
-  X, Shield, Pencil, Star, AlertTriangle,
+  X, Shield, Star, AlertTriangle,
   CheckCircle2, ArrowUp, ArrowDown, ListOrdered,
   Info, ExternalLink,
 } from 'lucide-react';
@@ -846,18 +848,20 @@ function DashboardStrip({
     <div className="aegis-model-overview grid shrink-0 grid-cols-2 gap-3 mb-4 lg:grid-cols-6">
       {/* Default Model Card */}
       <div style={brandStyle(defaultModel?.model_id || '')} className="aegis-default-model-brand rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
-        <div className="flex items-center justify-between mb-1 opacity-70">
-          <div className="flex items-center gap-2">
+        <div className="flex items-center justify-between gap-2 mb-1">
+          <div className="flex min-w-0 items-center gap-2">
             <ModelBrandIcon value={defaultModel?.model_id || ''} className="is-small" />
             <span className="text-xs font-medium">{t('dashboard.defaultModel')}</span>
           </div>
           {onEditDefault && (
             <button
+              type="button"
               onClick={onEditDefault}
-              className="hover:opacity-100 opacity-60 transition-opacity"
+              className="aegis-model-icon-action"
+              aria-label={t('dashboard.setDefaultModel')}
               title={t('dashboard.setDefaultModel')}
             >
-              <Pencil className="w-3.5 h-3.5" />
+              <WorkspaceGlyph kind="edit" size="xs" />
             </button>
           )}
         </div>
@@ -978,11 +982,13 @@ function ProviderCard({ provider, isSelected, connStatus, onClick, onConfigure }
       </div>
       {onConfigure && (
         <button
+          type="button"
           onClick={(e) => { e.stopPropagation(); onConfigure(); }}
-          className="p-1.5 rounded text-gray-400 hover:text-gray-700 hover:bg-gray-100 flex-shrink-0"
+          className="aegis-model-icon-action"
+          aria-label={t('form.configure')}
           title={t('form.configure')}
         >
-          <Cog className="w-3.5 h-3.5" />
+          <WorkspaceGlyph kind="tune" size="xs" />
         </button>
       )}
     </div>
@@ -1665,7 +1671,8 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
 我可以帮你找到 API Key 的获取方式，以及配置建议。`;
 
   return (
-    <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet"
+    <EntitySheet resizable={false} surfaceClassName={`aegis-model-sheet aegis-provider-sheet${selectedCatalog ? ' has-provider-brand' : ''}`}
+      surfaceStyle={selectedCatalog ? brandStyle(`${selectedCatalog.id} ${selectedCatalog.name}`) : undefined}
       open
       mode="create"
       entityType={step === 'add-model' ? t('form.model') : t('configuration.provider')}
@@ -1673,7 +1680,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
       minWidth={360}
       maxWidth={960}
       entityName={step !== 'provider' ? savedProviderName : undefined}
-      icon={<Brain className="w-5 h-5" />}
+      icon={selectedCatalog ? <ModelBrandIcon value={`${selectedCatalog.id} ${selectedCatalog.name}`} /> : <ModuleEmblem kind="model" size="nav" />}
       rexSystemContext={rexContext}
       rexWelcomeMessage={rexWelcome}
       submitDisabled={sheetProps.submitDisabled}
@@ -2373,7 +2380,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, loadingModels,
     }
     finally { lock.current = false; setSaving(false); }
   };
-  return <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet" open mode="edit" entityType={t('configuration.provider')} entityName={provider.name} width={720} minWidth={360} maxWidth={960} icon={<Brain className="h-5 w-5" />} rexSystemContext="" rexWelcomeMessage="" hideRex hideTest initialTab="form" submitLabel={t('compact.save')} submitLoading={saving} submitDisabled={saving || !ready || loadingModels} onSubmit={save} onClose={onClose} footerLeft={<button type="button" disabled={saving} onClick={onDelete} className="flex items-center gap-1.5 text-xs text-red-600"><Trash2 className="h-3.5 w-3.5" />{t('form.removeProvider')}</button>}>
+  return <EntitySheet resizable={false} surfaceClassName="aegis-model-sheet aegis-provider-sheet has-provider-brand" surfaceStyle={brandStyle(`${provider.id} ${provider.name}`)} open mode="edit" entityType={t('configuration.provider')} entityName={provider.name} width={720} minWidth={360} maxWidth={960} icon={<ModelBrandIcon value={`${provider.id} ${provider.name}`} />} rexSystemContext="" rexWelcomeMessage="" hideRex hideTest initialTab="form" submitLabel={t('compact.save')} submitLoading={saving} submitDisabled={saving || !ready || loadingModels} onSubmit={save} onClose={onClose} footerLeft={<button type="button" disabled={saving} onClick={onDelete} className="flex items-center gap-1.5 text-xs text-red-600"><Trash2 className="h-3.5 w-3.5" />{t('form.removeProvider')}</button>}>
     <div className="space-y-6">
       <div className="space-y-4">
         {custom && <label className="block space-y-1.5 text-sm font-medium text-gray-700">{t('configuration.providerName')}<input value={name} disabled={saving} onChange={e => setName(e.target.value)} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-normal" /></label>}
@@ -2864,9 +2871,10 @@ function ModelSelectionList({
   return (
     <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
       {groups.map(group => (
-        <div key={group.providerId}>
-          <div className="border-b border-gray-100 bg-gray-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
-            {group.providerName}
+        <div key={group.providerId} className="aegis-model-choice-group" style={brandStyle(`${group.providerId} ${group.providerName}`)}>
+          <div className="aegis-model-choice-provider border-b px-4 py-2 text-xs font-semibold tracking-wide">
+            <ModelBrandIcon value={`${group.providerId} ${group.providerName}`} className="is-small" />
+            <span>{group.providerName}</span>
           </div>
           {group.models.map(model => {
             const key = `${model.provider_id}/${model.id}`;
@@ -2874,7 +2882,9 @@ function ModelSelectionList({
             return (
               <div
                 key={key}
-                className={`flex min-w-0 items-center border-b border-gray-100 transition-colors last:border-0 ${
+                data-model-selected={selected}
+                style={brandStyle(`${model.id} ${model.name}`)}
+                className={`aegis-model-choice-row flex min-w-0 items-center border-b border-gray-100 transition-colors last:border-0 ${
                   selected ? 'bg-slate-50' : 'bg-white hover:bg-gray-50'
                 }`}
               >
@@ -2885,7 +2895,8 @@ function ModelSelectionList({
                   aria-pressed={selected}
                   className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left text-sm text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  <span className={`min-w-0 flex-1 truncate ${selected ? 'font-semibold text-slate-900' : 'font-medium text-gray-800'}`}>
+                  <ModelBrandIcon value={`${model.id} ${model.name}`} className="is-small" />
+                  <span className={`aegis-model-choice-name min-w-0 flex-1 truncate ${selected ? 'font-semibold text-slate-900' : 'font-medium text-gray-800'}`}>
                     {model.name || model.id}
                   </span>
                   {modelSupportsVision(model) && (
@@ -3020,11 +3031,11 @@ function SetDefaultModelDialog({
         role="dialog"
         aria-modal="true"
         aria-labelledby="default-model-dialog-title"
-        className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[78vh] flex flex-col"
+        className="aegis-default-model-dialog bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[78vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <h2 id="default-model-dialog-title" className="text-lg font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
+          <h2 id="default-model-dialog-title" className="flex items-center gap-2.5 text-lg font-semibold text-ui-text"><ModuleEmblem kind="model" size="nav" />{t('dashboard.setDefaultModel')}</h2>
           <button
             ref={closeButtonRef}
             type="button"

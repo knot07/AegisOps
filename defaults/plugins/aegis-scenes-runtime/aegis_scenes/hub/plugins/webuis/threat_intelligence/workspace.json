@@ -2,6 +2,7 @@
   "id": "threat_intelligence",
   "version": "1.0.0",
   "title": "威胁情报",
+  "titleEn": "Threat Intelligence",
   "icon": "Radar",
   "order": 40,
   "enabled": true,

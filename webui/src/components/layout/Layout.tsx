@@ -34,6 +34,7 @@ import { useTranslation } from 'react-i18next';
 import { onboardingAPI } from '@/api/onboarding';
 
 const SIDEBAR_COLLAPSED_KEY = 'aegisops_layout_sidebar_collapsed';
+const INCIDENT_RESPONSE_WORKSPACE_ID = 'incident_response';
 
 type LazyLayoutModule = { default: ComponentType<any> };
 
@@ -589,6 +590,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
   const navItemPath = useCallback(
     (href: string) => {
       if (href === '/workspace') return '/workspace?tab=files';
+      if (workspaceIdFromPath(href) === INCIDENT_RESPONSE_WORKSPACE_ID) return href;
       return href === activeTabHref ? href : openTabPathByHref.get(href) ?? href;
     },
     [activeTabHref, openTabPathByHref],
@@ -611,6 +613,13 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       navigate(AGENT_WORKSPACE_DEFAULT_PATH);
       return;
     }
+    const sceneId = sceneWorkspaceIdOf(workspaceId);
+    const workspace = openSceneWorkspaces.find((item) => item.id === sceneId);
+    // Enter through the register instead of resuming a remembered incident investigation.
+    if (workspace?.id === INCIDENT_RESPONSE_WORKSPACE_ID) {
+      navigate(workspace.route);
+      return;
+    }
     if (workspaceId === currentWorkspace && routeNav.kind === 'workspace') return;
     const paths = workspacePathsRef.current;
     const stored = paths[workspaceId];
@@ -626,8 +635,6 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
       navigate(AGENT_WORKSHOP_DEFAULT_PATH);
       return;
     }
-    const sceneId = sceneWorkspaceIdOf(workspaceId);
-    const workspace = openSceneWorkspaces.find((item) => item.id === sceneId);
     if (workspace) navigate(workspace.route);
   }, [currentWorkspace, navigate, openSceneWorkspaces, pathNavigation, routeNav.kind]);
 
@@ -644,6 +651,7 @@ export default function Layout({ contentRoutes = appContentRoutes }: LayoutProps
     const ok = await confirm({
       title: t('logout'),
       description: t('logoutConfirm'),
+      variant: 'logout',
       confirmText: t('logout'),
     });
     if (ok) void logout();

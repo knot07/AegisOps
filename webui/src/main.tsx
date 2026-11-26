@@ -20,3 +20,4 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
 import './styles/theme-palettes.css'
 
 import './styles/theme-skins.css'
+import './styles/themed-controls.css'

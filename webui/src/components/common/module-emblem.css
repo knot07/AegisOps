@@ -21,7 +21,7 @@
 .aegis-scene-menu-caption{font-size:10px;color:rgb(var(--ui-muted));padding:8px 10px 10px}
 .aegis-scene-option{display:flex;align-items:center;gap:10px;width:100%;min-height:44px;padding:10px;border:0;border-radius:9px;font-size:13px;color:rgb(var(--ui-secondary));text-align:left;transition:background .15s}
 .aegis-scene-option>span:nth-child(2){flex:1}.aegis-scene-option:hover,.aegis-scene-option:focus-visible{background:rgb(var(--ui-hover));outline:none}
-.aegis-scene-option[aria-checked=true]{color:#648c3c;font-weight:600;background:#f0f7e7}.aegis-scene-option[aria-checked=true]>svg{color:#84ad54}
+.aegis-scene-option[aria-checked=true]{color:#4d702e;font-weight:600;background:#f0f7e7}.aegis-scene-option[aria-checked=true]>svg{color:#84ad54}
 .dark .aegis-scene-option[aria-checked=true]{background:#2f3d26;color:#b9d59e}.dark .aegis-emblem-nav{filter:brightness(1.15)}
 @media(prefers-reduced-motion:reduce){.aegis-emblem-nav{transition:none!important}.aegis-module-nav :is(a,button):hover>.aegis-emblem-nav,.aegis-welcome-emblem:hover .aegis-emblem-hero{transform:none}}
 

@@ -72,6 +72,20 @@ describe('ConfirmProvider', () => {
     await expect(third).resolves.toBe(false);
   });
 
+  it('uses a separate sign-out appearance and focuses the safe action first', async () => {
+    render(<ConfirmProvider><span /></ConfirmProvider>);
+    let answer: Promise<boolean> | undefined;
+    act(() => {
+      answer = requestConfirm({ title: 'Sign out', description: 'End this session?', confirmText: 'Sign out', variant: 'logout' });
+    });
+    expect(await screen.findByRole('alertdialog')).toHaveAttribute('data-variant', 'logout');
+    const cancel = screen.getByRole('button', { name: 'button.cancel' });
+    expect(cancel).toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Sign out' })).toHaveClass('yushu-logout-confirm');
+    fireEvent.click(cancel);
+    await expect(answer).resolves.toBe(false);
+  });
+
   it('shows only the confirm button for information prompts', async () => {
     render(<ConfirmProvider><span /></ConfirmProvider>);
     act(() => { void requestConfirm({ description: 'Shortcuts', confirmText: 'Got it', hideCancel: true }); });

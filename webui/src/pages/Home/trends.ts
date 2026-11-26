@@ -1,13 +1,13 @@
 import type { TaskExecution } from '@/api/task';
 export const DAY = 86_400_000;
-export function taskTrend(tasks: TaskExecution[], days: number, now: number) {
+export function taskTrend(tasks: TaskExecution[], days: number, now: number, locale = 'zh-CN') {
   const duration = days * DAY;
   const start = now - duration;
   const count = days === 1 ? 24 : days;
   const step = duration / count;
   const points = Array.from({ length: count }, (_, i) => ({
     time: start + i * step, count: 0,
-    label: new Date(start + i * step).toLocaleString('zh-CN', days === 1 ? { hour: '2-digit', minute: '2-digit' } : { month: 'numeric', day: 'numeric' }),
+    label: new Date(start + i * step).toLocaleString(locale, days === 1 ? { hour: '2-digit', minute: '2-digit' } : { month: 'numeric', day: 'numeric' }),
   }));
   const current: TaskExecution[] = [];
   let previous = 0;

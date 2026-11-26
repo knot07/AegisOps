@@ -265,3 +265,82 @@ def test_live_backup_is_complete_and_revokes_restored_sessions(env, tmp_path):
         assert con.execute('SELECT COUNT(*) FROM sessions').fetchone()[0] == 0
         assert con.execute('SELECT COUNT(*) FROM vulnerabilities').fetchone()[0] == 1
     assert root.get('/api/me').status_code == 200
+
+
+def test_discovery_date_filters_dashboard_ledger_and_export(env):
+    mod, root, members, _, create, _ = env
+    first, last = ((mod.today() - timedelta(days=offset)).isoformat() for offset in (11, 9))
+    outside = (mod.today() - timedelta(days=12)).isoformat()
+    create(title="Before range", discovered_at=outside)
+    vid = create(title="At start", discovered_at=first)
+    create(owner="owner2", title="At end", discovered_at=last)
+    scope = {"discovered_from": first, "discovered_to": last}
+    info = root.get("/api/dashboard", params=scope).json()
+    assert info["total"] == info["open"] == 2
+    assert info["trend"][0] == {"date": first, "new": 1, "closed": 0}
+    assert info["trend"][-1] == {"date": last, "new": 1, "closed": 0}
+    assert members["owner1"]["client"].get("/api/dashboard", params=scope).json()["total"] == 1
+    same_day = {"discovered_from": first, "discovered_to": first}
+    assert [row["id"] for row in root.get("/api/vulnerabilities", params=same_day).json()["items"]] == [vid]
+    export = root.get("/api/export", params=scope)
+    assert export.status_code == 200
+    assert "At start" in export.text and "At end" in export.text and "Before range" not in export.text
+    for route in ("dashboard", "vulnerabilities", "export"):
+        assert root.get(f"/api/{route}", params={"discovered_from": last, "discovered_to": first}).status_code == 422
+        assert root.get(f"/api/{route}", params={"discovered_from": "not-a-date"}).status_code == 422
+    assert root.get("/api/dashboard").json()["total"] == 3
+
+
+def test_dashboard_trend_uses_the_entire_selected_range(env, monkeypatch):
+    mod, root, _, _, create, _ = env
+    business_today = mod.date(2026, 11, 26)
+    monkeypatch.setattr(mod, 'today', lambda: business_today)
+    start, end = '2026-10-28', business_today.isoformat()
+    first = create(title='First selected day', discovered_at=start)
+    create(title='Last selected day', discovered_at=end)
+    create(title='Outside selected range', discovered_at='2026-10-27')
+    # 16:30 UTC belongs to the next day in the dashboard's Beijing calendar.
+    with mod.db() as con:
+        con.execute("UPDATE vulnerabilities SET status='closed', closed_at=? WHERE id=?",
+                    ('2026-11-04T16:30:00+00:00', first))
+
+    response = root.get('/api/dashboard', params={'discovered_from': start, 'discovered_to': end})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result['trend_range'] == {'start_date': start, 'end_date': end, 'days': 30,
+                                     'bucket_days': 1, 'daily_peak': 1}
+    assert len(result['trend']) == 30
+    points = {point['date']: point for point in result['trend']}
+    assert points[start]['new'] == points[end]['new'] == 1
+    assert points['2026-10-29']['new'] == 0
+    assert points['2026-11-04']['closed'] == 0 and points['2026-11-05']['closed'] == 1
+    assert sum(point['new'] for point in points.values()) == result['total'] == 2
+    assert root.get('/api/dashboard', params={'discovered_from': start}).json()['trend'] == result['trend']
+    assert root.get('/api/dashboard', params={'discovered_to': end}).json()['trend_range']['start_date'] == '2026-10-27'
+    assert root.get('/api/dashboard', params={'discovered_to': '2026-11-27'}).status_code == 422
+
+    default = root.get('/api/dashboard').json()
+    assert default['trend_range']['start_date'] == '2026-11-13'
+    assert len(default['trend']) == 14
+    empty = root.get('/api/dashboard', params={'discovered_from': '2026-11-06', 'discovered_to': '2026-11-12'}).json()
+    assert len(empty['trend']) == 7
+    assert not any(point['new'] or point['closed'] for point in empty['trend'])
+
+
+def test_dashboard_trend_groups_long_ranges_without_losing_early_events(env):
+    mod, root, _, _, create, _ = env
+    end = mod.today()
+    start = end - timedelta(days=403)
+    create(title='Old selected event', discovered_at=start.isoformat())
+    create(title='New selected event', discovered_at=end.isoformat())
+    result = root.get('/api/dashboard', params={'discovered_from': start, 'discovered_to': end}).json()
+    trend = result['trend']
+    assert 1 < len(trend) <= 90
+    assert trend[0]['date'] == start.isoformat()
+    assert trend[-1]['end_date'] == end.isoformat()
+    assert trend[0]['new'] == trend[-1]['new'] == 1
+    for point, next_point in zip(trend, trend[1:]):
+        assert mod.date.fromisoformat(next_point['date']) - mod.date.fromisoformat(point['end_date']) == timedelta(days=1)
+    assert result['trend_range']['days'] == 404
+    assert result['trend_range']['bucket_days'] == 7
+    assert sum(point['new'] for point in trend) == result['total'] == 2

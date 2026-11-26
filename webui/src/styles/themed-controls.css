@@ -1,0 +1,105 @@
+/* Composer popups use the same palette as the surrounding composer. Resource and model logos keep their identities. */
+html :is(.aegis-composer-popover,.aegis-agent-picker,.aegis-scheduling-panel,.aegis-composer-add-popup,.aegis-project-popup) {
+  --popup-accent: var(--skin-accent, var(--night-green, #47632e));
+  --popup-surface: rgb(var(--ui-surface));
+  --popup-raised: rgb(var(--ui-subtle));
+  --popup-border: rgb(var(--ui-border));
+  --popup-selected: rgb(var(--ui-selected));
+  --popup-text: rgb(var(--ui-text));
+  --popup-secondary: rgb(var(--ui-secondary));
+  background: var(--popup-surface) !important;
+  border-color: var(--popup-border) !important;
+  color: var(--popup-text) !important;
+}
+html :is(.aegis-composer-popover,.aegis-agent-picker) :is(.aegis-composer-popover-header,.agent-picker-header,.aegis-model-provider-heading) {
+  background: linear-gradient(120deg,var(--popup-surface),var(--popup-raised)) !important;
+  border-color: var(--popup-border) !important;
+  color: var(--popup-secondary) !important;
+}
+html .aegis-agent-picker :is(.agent-picker-header>span:first-child,.agent-picker-header>div:first-child>div:first-child,.agent-picker-name) { color:var(--popup-text) !important; }
+html .aegis-agent-picker .agent-picker-filters { background:var(--popup-raised) !important; }
+html .aegis-agent-picker .agent-picker-filters button { color:var(--popup-secondary); }
+html .aegis-agent-picker .agent-picker-filters button[aria-pressed=true] { background:var(--popup-selected);color:var(--popup-accent); }
+html .aegis-agent-picker .agent-picker-card { background:linear-gradient(115deg,var(--popup-raised),var(--popup-surface) 82%) !important;border-color:var(--popup-border) !important; }
+html .aegis-agent-picker .agent-picker-badge { background:var(--popup-surface);border-color:var(--popup-border);color:var(--popup-secondary); }
+html :is(.aegis-composer-popover,.aegis-agent-picker,.aegis-scheduling-panel,.aegis-composer-add-popup,.aegis-project-popup) .overflow-y-auto {
+  scrollbar-color:color-mix(in srgb,var(--popup-accent) 70%,var(--popup-raised)) var(--popup-raised);
+}
+html :is(.aegis-scheduling-panel,.aegis-composer-add-popup,.aegis-project-popup)>:is(div,p),
+html .aegis-scheduling-panel button>span>span:last-child { border-color:var(--popup-border);color:var(--popup-secondary); }
+html :is(.aegis-scheduling-panel,.aegis-composer-add-popup,.aegis-project-popup) button:not(:disabled) { color:var(--popup-text); }
+html :is(.aegis-composer-add-popup,.aegis-project-popup,.aegis-scheduling-panel,.aegis-composer-popover) button:not(:disabled):hover,
+html .aegis-agent-picker .agent-picker-card:not(:disabled):hover { background:rgb(var(--ui-hover)) !important; }
+html :is(.aegis-composer-popover,.aegis-scheduling-panel,.aegis-project-popup) button:is([aria-checked=true],[aria-pressed=true],[data-popup-selected=true]),
+html .aegis-agent-picker .agent-picker-card[aria-pressed=true] {
+  background:var(--popup-selected) !important;border-color:var(--skin-outline,var(--popup-border)) !important;color:var(--popup-accent) !important;
+}
+html :is(.aegis-composer-popover,.aegis-scheduling-panel,.aegis-project-popup) button:is([aria-checked=true],[aria-pressed=true],[data-popup-selected=true]) :is(.lucide-check,.lucide-folder-git-2,.lucide-x,.aegis-mode-option>span:first-child),
+html .aegis-agent-picker .agent-picker-card[aria-pressed=true] .agent-picker-name { color:var(--popup-accent) !important; }
+html :is(.aegis-scheduling-panel,.aegis-composer-add-popup,.aegis-project-popup) button .workspace-glyph {
+  --glyph-ink:var(--popup-accent);--glyph-pigment:var(--popup-accent);
+}
+html .aegis-agent-picker .agent-picker-card:focus-visible { outline-color:var(--popup-accent); }
+
+/* Toast chrome stays neutral. A slim rail and icon tile convey the message type. */
+.aegis-toast {
+  --toast-accent:var(--skin-accent,var(--night-green,#47632e));
+  --toast-surface:rgb(var(--ui-surface));
+  display:flex;align-items:flex-start;gap:11px;position:relative;
+  padding:13px 13px 13px 16px;border:1px solid rgb(var(--ui-border));border-radius:14px;
+  background:linear-gradient(108deg,color-mix(in srgb,var(--toast-accent) 7%,var(--toast-surface)),var(--toast-surface) 55%);
+  color:rgb(var(--ui-text));box-shadow:0 9px 26px #101a2724,0 2px 5px #101a270b;
+}
+.aegis-toast::before { content:"";position:absolute;inset-block:11px;inset-inline-start:0;width:3px;border-radius:0 3px 3px 0;background:var(--toast-accent); }
+.aegis-toast[data-tone=success] { --toast-accent:#277248; }
+.aegis-toast[data-tone=warning] { --toast-accent:#8c5a15; }
+.aegis-toast[data-tone=error] { --toast-accent:#aa3c32; }
+html.dark .aegis-toast[data-tone=success] { --toast-accent:#8ce9b3; }
+html.dark .aegis-toast[data-tone=warning] { --toast-accent:#f2ca80; }
+html.dark .aegis-toast[data-tone=error] { --toast-accent:#ffada5; }
+.aegis-toast-icon { flex:none;display:grid;place-items:center;width:32px;height:32px;border-radius:10px;background:color-mix(in srgb,var(--toast-accent) 13%,var(--toast-surface));color:var(--toast-accent); }
+.aegis-toast-title { margin:0;padding-top:6px;font-size:13px;line-height:20px;font-weight:650;overflow-wrap:anywhere; }
+.aegis-toast-description { margin:3px 0 0;font-size:12px;line-height:1.6;color:rgb(var(--ui-secondary));overflow-wrap:anywhere; }
+.aegis-toast-close { display:grid;place-items:center;flex:none;width:30px;height:30px;border-radius:8px;color:rgb(var(--ui-secondary)); }
+.aegis-toast-close:hover { background:rgb(var(--ui-hover));color:rgb(var(--ui-text)); }
+.aegis-toast-close:focus-visible { outline:2px solid rgb(var(--ui-focus));outline-offset:2px; }
+
+/* Account search and primary glyphs share their host control's alignment and ink. */
+.yushu-search-field { position:relative; }
+.yushu-account-filters .yushu-search-field input { padding-inline-start:36px; }
+html button:is(.yushu-primary,[data-aegis-action-tone=primary]) .workspace-glyph[data-tone] {
+  --glyph-ink:currentColor;--glyph-pigment:currentColor;
+}
+
+/* Small primary actions keep a light, skin-specific fill and one ink for text and glyphs. */
+html button.aegis-bright-action {
+  --bright-fill:var(--skin-buttonTo,#bcd994);
+  --bright-ink:var(--skin-buttonText,#273b21);
+  background:var(--bright-fill) !important;
+  color:var(--bright-ink) !important;
+  border:1px solid var(--skin-outline,#8ea874) !important;
+  border-radius:9px;
+  transition:background-color .16s ease-out,border-color .16s ease-out;
+}
+html button.aegis-bright-action:hover:not(:disabled) {
+  background:color-mix(in srgb,var(--bright-fill) 82%,white) !important;
+}
+html button.aegis-bright-action:disabled {
+  cursor:not-allowed;
+  background:color-mix(in srgb,rgb(var(--ui-subtle)) 70%,rgb(var(--ui-border))) !important;
+  border-color:rgb(var(--ui-border)) !important;
+  color:rgb(var(--ui-secondary)) !important;
+}
+html button.aegis-bright-action:focus-visible {
+  outline:2px solid rgb(var(--ui-focus));outline-offset:2px;
+}
+html button.aegis-bright-action .workspace-glyph[data-tone] {
+  --glyph-ink:currentColor;--glyph-pigment:currentColor;background:none;
+}
+html button.aegis-bright-action .workspace-glyph>svg { width:18px;height:18px; }
+@media (prefers-reduced-motion:reduce) { html button.aegis-bright-action { transition:none; } }
+
+@media (prefers-reduced-motion:no-preference) {
+  .aegis-toast { animation: aegis-toast-enter .24s cubic-bezier(.2,.65,.3,1) both; }
+  @keyframes aegis-toast-enter { from { opacity:0; transform:translateY(-6px); } to { opacity:1; transform:translateY(0); } }
+}

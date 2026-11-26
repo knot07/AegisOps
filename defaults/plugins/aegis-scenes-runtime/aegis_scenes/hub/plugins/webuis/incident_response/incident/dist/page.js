@@ -62,6 +62,20 @@ var jsxs = runtime.jsxs;
 var Fragment2 = runtime.React.Fragment;
 
 // src/index.tsx
+var incidentUiEnglish = { "\u5F85\u542F\u52A8": "Not started", "\u5F85\u8C03\u67E5": "Queued", "\u8C03\u67E5\u4E2D": "Investigating", "\u5DF2\u5F52\u6863": "Archived", "\u6267\u884C\u4E2D": "Running", "\u5F85\u590D\u6838": "Pending review", "\u6267\u884C\u5931\u8D25": "Failed", "\u5DF2\u4E2D\u65AD": "Interrupted", "\u5B8C\u6210": "Completed", "\u5F85\u914D\u7F6E": "Needs setup", "\u90E8\u5206\u5B8C\u6210": "Partially completed", "\u5DF2\u63D0\u4EA4": "Submitted", "\u5F85\u6267\u884C": "Pending", "\u5168\u90E8\u4E8B\u4EF6": "All events", "\u8C03\u67E5\u8FDB\u884C\u4E2D": "In progress", "\u5F02\u5E38 / \u4E2D\u65AD": "Failed / interrupted", "\u52D2\u7D22\u653B\u51FB": "Ransomware", "\u6076\u610F\u7A0B\u5E8F": "Malware", "\u6F0F\u6D1E\u5229\u7528": "Exploitation", "\u8EAB\u4EFD\u653B\u51FB": "Credential attack", "\u6A2A\u5411\u79FB\u52A8": "Lateral movement", "\u6570\u636E\u5916\u4F20": "Data exfiltration", "\u9493\u9C7C\u653B\u51FB": "Phishing", "\u5916\u8054\u901A\u4FE1": "External communication", "\u626B\u63CF\u63A2\u6D4B": "Reconnaissance", "\u5176\u4ED6\u4E8B\u4EF6": "Other", "\u6765\u6E90 IP": "Source IP", "\u76EE\u6807 IP": "Destination IP", "\u6765\u6E90\u5F85\u6838\u5B9E": "Source unverified", "\u5230": "to", "\u5E94\u6025\u54CD\u5E94 Logo": "Incident response logo", "\u5E94\u6025\u54CD\u5E94\u5DE5\u4F5C\u53F0": "Incident response", "\u4ECE\u786E\u8BA4\u544A\u8B66\u5230\u8BC1\u636E\u94FE\uFF0C\u8BA9\u6BCF\u4E00\u6B65\u8C03\u67E5\u90FD\u6709\u4F9D\u636E\u3002": "From confirmed alerts to evidence-backed investigations.", "\u5DE5\u4F5C\u6D41 + AI \u5206\u6790": "Workflows + AI analysis", "\u65B0\u589E\u4E8B\u4EF6": "New incident", "\u4E3B\u673A\u4E0E\u8FDE\u63A5": "Hosts & connections", "\u5237\u65B0": "Refresh", "\u54CD\u5E94\u4E8B\u4EF6": "Incidents", "\u7B49\u5F85\u590D\u6838": "Pending review", "\u767B\u8BB0\u4E3B\u673A": "Registered hosts", "\u54CD\u5E94\u4E8B\u4EF6\u53F0\u8D26": "Incident register", "\u4E8B\u4EF6\u72B6\u6001": "Incident status", "\u641C\u7D22\u54CD\u5E94\u4E8B\u4EF6": "Search incidents", "\u641C\u7D22\u4E8B\u4EF6\u540D\u79F0\u3001\u7F16\u53F7\u6216\u6765\u6E90 / \u76EE\u6807 IP": "Search name, ID, source or destination IP", "\u7B5B\u9009\u4E8B\u4EF6\u7C7B\u578B": "Filter incident types", "\u5168\u90E8\u4E8B\u4EF6\u7C7B\u578B": "All incident types", "\u91CD\u7F6E\u7B5B\u9009": "Reset filters", "\u4E8B\u4EF6\u540D\u79F0 / \u7F16\u53F7": "Incident / ID", "\u4E8B\u4EF6\u7C7B\u578B": "Type", "\u6765\u6E90 \u2192 \u76EE\u6807": "Source \u2192 Destination", "\u72B6\u6001": "Status", "\u767B\u8BB0\u65F6\u95F4": "Registered at", "\u64CD\u4F5C": "Actions", "\u67E5\u770B\u8BE6\u60C5": "View details", "\u6B63\u5728\u52A0\u8F7D\u54CD\u5E94\u4E8B\u4EF6\u2026": "Loading incidents\u2026", "\u6CA1\u6709\u7B26\u5408\u7B5B\u9009\u6761\u4EF6\u7684\u4E8B\u4EF6\u3002": "No matching incidents.", "\u6682\u65E0\u4E8B\u4EF6\uFF0C\u53EF\u901A\u8FC7\u300C\u65B0\u589E\u4E8B\u4EF6\u300D\u767B\u8BB0\uFF0C\u6216\u4ECE\u6B63\u5F0F\u544A\u8B66\u53D1\u8D77\u8C03\u67E5\u3002": "No incidents yet. Register one using New incident.", "\u4E0A\u4E00\u9875": "Previous", "\u4E0B\u4E00\u9875": "Next", "\u8FD4\u56DE\u4E8B\u4EF6\u53F0\u8D26": "Back to incidents", "\u4E8B\u4EF6\u8C03\u67E5": "Investigation", "\u8C03\u67E5\u529F\u80FD": "Investigation stages", "\u8C03\u67E5\u52A8\u6001": "Activity", "\u8BBE\u5907\u5173\u8054": "Device correlation", "\u4E3B\u673A\u6392\u67E5": "Host investigation", "\u6837\u672C\u4E0E\u9006\u5411": "Samples & analysis", "\u6C99\u7BB1\u5206\u6790": "Sandbox analysis", "\u54CD\u5E94\u62A5\u544A": "Response report", "\u4E8B\u4EF6\u64CD\u4F5C": "Incident actions", "\u66F4\u65B0\u72B6\u6001": "Update status", "\u5BFC\u51FA\u62A5\u544A": "Export report", "\u5220\u9664\u4E8B\u4EF6": "Delete incident", "\u6765\u6E90\u8BBE\u5907": "Source device", "\u5C1A\u672A\u660E\u786E\u6765\u6E90\u8BBE\u5907": "Source device not selected", "\u53D8\u66F4\u6765\u6E90": "Change source", "\u660E\u786E\u6765\u6E90\u8BBE\u5907": "Select source device", "\u6F14\u793A\u4E8B\u4EF6 \xB7 \u4EC5\u9884\u89C8\u6D41\u7A0B\uFF0C\u4E0D\u67E5\u8BE2\u771F\u5B9E\u8BBE\u5907\u3001\u4E0D\u4E0A\u673A\u3001\u4E0D\u4E0A\u4F20\u6837\u672C\u3002": "Demo incident \xB7 preview only. No real devices, hosts or sample uploads.", "\u5237\u65B0\u5173\u8054\u65E5\u5FD7": "Refresh correlation", "\u5C1A\u672A\u7ED1\u5B9A\u6765\u6E90\u8BBE\u5907": "No source device selected", "\u66F4\u6362\u8BBE\u5907": "Change device", "\u9009\u62E9\u8BBE\u5907": "Select device", "\u67E5\u8BE2\u5173\u8054\u65E5\u5FD7": "Query related logs", "\u67E5\u8BE2\u8BB0\u5F55\u4E0E\u5F02\u5E38": "Query history and errors", "\u67E5\u8BE2\u8303\u56F4\u8BF4\u660E": "Query scope", "\u4E3B\u673A\u4E0E\u8C03\u67E5\u8FDE\u63A5": "Hosts and investigation connections", "\u6B63\u5728\u52A0\u8F7D\u4E8B\u4EF6\u8BE6\u60C5\u2026": "Loading incident details\u2026", "\u65E0\u6CD5\u6253\u5F00\u6B64\u4E8B\u4EF6": "Could not open incident", "\u53EF\u8FD4\u56DE\u4E8B\u4EF6\u53F0\u8D26\uFF0C\u6216\u5237\u65B0\u540E\u91CD\u8BD5\u3002": "Return to the register or refresh to retry.", "\u6B63\u5728\u8BFB\u53D6\u8C03\u67E5\u8BB0\u5F55\u548C\u8BC1\u636E\u3002": "Loading investigation records and evidence.", "\u5DF2\u767B\u8BB0": "Registered", "\u672A\u914D\u7F6E\u5BC6\u94A5": "No key configured", "\u5C1A\u672A\u914D\u7F6E": "Not configured", "\u5DF2\u914D\u7F6E\u5BC6\u94A5": "Key configured", "\u5173\u95ED": "Close", "\u53D6\u6D88": "Cancel", "\u4FDD\u5B58": "Save", "\u62A5\u544A": "Report", "\u67E5\u770B\u62A5\u544A": "View report", "\u5E94\u6025\u54CD\u5E94\u62A5\u544A\u8BE6\u60C5": "Incident report details", "\u8C03\u67E5\u7ED3\u8BBA": "Findings", "\u6682\u65E0\u62A5\u544A": "No report yet", "\u751F\u6210\u62A5\u544A": "Generate report", "\u6309\u65F6\u95F4\u5012\u5E8F \xB7 \u76F8\u90BB\u91CD\u590D\u8BB0\u5F55\u5408\u5E76\u663E\u793A": "Newest first \xB7 consecutive duplicates grouped", "\u6536\u8D77\u8BB0\u5F55": "Collapse records", "\u6682\u65E0\u8C03\u67E5\u8BB0\u5F55": "No investigation records", "\u64CD\u4F5C\u4EBA\uFF1A": "Actor: ", "\u7CFB\u7EDF": "System", "\u5DF2\u4E0B\u8F7D": "Downloaded" };
+var incidentLocale = () => document.documentElement.lang.toLowerCase().startsWith("en");
+function ui(text) {
+  return incidentLocale() ? incidentUiEnglish[text] || text : text;
+}
+function useIncidentLocale() {
+  const [english, setEnglish] = useState(incidentLocale);
+  useEffect(() => {
+    const observer = new MutationObserver(() => setEnglish(incidentLocale()));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+    return () => observer.disconnect();
+  }, []);
+  return english;
+}
 var BASE = "/api/scenes/incident";
 async function req(path, data, method = "POST") {
   const r = await fetch(BASE + path, { credentials: "same-origin", headers: { "Content-Type": "application/json" }, ...data === void 0 ? {} : { method, body: JSON.stringify(data) } });
@@ -69,7 +83,7 @@ async function req(path, data, method = "POST") {
   if (!r.ok) throw Error(b.detail || "\u64CD\u4F5C\u672A\u5B8C\u6210");
   return b;
 }
-var labels = { new: "\u5F85\u542F\u52A8", queued: "\u5F85\u8C03\u67E5", investigating: "\u8C03\u67E5\u4E2D", closed: "\u5DF2\u5F52\u6863", running: "\u6267\u884C\u4E2D", review: "\u5F85\u590D\u6838", failed: "\u6267\u884C\u5931\u8D25", interrupted: "\u5DF2\u4E2D\u65AD", completed: "\u5B8C\u6210", blocked: "\u5F85\u914D\u7F6E", partial: "\u90E8\u5206\u5B8C\u6210", submitted: "\u5DF2\u63D0\u4EA4" };
+var labels = { new: "\u5F85\u542F\u52A8", queued: "\u5F85\u8C03\u67E5", investigating: "\u8C03\u67E5\u4E2D", closed: "\u5DF2\u5F52\u6863", running: "\u6267\u884C\u4E2D", review: "\u5F85\u590D\u6838", failed: "\u6267\u884C\u5931\u8D25", interrupted: "\u5DF2\u4E2D\u65AD", completed: "\u5B8C\u6210", blocked: "\u5F85\u914D\u7F6E", partial: "\u90E8\u5206\u5B8C\u6210", submitted: "\u5DF2\u63D0\u4EA4", downloaded: "\u5DF2\u4E0B\u8F7D" };
 function Icon({ type = "shield" }) {
   return /* @__PURE__ */ jsx("svg", { width: "21", height: "21", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.6", strokeLinecap: "round", strokeLinejoin: "round", children: type === "file" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
     /* @__PURE__ */ jsx("path", { d: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8Z" }),
@@ -121,8 +135,15 @@ function StageIcon({ stage }) {
   };
   return /* @__PURE__ */ jsx("svg", { "data-stage-icon": stage, viewBox: "0 0 32 32", fill: "none", stroke: "currentColor", strokeWidth: "1.65", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: shapes[stage] });
 }
+function ActivityMessage({ message }) {
+  const parts = message.split(/(\b[0-9a-fA-F]{32,}\b|\b(?:\d{1,3}\.){3}\d{1,3}\b|(?<![\w:/])\/(?:[\w.@+-]+\/)*[\w@+-]+(?:\.[\w@+-]+)*)/g);
+  return /* @__PURE__ */ jsx(Fragment2, { children: parts.map((part, i) => i % 2 ? /* @__PURE__ */ jsx("code", { className: "ir-activity-token", children: part }, i) : part) });
+}
 function ActivityTimeline({ events, compact = false }) {
   const [expanded, setExpanded] = useState(false);
+  const english = incidentLocale(), locale = english ? "en-US" : "zh-CN", limit = compact ? 4 : 8;
+  const dayFormat = new Intl.DateTimeFormat(locale, { month: "2-digit", day: "2-digit" });
+  const timeFormat = new Intl.DateTimeFormat(locale, { hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" });
   const grouped = [];
   for (const e of events.slice().reverse()) {
     const message = eventMessage(e), last = grouped[grouped.length - 1];
@@ -132,53 +153,66 @@ function ActivityTimeline({ events, compact = false }) {
     }
     grouped.push({ ...e, message, count: 1 });
   }
-  const shown = expanded ? grouped : grouped.slice(0, compact ? 4 : 8);
-  return /* @__PURE__ */ jsxs("div", { className: "activity-digest", children: [
-    /* @__PURE__ */ jsxs("div", { className: "activity-summary", children: [
-      /* @__PURE__ */ jsxs("span", { children: [
-        events.length,
-        " \u6761\u8BB0\u5F55"
+  if (!events.length) return /* @__PURE__ */ jsx("div", { className: "ir-activity-empty", children: ui("\u6682\u65E0\u8C03\u67E5\u8BB0\u5F55") });
+  const shown = expanded ? grouped : grouped.slice(0, limit);
+  return /* @__PURE__ */ jsxs("div", { className: "ir-activity", children: [
+    /* @__PURE__ */ jsxs("div", { className: "ir-activity-meta", children: [
+      /* @__PURE__ */ jsxs("span", { className: "ir-activity-count", children: [
+        /* @__PURE__ */ jsx("strong", { children: events.length.toLocaleString(locale) }),
+        " ",
+        english ? events.length === 1 ? "record" : "records" : "\u6761\u8BB0\u5F55"
       ] }),
-      /* @__PURE__ */ jsx("small", { children: "\u6309\u65F6\u95F4\u5012\u5E8F \xB7 \u76F8\u90BB\u91CD\u590D\u8BB0\u5F55\u5408\u5E76\u663E\u793A" })
+      /* @__PURE__ */ jsx("small", { children: ui("\u6309\u65F6\u95F4\u5012\u5E8F \xB7 \u76F8\u90BB\u91CD\u590D\u8BB0\u5F55\u5408\u5E76\u663E\u793A") })
     ] }),
-    /* @__PURE__ */ jsx("div", { className: "compact-timeline", children: shown.map((e) => /* @__PURE__ */ jsxs("article", { className: "activity-entry", "data-status": e.status, children: [
-      /* @__PURE__ */ jsxs("div", { className: "activity-stamp", children: [
-        /* @__PURE__ */ jsx("time", { children: new Date(e.at).toLocaleString("zh-CN", { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }) }),
-        /* @__PURE__ */ jsx("b", { children: labels[e.status] || e.status })
-      ] }),
-      /* @__PURE__ */ jsxs("details", { children: [
-        /* @__PURE__ */ jsxs("summary", { children: [
-          /* @__PURE__ */ jsx("span", { children: e.message }),
-          e.count > 1 && /* @__PURE__ */ jsxs("i", { children: [
-            "\xD7",
-            e.count
-          ] })
+    /* @__PURE__ */ jsx("div", { className: "ir-activity-list", children: shown.map((e) => {
+      const date = new Date(e.at), valid = Boolean(e.at) && Number.isFinite(date.getTime()), message = String(e.message ?? "");
+      const fullDate = valid ? date.toLocaleString(locale, { hourCycle: "h23" }) : "\u2014";
+      return /* @__PURE__ */ jsxs("article", { className: "ir-activity-row", "data-status": e.status, children: [
+        /* @__PURE__ */ jsxs("div", { className: "ir-activity-meta-cell", children: [
+          /* @__PURE__ */ jsxs("time", { className: "ir-activity-time", dateTime: valid ? date.toISOString() : void 0, title: fullDate, children: [
+            /* @__PURE__ */ jsx("span", { children: valid ? dayFormat.format(date) : "\u2014" }),
+            valid && /* @__PURE__ */ jsxs(Fragment2, { children: [
+              " ",
+              /* @__PURE__ */ jsx("span", { children: timeFormat.format(date) })
+            ] })
+          ] }),
+          /* @__PURE__ */ jsx("span", { className: "ir-activity-status", children: ui(labels[e.status] || e.status) })
         ] }),
-        /* @__PURE__ */ jsxs("div", { className: "activity-full", children: [
-          e.message,
-          /* @__PURE__ */ jsxs("small", { children: [
-            "\u64CD\u4F5C\u4EBA\uFF1A",
-            e.actor || "\u7CFB\u7EDF",
-            " \xB7 ",
-            new Date(e.at).toLocaleString()
+        /* @__PURE__ */ jsxs("details", { className: "ir-activity-detail", children: [
+          /* @__PURE__ */ jsxs("summary", { className: "ir-activity-toggle", children: [
+            /* @__PURE__ */ jsx("span", { className: "ir-activity-preview", children: /* @__PURE__ */ jsx(ActivityMessage, { message }) }),
+            e.count > 1 && /* @__PURE__ */ jsxs("span", { className: "ir-activity-repeat", children: [
+              "\xD7",
+              e.count
+            ] }),
+            /* @__PURE__ */ jsx("svg", { viewBox: "0 0 16 16", fill: "none", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: "m4 6 4 4 4-4", stroke: "currentColor", strokeWidth: "1.5", strokeLinecap: "round", strokeLinejoin: "round" }) })
+          ] }),
+          /* @__PURE__ */ jsxs("div", { className: "ir-activity-expanded", children: [
+            /* @__PURE__ */ jsx(ActivityMessage, { message }),
+            /* @__PURE__ */ jsxs("small", { children: [
+              ui("\u64CD\u4F5C\u4EBA\uFF1A"),
+              e.actor || ui("\u7CFB\u7EDF"),
+              " \xB7 ",
+              fullDate
+            ] })
           ] })
         ] })
-      ] })
-    ] }, e.id)) }),
-    grouped.length > (compact ? 4 : 8) && /* @__PURE__ */ jsx("button", { className: "activity-expand", onClick: () => setExpanded(!expanded), children: expanded ? "\u6536\u8D77\u8BB0\u5F55" : `\u5C55\u5F00\u5168\u90E8 ${grouped.length} \u7EC4\u8BB0\u5F55` })
+      ] }, e.id);
+    }) }),
+    grouped.length > limit && /* @__PURE__ */ jsx("button", { type: "button", className: "ir-activity-more", "aria-expanded": expanded, onClick: () => setExpanded(!expanded), children: expanded ? ui("\u6536\u8D77\u8BB0\u5F55") : english ? `Show all ${grouped.length} groups` : `\u5C55\u5F00\u5168\u90E8 ${grouped.length} \u7EC4\u8BB0\u5F55` })
   ] });
 }
 var attackThemes = [
-  { id: "ransomware", label: "\u52D2\u7D22\u653B\u51FB", accent: "#ad567d", soft: "#fbeef4", pattern: /勒索|ransomware/i },
-  { id: "malware", label: "\u6076\u610F\u7A0B\u5E8F", accent: "#8c68b6", soft: "#f4effb", pattern: /木马|恶意文件|恶意程序|挖矿|webshell|malware|trojan|miner|backdoor|后门/i },
-  { id: "exploit", label: "\u6F0F\u6D1E\u5229\u7528", accent: "#b97542", soft: "#fcf3e9", pattern: /漏洞利用|代码执行|命令执行|反序列化|注入|exploit|\brce\b|\bsqli?\b|\bxss\b|cve-/i },
-  { id: "credential", label: "\u8EAB\u4EFD\u653B\u51FB", accent: "#a88737", soft: "#fbf6e6", pattern: /爆破|暴力破解|口令|凭据|撞库|brute.?force|credential|password/i },
-  { id: "lateral", label: "\u6A2A\u5411\u79FB\u52A8", accent: "#537bbb", soft: "#eef4fd", pattern: /横向|远程执行|lateral|psexec|pass.the.hash/i },
-  { id: "exfiltration", label: "\u6570\u636E\u5916\u4F20", accent: "#b56d63", soft: "#fcf0ed", pattern: /外传|数据泄露|窃取|exfiltration|data.?leak/i },
-  { id: "phishing", label: "\u9493\u9C7C\u653B\u51FB", accent: "#9c718e", soft: "#f8eff6", pattern: /钓鱼|phishing/i },
-  { id: "c2", label: "\u5916\u8054\u901A\u4FE1", accent: "#5b9292", soft: "#edf7f6", pattern: /外联|命令控制|c2|command.and.control|beacon/i },
-  { id: "recon", label: "\u626B\u63CF\u63A2\u6D4B", accent: "#248fbb", soft: "#eaf7fd", pattern: /探测|探测|扫描|侦察|scan|recon/i },
-  { id: "other", label: "\u5176\u4ED6\u4E8B\u4EF6", accent: "#61a237", soft: "#eef8e3", pattern: /$^/ }
+  { id: "ransomware", label: "\u52D2\u7D22\u653B\u51FB", accent: "#d34346", soft: "#fceeed", ink: "#a62d34", darkInk: "#ff999b", pattern: /勒索|ransomware/i },
+  { id: "malware", label: "\u6076\u610F\u7A0B\u5E8F", accent: "#ce5264", soft: "#fceff2", ink: "#9e3049", darkInk: "#ffa0b0", pattern: /木马|恶意文件|恶意程序|挖矿|webshell|malware|trojan|miner|backdoor|后门/i },
+  { id: "exploit", label: "\u6F0F\u6D1E\u5229\u7528", accent: "#d17a2b", soft: "#fcf2e5", ink: "#8d480b", darkInk: "#ffbd80", pattern: /漏洞利用|代码执行|命令执行|反序列化|注入|exploit|\brce\b|\bsqli?\b|\bxss\b|cve-/i },
+  { id: "credential", label: "\u8EAB\u4EFD\u653B\u51FB", accent: "#b9972f", soft: "#fcf7e0", ink: "#785b09", darkInk: "#f5d16d", pattern: /爆破|暴力破解|口令|凭据|撞库|brute.?force|credential|password/i },
+  { id: "lateral", label: "\u6A2A\u5411\u79FB\u52A8", accent: "#497ccb", soft: "#eef4fe", ink: "#2f5696", darkInk: "#9cc5ff", pattern: /横向|远程执行|lateral|psexec|pass.the.hash/i },
+  { id: "exfiltration", label: "\u6570\u636E\u5916\u4F20", accent: "#ce6242", soft: "#fcefe8", ink: "#953d26", darkInk: "#ffae92", pattern: /外传|数据泄露|窃取|exfiltration|data.?leak/i },
+  { id: "phishing", label: "\u9493\u9C7C\u653B\u51FB", accent: "#a167bb", soft: "#f7eefb", ink: "#75408e", darkInk: "#e4b0ff", pattern: /钓鱼|phishing/i },
+  { id: "c2", label: "\u5916\u8054\u901A\u4FE1", accent: "#388e8a", soft: "#eaf7f5", ink: "#246965", darkInk: "#87dbd3", pattern: /外联|命令控制|c2|command.and.control|beacon/i },
+  { id: "recon", label: "\u626B\u63CF\u63A2\u6D4B", accent: "#7a9c46", soft: "#f1f7e7", ink: "#4a6725", darkInk: "#c3e985", pattern: /探测|探测|扫描|侦察|scan|recon/i },
+  { id: "other", label: "\u5176\u4ED6\u4E8B\u4EF6", accent: "#7b8999", soft: "#f0f3f6", ink: "#4e5b6c", darkInk: "#becbd9", pattern: /$^/ }
 ];
 function attackTheme(c) {
   let alert = {};
@@ -188,6 +222,27 @@ function attackTheme(c) {
   }
   const text = [c.attack_type, c.category, c.title, alert.attack_type, alert.attackType, alert.category, alert.event_type, alert.title, alert.name].filter((v) => typeof v === "string").join(" ");
   return attackThemes.find((t) => t.pattern.test(text)) || attackThemes[attackThemes.length - 1];
+}
+var ledgerDate = new Intl.DateTimeFormat(void 0, { year: "numeric", month: "2-digit", day: "2-digit" });
+var ledgerTime = new Intl.DateTimeFormat(void 0, { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
+function IncidentEndpoints({ source, target }) {
+  return /* @__PURE__ */ jsxs("span", { className: "incident-endpoints", children: [
+    /* @__PURE__ */ jsx("span", { className: "incident-ip", "data-endpoint": "source", title: ui("\u6765\u6E90 IP"), children: source || ui("\u6765\u6E90\u5F85\u6838\u5B9E") }),
+    /* @__PURE__ */ jsx("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.7", "aria-label": ui("\u5230"), role: "img", children: /* @__PURE__ */ jsx("path", { d: "M4 12h15m-6-6 6 6-6 6" }) }),
+    /* @__PURE__ */ jsx("span", { className: "incident-ip", "data-endpoint": "target", title: ui("\u76EE\u6807 IP"), children: target || "\u2014" })
+  ] });
+}
+function IncidentRegisteredAt({ value }) {
+  const date = value ? new Date(value) : null;
+  if (!date || !Number.isFinite(date.getTime())) return /* @__PURE__ */ jsx("span", { className: "incident-event-date", children: "\u2014" });
+  return /* @__PURE__ */ jsxs("time", { className: "incident-event-date", dateTime: date.toISOString(), children: [
+    /* @__PURE__ */ jsxs("svg", { width: "15", height: "15", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.6", "aria-hidden": "true", children: [
+      /* @__PURE__ */ jsx("circle", { cx: "12", cy: "12", r: "9" }),
+      /* @__PURE__ */ jsx("path", { d: "M12 7v5l3 2" })
+    ] }),
+    /* @__PURE__ */ jsx("span", { children: ledgerDate.format(date) }),
+    /* @__PURE__ */ jsx("span", { className: "incident-clock-value", children: ledgerTime.format(date) })
+  ] });
 }
 function IncidentReportDialog({ detail, onClose, heading = "\u5E94\u6025\u54CD\u5E94\u62A5\u544A\u8BE6\u60C5", downloadUrl }) {
   const ref = useRef(null);
@@ -430,7 +485,7 @@ function DeviceLogCoverage({ detail }) {
       ] }),
       latest && /* @__PURE__ */ jsxs("span", { className: "badge", children: [
         "\u6700\u8FD1\u8BB0\u5F55\uFF1A",
-        labels[latest.status] || latest.status
+        ui(labels[latest.status] || latest.status)
       ] })
     ] }),
     /* @__PURE__ */ jsxs("div", { className: "device-results", children: [
@@ -471,11 +526,30 @@ function DeviceLogCoverage({ detail }) {
     ] })
   ] });
 }
+var caseFilters = [
+  { id: "", label: "\u5168\u90E8\u4E8B\u4EF6", statuses: [] },
+  { id: "queued", label: "\u5F85\u8C03\u67E5", statuses: ["new", "queued"] },
+  { id: "active", label: "\u8C03\u67E5\u8FDB\u884C\u4E2D", statuses: ["investigating", "running"] },
+  { id: "review", label: "\u5F85\u590D\u6838", statuses: ["review"] },
+  { id: "closed", label: "\u5DF2\u5F52\u6863", statuses: ["closed"] },
+  { id: "interrupted", label: "\u5F02\u5E38 / \u4E2D\u65AD", statuses: ["failed", "interrupted"] }
+];
+var casePageSize = 10;
+function caseHref(id) {
+  const url = new URL(location.href);
+  if (id) url.searchParams.set("case", id);
+  else url.searchParams.delete("case");
+  return url.pathname + url.search + url.hash;
+}
 function IncidentPage() {
+  useIncidentLocale();
   const [cases, setCases] = useState([]), [selected, setSelected] = useState(new URLSearchParams(location.search).get("case") || ""), [detail, setDetail] = useState(null), [tab, setTab] = useState("overview"), [settings, setSettings] = useState({ hosts: [] }), [error, setError] = useState(""), [busy, setBusy] = useState(""), [query, setQuery] = useState(""), [modal, setModal] = useState(false), [remote, setRemote] = useState(""), [path, setPath] = useState("");
   const [analysisProvider, setAnalysisProvider] = useState("threatbook"), [externalReport, setExternalReport] = useState(null);
   const [sourceOpen, setSourceOpen] = useState(false), [sourceDeviceId, setSourceDeviceId] = useState(""), [sourceNote, setSourceNote] = useState("");
   const [statusOpen, setStatusOpen] = useState(false), [statusAction, setStatusAction] = useState(""), [statusNote, setStatusNote] = useState(""), [caseStatusFilter, setCaseStatusFilter] = useState("");
+  const [caseTypeFilter, setCaseTypeFilter] = useState(""), [casePage, setCasePage] = useState(1), [casesReady, setCasesReady] = useState(false);
+  const selectedRef = useRef(selected);
+  const showDetailView = Boolean(selected) || tab === "settings";
   const [evidenceFilter, setEvidenceFilter] = useState("samples"), [evidenceQuery, setEvidenceQuery] = useState("");
   const [reverseResults, setReverseResults] = useState({}), [reverseReview, setReverseReview] = useState(""), [reaStatus, setReaStatus] = useState(null);
   const [optionalJobs, setOptionalJobs] = useState([]), [optionalLog, setOptionalLog] = useState("");
@@ -497,19 +571,25 @@ function IncidentPage() {
   const [host, setHost] = useState({ name: "", address: "", protocol: "ssh", port: 22, username: "", password: "", host_key: "" });
   const hostRef = useRef(host);
   hostRef.current = host;
-  async function refresh(id = selected) {
+  async function refresh(id = selectedRef.current) {
     try {
       const [c, s] = await Promise.all([req("/cases"), req("/settings")]);
       setCases(c);
+      setCasesReady(true);
       setSettings(s);
-      if (id) {
-        setDetail(await req("/cases/" + id));
-        setReverseResults(await req("/cases/" + id + "/reverse").catch(() => ({})));
+      if (id && selectedRef.current === id) {
+        const record = await req("/cases/" + encodeURIComponent(id));
+        if (selectedRef.current === id) setDetail(record);
+        const reverse = await req("/cases/" + encodeURIComponent(id) + "/reverse").catch(() => ({}));
+        if (selectedRef.current === id) setReverseResults(reverse);
       }
       setReaStatus(await req("/rea/status").catch(() => null));
-      setError("");
+      if (id === selectedRef.current) setError("");
     } catch (e) {
-      setError(e.message);
+      if (id === selectedRef.current) {
+        setCasesReady(true);
+        setError(e.message);
+      }
     }
   }
   useEffect(() => {
@@ -556,7 +636,9 @@ function IncidentPage() {
       window.AegisSceneAI.open({ kind: operation === "rea_install" ? "rea-install" : "forensics", context: { ...grant, target: detail?.target, task_tool: "incident_optional_operations", instructions: "\u4F7F\u7528\u672C\u6B21\u7531\u7BA1\u7406\u5458\u660E\u786E\u786E\u8BA4\u7684\u6388\u6743\u542F\u52A8\u56FA\u5B9A\u5DE5\u5177\u4EFB\u52A1\uFF1B\u968F\u540E\u67E5\u8BE2\u771F\u5B9E\u8FDB\u5EA6\u3002\u4E0D\u53EF\u5728\u672A\u6210\u529F\u81EA\u68C0\u65F6\u58F0\u79F0\u5B8C\u6210\u3002" } });
     });
   }
-  function choose(id) {
+  function choose(id, navigation = "push") {
+    if (id === selectedRef.current && tab !== "settings") return;
+    selectedRef.current = id;
     setExternalReport(null);
     setSourceOpen(false);
     setStatusOpen(false);
@@ -569,10 +651,24 @@ function IncidentPage() {
     setReportOpen(false);
     setSelected(id);
     setDetail(null);
+    setError("");
     setTab("overview");
-    const u = new URL(location.href);
-    u.searchParams.set("case", id);
-    history.replaceState(null, "", u);
+    if (navigation === "push" && caseHref(id) !== location.pathname + location.search + location.hash) history.pushState(history.state, "", caseHref(id));
+    if (navigation === "replace") history.replaceState(history.state, "", caseHref(id));
+  }
+  function followCase(event, id) {
+    if (event.button !== 0 || event.ctrlKey || event.metaKey || event.shiftKey || event.altKey) return;
+    event.preventDefault();
+    choose(id);
+  }
+  useEffect(() => {
+    const onPop = () => choose(new URLSearchParams(location.search).get("case") || "", "pop");
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, [tab]);
+  function openConnections() {
+    if (selectedRef.current) choose("", "replace");
+    setTab("settings");
   }
   useEffect(() => {
     if (!modal) return;
@@ -670,12 +766,7 @@ function IncidentPage() {
     try {
       await req("/cases/" + detail.id, { confirmed: true }, "DELETE");
       setDeleteOpen(false);
-      setSelected("");
-      setDetail(null);
-      setTab("overview");
-      const u = new URL(location.href);
-      u.searchParams.delete("case");
-      history.replaceState(null, "", u);
+      choose("", "replace");
       await refresh("");
     } catch (e) {
       setError(e.message);
@@ -683,7 +774,12 @@ function IncidentPage() {
       setBusy("");
     }
   }
-  const shown = cases.filter((c) => (!caseStatusFilter || c.status === caseStatusFilter) && (c.title + c.target + c.source).toLowerCase().includes(query.toLowerCase()));
+  const matchingStatuses = caseFilters.find((f) => f.id === caseStatusFilter)?.statuses || [];
+  const needle = query.trim().toLocaleLowerCase();
+  const shown = cases.filter((c) => (!matchingStatuses.length || matchingStatuses.includes(c.status)) && (!caseTypeFilter || attackTheme(c).id === caseTypeFilter) && [c.title, c.target, c.source, `IR-${c.id}`].some((value) => String(value ?? "").toLocaleLowerCase().includes(needle)));
+  const casePageCount = Math.max(1, Math.ceil(shown.length / casePageSize));
+  const currentCasePage = Math.min(casePage, casePageCount);
+  const pageCases = shown.slice((currentCasePage - 1) * casePageSize, currentCasePage * casePageSize);
   const locked = !!busy || detail?.processing || ["running", "closed"].includes(detail?.status);
   const selectedStatusAction = detail?.status_actions?.find((a) => a.action === statusAction);
   const matching = settings.hosts.filter((h) => h.address === detail?.target);
@@ -698,7 +794,7 @@ function IncidentPage() {
  .ir .danger{color:#b47d6b;background:#fff9f5;border-color:#eedfd5}.ir .danger:hover{background:#fcf0e8;border-color:#dfbfae}.ir .confirm-dialog{width:min(520px,94vw)}.ir .check-line{display:flex;align-items:center;gap:10px;color:#7b8c6c;font-size:12px;margin:20px 0}.ir .check-line input{width:16px;height:16px;min-height:0;accent-color:#a2c67b}.ir .form-footer{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}.ir .dialog h2{font-size:20px}
  .ir .primary{background:var(--green);color:#24371d;border-color:transparent;box-shadow:0 3px 10px #536f3310}.ir .primary:hover{background:var(--green-hover);border-color:transparent}
 
- .ir .work-section-head{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:18px}.ir .work-section-head h3{margin:0 0 4px}.ir .work-section-head small{font-size:12px;color:#819075}.ir .activity-summary{display:flex;align-items:center;justify-content:space-between;gap:12px;font-size:12px;color:#75816e;margin:0 0 12px}.ir .activity-summary small{font-size:11px;color:#94a08a}.ir .compact-timeline{border:1px solid #e3eadc;border-radius:12px;overflow:hidden}.ir .activity-entry{display:grid;grid-template-columns:130px minmax(0,1fr);gap:14px;padding:13px 15px;background:#fff;border-bottom:1px solid #edf1e8;align-items:start}.ir .activity-entry:last-child{border-bottom:0}.ir .activity-stamp time{display:block;font-size:11px;color:#839079;line-height:1.6;font-variant-numeric:tabular-nums}.ir .activity-stamp b{display:inline-block;margin-top:4px;padding:2px 7px;border-radius:5px;background:#eef5e5;color:#6d8a4d;font-size:10px;font-weight:550}.ir .activity-entry[data-status=blocked] b,.ir .activity-entry[data-status=partial] b{background:#fff6df;color:#a78837}.ir .activity-entry[data-status=failed] b{background:#fbedeb;color:#b26455}.ir .activity-entry summary{display:flex;gap:8px;align-items:start;cursor:pointer;list-style:none;font-size:13px;line-height:1.8;color:#566353;min-height:40px}.ir .activity-entry summary::-webkit-details-marker{display:none}.ir .activity-entry summary>span{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.ir .activity-entry summary:after{content:'\u2304';color:#9caa92;margin-left:auto;flex:none}.ir .activity-entry summary i{font-size:10px;background:#f1f6ea;padding:0 5px;border-radius:4px;font-style:normal;flex:none}.ir .activity-full{font-size:12px;line-height:1.85;white-space:pre-wrap;overflow-wrap:anywhere;padding:12px;background:#f7faf3;border-radius:9px;margin-top:8px}.ir .activity-full small{display:block;color:#94a087;margin-top:8px}.ir .activity-expand{display:block;margin:14px auto 0;padding:7px 16px;font-size:12px;color:#6f8e4e}.ir .compact-log{display:flex;align-items:center;margin:10px 0;padding:14px}.ir .compact-log small{display:block;margin-top:5px;font-size:11px;color:#87937e}.ir .compact-log a{margin-left:auto;font-size:12px;white-space:nowrap}.ir .compact-empty{padding:32px 16px;border:1px dashed #dce7d2;border-radius:12px;color:#8b997f;text-align:center;font-size:13px}.ir .work-help{margin-top:14px;border:1px solid #e4ebdc;border-radius:10px;background:#fafcf7;padding:12px 14px}.ir .work-help>summary{font-size:12px;color:#788d61;cursor:pointer;font-weight:550}.ir .work-help p{font-size:12px;line-height:1.9;margin:12px 0 0}.ir .work-help .activity-digest{margin-top:16px}.ir .host-operation{display:flex;gap:16px;padding:20px 0;border-top:1px solid #e7eddf}.ir .host-operation:first-of-type{border-top:0;padding-top:5px}.ir .operation-number{flex:none;width:31px;height:31px;display:grid;place-items:center;background:#e8f2d8;color:#6d9349;border-radius:9px;font-size:12px;font-weight:650}.ir .operation-body{flex:1;min-width:0}.ir .operation-body h4{font-size:14px;font-weight:650;color:#3c5134;margin:4px 0 12px}.ir .operation-body>p{font-size:12px;margin:0 0 15px}.ir .operation-body .field{margin:0;max-width:600px}.ir .operation-body .field>span{font-size:12px;color:#89997c;font-weight:400}.ir .operation-body>small{display:block;color:#a18b53;margin-top:9px;font-size:12px}.ir .file-collect-line{display:flex;gap:10px}.ir .file-collect-line input{min-width:0;flex:1}.ir .file-collect-line button{flex:none}@media(max-width:700px){.ir .activity-entry{grid-template-columns:105px minmax(0,1fr);gap:8px;padding:12px 10px}.ir .activity-summary small{display:none}.ir .file-collect-line{flex-wrap:wrap}.ir .host-operation{gap:11px}}
+ .ir .work-section-head{display:flex;align-items:center;justify-content:space-between;gap:15px;margin-bottom:18px}.ir .work-section-head h3{margin:0 0 4px}.ir .work-section-head small{font-size:12px;color:#819075}.ir .compact-log{display:flex;align-items:center;margin:10px 0;padding:14px}.ir .compact-log small{display:block;margin-top:5px;font-size:11px;color:#87937e}.ir .compact-log a{margin-left:auto;font-size:12px;white-space:nowrap}.ir .compact-empty{padding:32px 16px;border:1px dashed #dce7d2;border-radius:12px;color:#8b997f;text-align:center;font-size:13px}.ir .work-help{margin-top:14px;border:1px solid #e4ebdc;border-radius:10px;background:#fafcf7;padding:12px 14px}.ir .work-help>summary{font-size:12px;color:#788d61;cursor:pointer;font-weight:550}.ir .work-help p{font-size:12px;line-height:1.9;margin:12px 0 0}.ir .host-operation{display:flex;gap:16px;padding:20px 0;border-top:1px solid #e7eddf}.ir .host-operation:first-of-type{border-top:0;padding-top:5px}.ir .operation-number{flex:none;width:31px;height:31px;display:grid;place-items:center;background:#e8f2d8;color:#6d9349;border-radius:9px;font-size:12px;font-weight:650}.ir .operation-body{flex:1;min-width:0}.ir .operation-body h4{font-size:14px;font-weight:650;color:#3c5134;margin:4px 0 12px}.ir .operation-body>p{font-size:12px;margin:0 0 15px}.ir .operation-body .field{margin:0;max-width:600px}.ir .operation-body .field>span{font-size:12px;color:#89997c;font-weight:400}.ir .operation-body>small{display:block;color:#a18b53;margin-top:9px;font-size:12px}.ir .file-collect-line{display:flex;gap:10px}.ir .file-collect-line input{min-width:0;flex:1}.ir .file-collect-line button{flex:none}@media(max-width:700px){.ir .file-collect-line{flex-wrap:wrap}.ir .host-operation{gap:11px}}
  .ir .scene-page-brand{display:flex;align-items:center;gap:16px}.ir .scene-page-logo{width:54px;height:54px;flex:none;object-fit:contain;filter:drop-shadow(0 3px 4px #cd536320)}.ir h1{font-size:28px;letter-spacing:-.6px;font-weight:650;margin:0;line-height:1.45}.ir h2{font-size:20px;font-weight:600;margin:0;line-height:1.55}.ir h3{font-size:17px;font-weight:600;margin:0 0 13px}.ir p{color:var(--dim);margin:8px 0;line-height:1.8}
  .ir .head{display:flex;justify-content:space-between;align-items:center;gap:22px;margin-bottom:28px}.ir .overline{letter-spacing:2.5px;color:#92a282;font-size:10px;margin-bottom:8px}.ir .tools{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.ir .tools button{display:inline-flex;align-items:center;justify-content:center;gap:8px}
  .ir .stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:20px;margin-bottom:26px}.ir .stat,.ir .panel{background:#fff;border:1px solid var(--line);border-radius:21px;box-shadow:0 4px 18px #20321a03}.ir .stat{padding:25px 27px;min-height:155px;position:relative;overflow:hidden}.ir .stat:first-child{background:radial-gradient(ellipse at 0 0,#e9f5db,transparent 85%),#fff}.ir .stat b{font-size:39px;font-weight:600;letter-spacing:-1px;display:block;margin-top:13px;line-height:1.2}.ir .stat span{color:#809076;font-size:13px}.ir .stat:after{content:'';position:absolute;width:7px;height:7px;border-radius:50%;right:26px;top:30px;background:#c4d7b2}
@@ -882,7 +978,7 @@ function IncidentPage() {
  .ir .report-document table{display:block;width:100%;max-width:100%;overflow-x:auto;border-collapse:collapse;margin:18px 0;border:1px solid #e0e7db;border-radius:9px}.ir .report-document :is(th,td){padding:10px 13px;text-align:left;vertical-align:top;border:1px solid #e0e7db;min-width:100px;font-size:13px}.ir .report-document th{background:#edf4e5;color:#385333;font-weight:600}.ir .report-document tr:nth-child(even) td{background:#f8faf5}
  .ir .report-document hr{height:1px;border:0;background:#e1e8dc;margin:26px 0}.ir .report-document a{color:#527f35;text-decoration:underline;text-decoration-color:#a9c58d;text-underline-offset:3px}.ir .report-document a:hover{color:#315d1f}.ir .report-document .report-evidence-link{font-size:12px;font-family:Consolas,monospace}
  .ir .report-view-toggle{display:flex;gap:4px;padding:3px;background:#f0f4ec;border:1px solid #e0e7db;border-radius:10px;margin-left:auto}.ir .report-view-toggle button{min-height:30px;padding:4px 12px;background:transparent;border:0;border-radius:7px}.ir .report-view-toggle button[aria-pressed=true]{background:#fff;color:#456d30;box-shadow:0 1px 4px #263d1910;font-weight:600}
- .ir .report-empty{padding:35px;text-align:center;border:1px dashed #dbe5d2;border-radius:14px;background:#fafcf7;margin-top:20px;color:#819276}
+ .ir .report-empty{padding:clamp(22px,4vw,35px);text-align:center;border:1px dashed rgb(var(--ui-border));border-radius:14px;background:color-mix(in srgb,rgb(var(--ui-selected)) 32%,rgb(var(--ui-surface)));margin:20px 0 12px;color:rgb(var(--ui-secondary))}
  @media(max-width:850px){.ir .report-document{padding:20px 17px}.ir .report-document h1{font-size:20px}.ir .report-view-toggle{margin-left:0}}
 
 
@@ -919,7 +1015,7 @@ function IncidentPage() {
 
  .ir .status-update{background:linear-gradient(125deg,#eff9e3,#fff);border-color:#c5e29f;color:#497c28;font-weight:600}.ir .status-dialog{width:min(620px,94vw)}.ir .status-current{display:flex;align-items:center;gap:14px;padding:15px 18px;background:linear-gradient(120deg,#e8f6d6,#f7fcef);border:1px solid #d4e9ba;border-radius:12px;margin-bottom:20px;font-size:12px;color:#7d9369}.ir .status-current strong{color:#4f7b31;font-size:13px;font-weight:600}.ir .status-current>span{color:#8eb768;font-size:17px}.ir .status-report-needed{color:#a6782e;font-size:12px}.ir .case-status[data-status=closed]{color:#398568}.ir .case-status[data-status=investigating]{color:#57942d}.ir .list-search select{width:100%;margin-top:8px;min-height:32px;padding:6px 30px 6px 10px;font-size:11px;border-color:#dbe8cf;background-color:#f5faed;color:#688050}.ir .case-summary .archive-fact{font-size:11px;color:#548064}
 
- .ir .source-device-line{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin-top:9px;font-size:11px;color:#839673}.ir .source-device-line strong{font-size:11px;font-weight:600;color:#4d7d31}.ir .source-device-line button{min-height:23px;padding:1px 8px;font-size:10px;border-radius:6px;background:#f1f8e8;border-color:#d4e7bd;color:#5f8c3c}.ir .source-query-notice{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}.ir .source-query-notice button{margin-left:auto;min-height:30px;padding:4px 10px;font-size:11px}
+ .ir .source-device-line{display:flex;align-items:center;flex-wrap:wrap;gap:9px;margin-top:9px;font-size:11px;color:#839673}.ir .source-device-line strong{font-size:11px;font-weight:600;color:#4d7d31}.ir .source-query-notice{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:18px}.ir .source-query-notice button{margin-left:auto;min-height:30px;padding:4px 10px;font-size:11px}
 
  .ir .device-source-picker{position:relative;margin-top:5px}.ir button.source-picker-trigger{display:flex;align-items:center;gap:12px;width:100%;min-height:64px;text-align:left;padding:11px 14px;background:linear-gradient(120deg,var(--vendor-soft),#fff 85%);border:1px solid color-mix(in srgb,var(--vendor-accent) 25%,white);border-radius:12px;color:var(--vendor-accent);transform:none}.ir .source-picker-trigger[aria-expanded=true]{border-color:var(--vendor-accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--vendor-accent) 10%,transparent)}.ir .source-picker-trigger>svg:not(.source-picker-chevron){width:26px;height:26px;flex:none}.ir .source-picker-trigger>span:not(.source-vendor-logo){flex:1;min-width:0;font-size:13px}.ir .source-picker-trigger strong{display:block;font-size:14px;font-weight:600;color:var(--vendor-accent)}.ir .source-picker-trigger small{display:block;font-size:11px;margin-top:3px;color:#7c8b7b}.ir .source-picker-chevron{width:18px;height:18px;margin-left:auto;flex:none;transition:transform .18s}.ir [aria-expanded=true] .source-picker-chevron{transform:rotate(180deg)}
  .ir .source-vendor-logo{width:36px;height:36px;border-radius:9px;display:grid;place-items:center;background:#fff;border:1px solid color-mix(in srgb,var(--vendor-accent) 15%,white);padding:6px;flex:none;box-sizing:border-box}.ir .source-vendor-logo img{display:block;width:100%;height:100%;object-fit:contain}.ir .source-vendor-logo b{display:none;color:var(--vendor-accent)}.ir .source-vendor-logo.image-failed b{display:block}.ir .source-vendor-logo>svg{width:23px;height:23px}
@@ -940,83 +1036,279 @@ function IncidentPage() {
  .ir .external-analysis .analysis-platform-tabs button{background:linear-gradient(120deg,color-mix(in srgb,var(--analysis-soft) 65%,white),#fff);border-color:color-mix(in srgb,var(--analysis-accent) 18%,white);color:#43505c;box-shadow:none}.ir .external-analysis .analysis-platform-tabs button[aria-selected=true]{background:linear-gradient(115deg,color-mix(in srgb,var(--analysis-accent) 11%,white),var(--analysis-soft) 65%,#fff);border-color:color-mix(in srgb,var(--analysis-accent) 48%,white);box-shadow:0 3px 12px color-mix(in srgb,var(--analysis-accent) 7%,transparent)}.ir .external-analysis .analysis-platform-tabs button:hover{border-color:color-mix(in srgb,var(--analysis-accent) 42%,white);background:var(--analysis-soft)}.ir .external-analysis .analysis-platform-tabs strong{color:color-mix(in srgb,var(--analysis-accent) 76%,#303c48)}.ir .external-analysis .analysis-platform-tabs small{color:#828792}.ir .external-analysis .analysis-platform-tabs i{color:#828792}
  .ir .external-analysis .analysis-brand-head h3{color:var(--analysis-ink)}.ir .external-analysis .analysis-notice{background:linear-gradient(115deg,var(--analysis-soft),#fdfdfc);border-color:var(--analysis-border);color:#747c85}.ir .investigation-body .external-analysis .evidence.analysis-sample{background:linear-gradient(115deg,var(--analysis-soft),#fff 90%);border-color:var(--analysis-border)}.ir .investigation-body .external-analysis .analysis-sample>svg{color:var(--analysis-accent)}.ir .investigation-body .external-analysis .analysis-sample strong{color:#343f4b}.ir .investigation-body .external-analysis .analysis-sample code{color:#7b818b}
  .ir .investigation-body .external-analysis .sample-actions button:not(.primary),.ir .investigation-body .external-analysis .sample-actions a{color:var(--analysis-ink);border-color:var(--analysis-border);background:#ffffffd9}.ir .investigation-body .external-analysis .sample-actions button:not(.primary):hover:not(:disabled){color:var(--analysis-ink);border-color:color-mix(in srgb,var(--analysis-accent) 48%,white);background:var(--analysis-soft)}.ir .investigation-body .external-analysis .sample-actions button.analysis-submit:not(.primary){background:linear-gradient(120deg,var(--analysis-fill),var(--analysis-soft));border-color:color-mix(in srgb,var(--analysis-accent) 25%,white);color:var(--analysis-ink);box-shadow:none}.ir .investigation-body .external-analysis .sample-actions button.analysis-submit:not(.primary):hover:not(:disabled){background:linear-gradient(120deg,color-mix(in srgb,var(--analysis-accent) 24%,white),var(--analysis-fill));color:var(--analysis-ink)}.ir .external-analysis .analysis-official-link{background:#fff;border-color:var(--analysis-border);color:var(--analysis-ink);box-shadow:none}
+
+ /* Investigation rails and report chrome follow the same theme as the event register. */
+ html[data-theme-skin] .ir[data-aegis-scene=incident]{--ir-accent:var(--skin-accent,var(--night-green,#47632e));--ir-surface:rgb(var(--ui-surface));--ir-track:rgb(var(--ui-subtle));--ir-thumb:color-mix(in srgb,var(--ir-accent) 76%,var(--ir-track))}
+ html[data-theme-skin] .ir[data-aegis-scene=incident] :is(.case-scroll,.investigation-body,.report-dialog-body,.source-picker-options){scrollbar-color:var(--ir-thumb) var(--ir-track)}
+ html[data-theme-skin] .ir[data-aegis-scene=incident] .report-preview{background:linear-gradient(115deg,rgb(var(--ui-selected)),var(--ir-surface) 78%)!important;border-color:var(--skin-outline,rgb(var(--ui-border)))!important}
+ html[data-theme-skin] .ir[data-aegis-scene=incident] .report-preview .report-preview-icon{--stage-soft:rgb(var(--ui-selected));background:var(--stage-soft)!important;border-color:rgb(var(--ui-border))!important;color:var(--ir-accent)!important}
+ html[data-theme-skin] .ir[data-aegis-scene=incident] .report-preview-copy h3{color:rgb(var(--ui-text))!important}
+ html[data-theme-skin] .ir[data-aegis-scene=incident] .report-preview-copy :is(p,small){color:rgb(var(--ui-secondary))!important}
+ /* Full-width event register; investigation no longer competes with a sidebar. */
+ .ir .incident-ledger,.ir .incident-ledger-toolbar,.ir .incident-ledger-table-wrap,.ir .incident-ledger-footer{min-width:0}
+ .ir .incident-ledger{--ledger-selected:rgb(var(--ui-selected));--ledger-surface:rgb(var(--ui-surface));--ledger-raised:rgb(var(--ui-subtle));--ledger-ink:rgb(var(--ui-text));--ledger-secondary:rgb(var(--ui-secondary));--ledger-line:rgb(var(--ui-border));--ledger-accent:var(--skin-accent,var(--night-green,#47632e));display:grid;gap:14px;color:var(--ledger-ink)}
+ .ir .incident-ledger-nav,.ir .incident-ledger-toolbar,.ir .incident-ledger-table-wrap{border:1px solid var(--ledger-line);border-radius:14px;background:var(--ledger-surface)}
+ .ir .incident-ledger-nav{display:flex;flex-wrap:wrap;gap:5px;padding:6px;background:var(--ledger-raised)}
+ .ir .incident-ledger-nav button[aria-pressed=true]{background:var(--ledger-selected)!important;border-color:var(--skin-outline,var(--ledger-line))!important;color:var(--ledger-accent)!important;font-weight:650!important}
+ .ir .incident-ledger-toolbar{display:flex;align-items:center;flex-wrap:wrap;gap:10px;padding:12px 14px}
+ .ir .incident-ledger-search{position:relative;flex:0 1 350px;min-width:min(100%,220px)}
+ .ir .incident-ledger-search svg{position:absolute;inset-inline-start:11px;top:50%;transform:translateY(-50%);pointer-events:none;color:var(--ledger-secondary)}
+ .ir .incident-ledger-toolbar .incident-ledger-search input{width:100%;padding-inline-start:38px!important}
+ .ir .incident-ledger-table-wrap{overflow:hidden}
+ .ir .incident-ledger table{width:100%;border-collapse:collapse;text-align:start}
+ .ir .incident-ledger thead{background:var(--ledger-raised);color:var(--ledger-secondary)}
+ .ir .incident-ledger :is(th,td){padding:14px;text-align:start}
+ .ir .incident-ledger th{font-size:12px;font-weight:650;white-space:nowrap}
+ .ir .incident-ledger td{border-top:1px solid var(--ledger-line);overflow-wrap:anywhere}
+ .ir .incident-ledger tbody td:first-child{border-inline-start:3px solid var(--event-type,transparent)}
+ .ir .incident-ledger tbody td:first-child strong{color:var(--event-accent);display:block;font-size:14px;line-height:1.5}
+ .ir .incident-ledger td small{display:block;margin-top:4px;font-size:11px;color:var(--ledger-secondary)}
+ .ir .incident-ledger .incident-event-type,.ir .incident-ledger .incident-event-state{display:inline-block;padding:3px 8px;border-radius:999px;background:var(--event-tint);color:var(--event-accent);white-space:nowrap;font-size:12px;font-weight:600}
+ .ir .incident-ledger .incident-event-state{background:var(--ledger-raised);color:var(--ledger-secondary)}
+ .ir .incident-ledger .incident-event-state[data-status=review]{background:var(--ledger-selected);color:var(--ledger-accent)}
+ .ir .incident-ledger a.incident-open,.ir a.incident-back{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:34px;padding:5px 11px;border:1px solid rgb(var(--ui-border));border-radius:9px;background:rgb(var(--ui-surface));color:rgb(var(--ui-text));text-decoration:none;white-space:nowrap}
+ .ir :is(a.incident-open,a.incident-back):hover{background:rgb(var(--ui-hover));color:var(--skin-accent,var(--night-green,#47632e))}
+ .ir :is(a.incident-open,a.incident-back):focus-visible{outline:2px solid rgb(var(--ui-focus));outline-offset:2px}
+ .ir .incident-ledger-footer{display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;padding:10px 14px;border-top:1px solid var(--ledger-line);color:var(--ledger-secondary)}
+ .ir .incident-ledger-pagination{display:flex;align-items:center;gap:8px}
+ .ir .incident-ledger .incident-ledger-empty td{padding:28px;text-align:center;color:var(--ledger-secondary);background:var(--ledger-surface)}
+ .ir .incident-breadcrumb{display:flex;align-items:center;gap:10px;margin:0 0 12px;color:rgb(var(--ui-secondary))}
+ .ir .layout.incident-detail-layout{display:block;height:auto;max-height:none;min-height:0;overflow:visible}
+  .ir .incident-detail-layout:has(>.incident-case-workbench){background:none;border:0;border-radius:0;box-shadow:none}
+ .ir .incident-detail-layout .detail{min-height:0;height:auto;overflow:visible}
+ .ir .incident-detail-layout .investigation-body{min-height:280px;max-height:clamp(360px,65dvh,860px);flex:auto}
+ @media(max-width:720px){
+  .ir .incident-ledger :is(table,tbody){display:block}
+  .ir .incident-ledger thead{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}
+  .ir .incident-ledger tbody tr{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px 14px;padding:14px;border-top:1px solid var(--ledger-line)}
+  .ir .incident-ledger tbody td,.ir .incident-ledger tbody td:first-child{border:0;padding:0}
+  .ir .incident-ledger tbody td:is(:first-child,:nth-child(3),:last-child){grid-column:1/-1}
+  .ir .incident-ledger tbody td:is(:nth-child(2),:nth-child(3),:nth-child(4),:nth-child(5))::before{display:block;content:attr(data-label);margin-bottom:3px;font-size:11px;color:var(--ledger-secondary)}
+  .ir .incident-ledger tbody td:last-child{text-align:end}
+  .ir .incident-ledger tbody .incident-ledger-empty td{text-align:center}
+  .ir .incident-ledger-search{flex:1 1 100%}
+ }
+
+ /* Keep semantic event colors fixed; only the workspace controls follow the skin. */
+ .ir:has(.incident-ledger){box-sizing:border-box;min-height:100dvh;display:flex;flex-direction:column}
+ .ir .incident-ledger{display:flex;flex:1;flex-direction:column}
+ .ir .incident-ledger-table-wrap{display:flex;flex:1;flex-direction:column}
+ .ir .incident-ledger-footer{margin-top:auto}
+ .ir .incident-ledger-toolbar select{width:auto;min-width:min(100%,164px);max-width:100%}
+ .ir .incident-ledger :is(th,td){padding:16px 18px}
+ .ir .incident-ledger td{height:70px}
+ .ir .incident-ledger tbody tr[data-event-type]{--event-base:#fff;--event-zebra:#f6f8fa;--event-accent:var(--event-light-ink);--event-tint:var(--event-soft);--event-wash:var(--event-tint);background:linear-gradient(100deg,var(--event-wash),var(--event-base) 90%)}
+ .ir .incident-ledger tbody tr[data-event-type]:nth-child(even){--event-wash:color-mix(in srgb,var(--event-tint) 36%,var(--event-zebra));background:linear-gradient(100deg,var(--event-wash),var(--event-zebra) 90%)}
+ html.dark .ir .incident-ledger tbody tr[data-event-type]{--event-base:#1b2431;--event-zebra:#202a38;--event-accent:var(--event-dark-ink);--event-tint:color-mix(in srgb,var(--event-type) 19%,var(--event-base))}
+ .ir .incident-ledger tbody tr[data-event-type]:is(:hover,:focus-within){--event-wash:color-mix(in srgb,var(--event-type) 16%,var(--event-tint));background:linear-gradient(100deg,var(--event-wash),var(--event-base) 90%)}
+ .ir .incident-event-type::before{content:'';display:inline-block;width:6px;height:6px;margin-inline-end:5px;vertical-align:2px;border-radius:50%;background:currentColor}
+ .ir :is(.incident-endpoints,.incident-event-date){display:inline-flex;align-items:center;flex-wrap:wrap;gap:5px;max-width:100%;font-variant-numeric:tabular-nums}
+ .ir :is(.incident-endpoints,.incident-event-date)>svg{flex:none;color:var(--skin-accent,#47632e)}
+ .ir :is(.incident-ip,.incident-event-date){box-sizing:border-box;border:1px solid rgb(var(--ui-border));border-radius:7px;background:rgb(var(--ui-surface));color:rgb(var(--ui-text));padding:4px 7px;font-size:12px;line-height:1.35}
+ .ir .incident-ip{min-width:0;overflow-wrap:anywhere;font-family:ui-monospace,Consolas,monospace}
+ .ir .incident-ip[data-endpoint=target]{background:rgb(var(--ui-subtle))}
+ .ir .incident-clock-value{padding-inline-start:6px;border-inline-start:1px solid rgb(var(--ui-border));color:rgb(var(--ui-secondary));white-space:nowrap}
+ .ir .incident-case-endpoints{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-top:9px;color:rgb(var(--ui-secondary))}
+ .ir .incident-event-state::before{content:'';display:inline-block;width:6px;height:6px;margin-inline-end:5px;vertical-align:2px;border-radius:50%;background:currentColor}
+ .ir .incident-ledger .incident-event-state:is([data-status=queued],[data-status=new]){color:#755224;background:#f9efdc}
+ .ir .incident-ledger .incident-event-state:is([data-status=running],[data-status=investigating]){color:#315b91;background:#e7effb}
+ .ir .incident-ledger .incident-event-state:is([data-status=failed],[data-status=interrupted]){color:#953e3b;background:#fae9e7}
+ html.dark .ir .incident-ledger .incident-event-state:is([data-status=queued],[data-status=new]){color:#f3d4a1;background:#422f22}
+ html.dark .ir .incident-ledger .incident-event-state:is([data-status=running],[data-status=investigating]){color:#b9d6ff;background:#263852}
+ html.dark .ir .incident-ledger .incident-event-state:is([data-status=failed],[data-status=interrupted]){color:#ffc1ba;background:#482d35}
+ .ir .incident-ledger a.incident-open{border-color:color-mix(in srgb,var(--ledger-accent) 24%,var(--ledger-line));background:var(--ledger-raised);color:var(--ledger-accent);font-weight:550}
+ .ir .incident-ledger a.incident-open:is(:hover,:focus-visible){background:var(--ledger-selected)}
+ html[data-theme-skin] .ir[data-aegis-scene=incident] .investigation-nav button:not(.active):is(:hover,:focus-visible){background:rgb(var(--ui-hover))!important;border-color:rgb(var(--ui-border))!important}
+ html[data-theme-skin] .ir[data-aegis-scene=incident] .investigation-nav button:not(.active):is(:hover,:focus-visible) :is(strong,small){color:var(--ir-accent)!important}
+ @media(max-width:720px){
+  .ir .incident-ledger :is(th,td){height:auto}
+  .ir .incident-ledger tbody tr[data-event-type]{border-inline-start:3px solid var(--event-type)}
+ }
+ /* Let the active theme show through the gutters without recoloring the cards. */
+  html .ir[data-aegis-scene=incident] .incident-detail-layout .incident-case-workbench{--incident-card-gutter:color-mix(in srgb,rgb(var(--ui-selected)) 76%,rgb(var(--ui-canvas)));display:grid;min-width:0;max-height:none;gap:14px;padding:0;border:0;border-radius:14px;background:var(--incident-card-gutter)!important;box-shadow:none!important}
+ .ir .incident-case-workbench :is(.case-summary,.investigation-body){min-width:0;border:1px solid rgb(var(--ui-border));border-radius:14px;background:rgb(var(--ui-surface));box-shadow:0 3px 13px rgb(15 23 42 / .04)}
+ .ir .incident-detail-layout .incident-case-workbench .investigation-body{min-height:0;max-height:none;padding:18px 22px;overflow:visible}
+ html .ir .incident-detail-layout .case-stage-bar .investigation-nav{grid-template-columns:repeat(auto-fit,minmax(min(100%,130px),1fr));gap:9px;margin:0;padding:0;border:0;background:transparent!important}
+ .ir .incident-case-workbench .analysis-platform-tabs{padding:5px;border-radius:18px;background:var(--incident-card-gutter)}
+  .ir .case-stage-bar .investigation-nav [role=tab]{min-height:62px;justify-content:flex-start;padding:10px 12px;border-color:rgb(var(--ui-border));background:rgb(var(--ui-surface));color:rgb(var(--ui-text));box-shadow:none}
+ .ir .case-stage-bar .investigation-nav [role=tab].active{background:rgb(var(--ui-selected));border-color:var(--skin-outline,rgb(var(--ui-focus)));color:var(--skin-accent,#47632e)}
+ html .ir .case-stage-bar .investigation-nav [role=tab] small{color:rgb(var(--ui-secondary))!important}
+ html .ir .case-stage-bar .investigation-nav [role=tab][aria-selected=true] small{color:var(--skin-accent,var(--night-green,#47632e))!important}
+ .ir .case-stage-bar .investigation-nav [role=tab] strong{white-space:normal;overflow-wrap:anywhere}
+  html .ir[data-aegis-scene=incident] .incident-case-workbench :is(.investigation-nav [role=tab] i,.operation-number){--stage-soft:rgb(var(--ui-selected));color:var(--skin-accent,var(--night-green,#47632e))!important;background:var(--stage-soft)!important}
+  .ir .case-stage-bar .investigation-nav [role=tab] i{border-radius:8px;padding:4px;width:31px;height:31px}
+  .ir .incident-case-workbench .host-operation{border-top-color:rgb(var(--ui-border))}
+ .ir .case-stage-bar .investigation-nav [role=tab] i svg{width:23px;height:23px}
+ .ir .case-summary:has(.incident-case-head){padding:18px 22px}
+ .ir .incident-case-workbench .case-context{margin:14px 0 0;padding:9px 12px;border:1px solid rgb(var(--ui-border));border-radius:8px;background:rgb(var(--ui-subtle));color:rgb(var(--ui-secondary))}
+ .ir .case-summary .incident-case-head{margin:0;align-items:flex-start;gap:14px 24px}
+ .ir .incident-case-identity{min-width:0;flex:1 1 320px}
+ .ir .incident-case-kicker{display:flex;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px}
+ .ir .incident-case-kicker code{color:rgb(var(--ui-secondary));background:rgb(var(--ui-subtle));border-radius:6px;padding:3px 7px}
+ .ir .incident-case-identity h2{margin:0;font-size:clamp(18px,2vw,23px);overflow-wrap:anywhere;color:rgb(var(--ui-text))}
+ .ir .incident-case-identity p{color:rgb(var(--ui-secondary));overflow-wrap:anywhere}
+ .ir .incident-case-identity .source-device-line{margin-top:8px;padding-block-end:10px}
+ .ir[data-aegis-scene=incident] .incident-case-identity .source-device-line .ir-source-action{--ir-source-ink:var(--skin-accent,var(--night-green,#47632e));display:inline-flex;align-items:center;justify-content:center;min-height:24px!important;padding:1px 7px!important;border:1px solid color-mix(in srgb,var(--ir-source-ink) 46%,rgb(var(--ui-border)))!important;border-radius:7px!important;background:color-mix(in srgb,var(--ir-source-ink) 13%,rgb(var(--ui-selected)))!important;color:color-mix(in srgb,var(--ir-source-ink) 64%,rgb(var(--ui-text)))!important;font-family:inherit;font-size:11px!important;font-weight:650!important;line-height:1.3!important;box-shadow:none;white-space:nowrap}
+ .ir[data-aegis-scene=incident] .incident-case-identity .source-device-line .ir-source-action:hover:not(:disabled){background:color-mix(in srgb,var(--ir-source-ink) 22%,rgb(var(--ui-selected)))!important}
+ .ir[data-aegis-scene=incident] .incident-case-identity .source-device-line .ir-source-action:focus-visible{outline:2px solid rgb(var(--ui-focus));outline-offset:2px}
+ .ir .source-device-line .ir-source-action:disabled{opacity:.55}
+ /* Investigation activity and device query history share the same text hierarchy. */
+ .ir .ir-activity{--activity-text:rgb(var(--ui-text));--activity-meta:rgb(var(--ui-secondary));--activity-surface:rgb(var(--ui-surface));--activity-subtle:rgb(var(--ui-subtle));--activity-border:rgb(var(--ui-border));--activity-accent:var(--skin-accent,var(--night-green,#47632e));--activity-mono:ui-monospace,'Cascadia Mono',Consolas,monospace;font-family:system-ui,'Microsoft YaHei','PingFang SC',sans-serif;min-width:0}
+ .ir .ir-log-history>summary{font-size:14px;font-weight:650;line-height:1.5;color:rgb(var(--ui-text))}
+ .ir .ir-log-history>.ir-activity{margin-top:13px}
+ .ir .ir-activity-meta{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:6px 12px;color:var(--activity-meta);margin-bottom:10px;line-height:1.4}
+ .ir .ir-activity-meta small,.ir .ir-activity-count{font-size:12px}
+ .ir .ir-activity-count{background:var(--activity-subtle);border-radius:6px;padding:4px 8px;white-space:nowrap}
+ .ir .ir-activity-count strong{font-size:13px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--activity-text)}
+ .ir .ir-activity-list{border:1px solid var(--activity-border);border-radius:11px;overflow:hidden;background:var(--activity-surface)}
+ .ir .ir-activity-row{display:grid;grid-template-columns:145px minmax(0,1fr);align-items:start;gap:14px;padding:12px 14px}
+ .ir .ir-activity-row+.ir-activity-row{border-top:1px solid var(--activity-border)}
+ .ir .ir-activity-meta-cell{display:flex;align-items:flex-start;flex-wrap:wrap;flex-direction:column;gap:6px}
+ .ir .ir-activity time.ir-activity-time{display:inline-flex;gap:.55em;align-items:center;color:var(--activity-text);background:var(--activity-subtle);border-radius:5px;padding:3px 6px;font:500 12px/1.4 var(--activity-mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+ .ir .ir-activity-time span:first-child{color:var(--activity-meta)}
+ .ir .ir-activity-status{--status-ink:color-mix(in srgb,var(--activity-accent) 65%,var(--activity-text));--status-bg:rgb(var(--ui-selected));display:inline-flex;gap:5px;align-items:center;padding:2px 7px;border-radius:999px;background:var(--status-bg);color:var(--status-ink);font-size:11px;font-weight:650;line-height:1.45}
+ .ir .ir-activity-status::before{content:'';width:5px;height:5px;flex:none;border-radius:50%;background:currentColor}
+ .ir .ir-activity-row[data-status=running] .ir-activity-status{--status-ink:#245891;--status-bg:#edf4ff}
+ .ir .ir-activity-row:is([data-status=blocked],[data-status=partial]) .ir-activity-status{--status-ink:#76510b;--status-bg:#fcf3dc}
+ .ir .ir-activity-row:is([data-status=failed],[data-status=interrupted]) .ir-activity-status{--status-ink:#942f37;--status-bg:#fcebed}
+ html.dark .ir .ir-activity-row[data-status=running] .ir-activity-status{--status-ink:#bbd6ff;--status-bg:#263852}
+ html.dark .ir .ir-activity-row:is([data-status=blocked],[data-status=partial]) .ir-activity-status{--status-ink:#f2d18e;--status-bg:#423521}
+ html.dark .ir .ir-activity-row:is([data-status=failed],[data-status=interrupted]) .ir-activity-status{--status-ink:#ffc1ba;--status-bg:#482d35}
+ .ir .ir-activity-toggle{display:flex;gap:8px;align-items:flex-start;justify-content:space-between;padding:2px 0;cursor:pointer;list-style:none;color:var(--activity-text);font-size:14px;font-weight:500;line-height:1.6}
+ .ir .ir-activity-toggle::-webkit-details-marker{display:none}
+ .ir .ir-activity-toggle:focus-visible{outline:2px solid rgb(var(--ui-focus));outline-offset:3px;border-radius:5px}
+ .ir .ir-activity-toggle svg{margin-top:3px;width:16px;height:16px;flex:none;color:var(--activity-meta)}
+ .ir .ir-activity-detail[open] .ir-activity-toggle svg{transform:rotate(180deg)}
+ .ir .ir-activity-preview{flex:1;min-width:0;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;overflow-wrap:anywhere}
+ .ir .ir-activity-repeat{font:600 11px/1.5 var(--activity-mono);background:var(--activity-subtle);color:var(--activity-meta);padding:1px 5px;border-radius:4px;white-space:nowrap}
+ .ir[data-aegis-scene=incident] .ir-activity code.ir-activity-token{font:500 .92em/1.55 var(--activity-mono);color:var(--activity-text)!important;background:var(--activity-subtle)!important;padding:1px 3px;border-radius:4px;overflow-wrap:anywhere;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+ .ir .ir-activity-expanded{font-size:13px;line-height:1.7;white-space:pre-wrap;overflow-wrap:anywhere;padding:10px 12px;color:var(--activity-text);background:var(--activity-subtle);border-radius:7px;margin-top:6px}
+ .ir .ir-activity-expanded small{display:block;margin-top:6px;font-size:12px;color:var(--activity-meta)}
+ .ir .ir-activity-more{display:block;margin:12px auto 0;padding:5px 12px}
+ .ir .ir-activity-empty{padding:14px;border:1px dashed rgb(var(--ui-border));border-radius:9px;color:rgb(var(--ui-secondary))}
+ @media(max-width:640px){.ir .ir-activity-row{grid-template-columns:minmax(0,1fr);gap:7px;padding:11px 12px}.ir .ir-activity-meta-cell{flex-direction:row;align-items:center}.ir .ir-activity-toggle{font-size:13px}}
+ .ir .incident-case-actions{flex:0 1 auto;justify-content:flex-end;flex-wrap:wrap;gap:8px}
+ .ir .incident-case-actions .danger{margin-inline-start:4px}
+ @media(max-width:700px){html .ir .incident-detail-layout .case-stage-bar .investigation-nav{grid-template-columns:repeat(2,minmax(0,1fr))}.ir .case-summary:has(.incident-case-head),.ir .incident-detail-layout .incident-case-workbench .investigation-body{padding:14px}.ir .incident-case-actions{justify-content:flex-start}}
 ` }),
     /* @__PURE__ */ jsxs("div", { className: "head", children: [
       /* @__PURE__ */ jsxs("div", { className: "scene-page-brand", children: [
-        /* @__PURE__ */ jsx("img", { "data-scene-logo": "incident", className: "scene-page-logo", src: "/api/scenes/assistant/logos/incident.svg", alt: "\u5E94\u6025\u54CD\u5E94 Logo" }),
+        /* @__PURE__ */ jsx("img", { "data-scene-logo": "incident", className: "scene-page-logo", src: "/api/scenes/assistant/logos/incident.svg", alt: ui("\u5E94\u6025\u54CD\u5E94 Logo") }),
         /* @__PURE__ */ jsxs("div", { children: [
           /* @__PURE__ */ jsx("div", { className: "overline", children: "INCIDENT RESPONSE / EVIDENCE INTO ACTION" }),
-          /* @__PURE__ */ jsx("h1", { children: "\u5E94\u6025\u54CD\u5E94\u5DE5\u4F5C\u53F0" }),
-          /* @__PURE__ */ jsx("p", { children: "\u4ECE\u786E\u8BA4\u544A\u8B66\u5230\u8BC1\u636E\u94FE\uFF0C\u8BA9\u6BCF\u4E00\u6B65\u8C03\u67E5\u90FD\u6709\u4F9D\u636E\u3002" })
+          /* @__PURE__ */ jsx("h1", { children: ui("\u5E94\u6025\u54CD\u5E94\u5DE5\u4F5C\u53F0") }),
+          /* @__PURE__ */ jsx("p", { children: ui("\u4ECE\u786E\u8BA4\u544A\u8B66\u5230\u8BC1\u636E\u94FE\uFF0C\u8BA9\u6BCF\u4E00\u6B65\u8C03\u67E5\u90FD\u6709\u4F9D\u636E\u3002") })
         ] })
       ] }),
       /* @__PURE__ */ jsxs("div", { className: "tools", children: [
-        /* @__PURE__ */ jsx("span", { className: "badge", children: "\u5DE5\u4F5C\u6D41 + AI \u5206\u6790" }),
+        /* @__PURE__ */ jsx("span", { className: "badge", children: ui("\u5DE5\u4F5C\u6D41 + AI \u5206\u6790") }),
         /* @__PURE__ */ jsx("button", { className: "primary", onClick: () => {
           setNewEvent(initialEvent());
           setEventModal(true);
-        }, children: "\u65B0\u589E\u4E8B\u4EF6" }),
-        /* @__PURE__ */ jsxs("button", { onClick: () => {
-          setTab("settings");
-          setSelected("");
-        }, children: [
+        }, children: ui("\u65B0\u589E\u4E8B\u4EF6") }),
+        /* @__PURE__ */ jsxs("button", { onClick: openConnections, children: [
           /* @__PURE__ */ jsx(Icon, { type: "host" }),
-          " \u4E3B\u673A\u4E0E\u8FDE\u63A5"
+          " ",
+          ui("\u4E3B\u673A\u4E0E\u8FDE\u63A5")
         ] }),
-        /* @__PURE__ */ jsx("button", { onClick: () => void refresh(), children: "\u5237\u65B0" })
+        /* @__PURE__ */ jsx("button", { onClick: () => void refresh(), children: ui("\u5237\u65B0") })
       ] })
     ] }),
     error && /* @__PURE__ */ jsx("div", { role: "alert", className: "error", children: error }),
-    /* @__PURE__ */ jsx("div", { className: "stats", children: [["\u54CD\u5E94\u4E8B\u4EF6", cases.length], ["\u8C03\u67E5\u8FDB\u884C\u4E2D", cases.filter((c) => ["queued", "running", "investigating"].includes(c.status)).length], ["\u7B49\u5F85\u590D\u6838", cases.filter((c) => c.status === "review").length], ["\u767B\u8BB0\u4E3B\u673A", settings.hosts.length]].map(([label, value]) => /* @__PURE__ */ jsxs("div", { className: "stat", children: [
-      /* @__PURE__ */ jsx("span", { children: label }),
+    !showDetailView && /* @__PURE__ */ jsx("div", { className: "stats", children: [["\u54CD\u5E94\u4E8B\u4EF6", cases.length], ["\u8C03\u67E5\u8FDB\u884C\u4E2D", cases.filter((c) => ["queued", "running", "investigating"].includes(c.status)).length], ["\u7B49\u5F85\u590D\u6838", cases.filter((c) => c.status === "review").length], ["\u767B\u8BB0\u4E3B\u673A", settings.hosts.length]].map(([label, value]) => /* @__PURE__ */ jsxs("div", { className: "stat", children: [
+      /* @__PURE__ */ jsx("span", { children: ui(String(label)) }),
       /* @__PURE__ */ jsx("b", { children: value })
     ] }, String(label))) }),
-    /* @__PURE__ */ jsxs("div", { className: "layout", children: [
-      /* @__PURE__ */ jsxs("aside", { className: "panel list", children: [
-        /* @__PURE__ */ jsxs("div", { className: "list-heading", children: [
-          /* @__PURE__ */ jsx("h3", { children: "\u54CD\u5E94\u4E8B\u4EF6" }),
-          /* @__PURE__ */ jsxs("span", { children: [
-            shown.length,
-            " \u9879"
-          ] })
-        ] }),
-        /* @__PURE__ */ jsxs("div", { className: "list-search", children: [
-          /* @__PURE__ */ jsx("input", { placeholder: "\u641C\u7D22\u4E8B\u4EF6\u3001\u6765\u6E90\u6216\u76EE\u6807 IP", value: query, onChange: (e) => setQuery(e.target.value) }),
-          /* @__PURE__ */ jsxs("select", { "aria-label": "\u7B5B\u9009\u4E8B\u4EF6\u72B6\u6001", value: caseStatusFilter, onChange: (e) => setCaseStatusFilter(e.target.value), children: [
-            /* @__PURE__ */ jsx("option", { value: "", children: "\u5168\u90E8\u4E8B\u4EF6\u72B6\u6001" }),
-            ["new", "queued", "investigating", "running", "review", "closed", "failed", "interrupted"].map((key) => /* @__PURE__ */ jsxs("option", { value: key, children: [
-              labels[key],
-              " \xB7 ",
-              cases.filter((c) => c.status === key).length
-            ] }, key))
-          ] })
-        ] }),
-        /* @__PURE__ */ jsx("div", { className: "case-scroll", children: shown.length ? shown.map((c) => /* @__PURE__ */ jsxs("button", { "data-attack-type": attackTheme(c).id, style: { "--case-accent": attackTheme(c).accent, "--case-soft": attackTheme(c).soft }, className: "case " + (selected === c.id ? "active" : ""), onClick: () => choose(c.id), children: [
-          /* @__PURE__ */ jsx("span", { className: "case-type", children: attackTheme(c).label }),
-          /* @__PURE__ */ jsx("strong", { children: c.title }),
-          /* @__PURE__ */ jsxs("div", { className: "addr", children: [
-            c.source || "\u6765\u6E90\u5F85\u6838\u5B9E",
-            " \u2192 ",
-            c.target
+    !showDetailView ? /* @__PURE__ */ jsxs("section", { className: "incident-ledger", "aria-label": ui("\u54CD\u5E94\u4E8B\u4EF6\u53F0\u8D26"), children: [
+      /* @__PURE__ */ jsx("nav", { className: "incident-ledger-nav", "aria-label": ui("\u4E8B\u4EF6\u72B6\u6001"), children: caseFilters.map(({ id, label, statuses }) => /* @__PURE__ */ jsxs("button", { type: "button", "aria-pressed": caseStatusFilter === id, onClick: () => {
+        setCaseStatusFilter(id);
+        setCasePage(1);
+      }, children: [
+        ui(label),
+        " \xB7 ",
+        cases.filter((c) => !statuses.length || statuses.includes(c.status)).length
+      ] }, id)) }),
+      /* @__PURE__ */ jsxs("div", { className: "incident-ledger-toolbar", children: [
+        /* @__PURE__ */ jsxs("label", { className: "incident-ledger-search", children: [
+          /* @__PURE__ */ jsxs("svg", { width: "17", height: "17", viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.6", "aria-hidden": "true", children: [
+            /* @__PURE__ */ jsx("circle", { cx: "10.5", cy: "10.5", r: "6.5" }),
+            /* @__PURE__ */ jsx("path", { d: "m15.5 15.5 4.5 4.5" })
           ] }),
-          /* @__PURE__ */ jsxs("small", { children: [
-            new Date(c.created).toLocaleString(),
-            " \xB7 ",
-            /* @__PURE__ */ jsx("span", { className: "case-status", "data-status": c.status, children: labels[c.status] || c.status })
-          ] })
-        ] }, c.id)) : /* @__PURE__ */ jsxs("div", { className: "empty", children: [
-          "\u6682\u65E0\u4E8B\u4EF6\u3002",
-          /* @__PURE__ */ jsx("br", {}),
-          "\u53EF\u65B0\u589E\u4E8B\u4EF6\uFF0C\u6216\u4ECE\u6B63\u5F0F\u544A\u8B66\u4E0B\u53D1\u8C03\u67E5\u3002"
-        ] }) })
+          /* @__PURE__ */ jsx("input", { "aria-label": ui("\u641C\u7D22\u54CD\u5E94\u4E8B\u4EF6"), placeholder: ui("\u641C\u7D22\u4E8B\u4EF6\u540D\u79F0\u3001\u7F16\u53F7\u6216\u6765\u6E90 / \u76EE\u6807 IP"), value: query, onChange: (e) => {
+            setQuery(e.target.value);
+            setCasePage(1);
+          } })
+        ] }),
+        /* @__PURE__ */ jsxs("select", { "aria-label": ui("\u7B5B\u9009\u4E8B\u4EF6\u7C7B\u578B"), value: caseTypeFilter, onChange: (e) => {
+          setCaseTypeFilter(e.target.value);
+          setCasePage(1);
+        }, children: [
+          /* @__PURE__ */ jsx("option", { value: "", children: ui("\u5168\u90E8\u4E8B\u4EF6\u7C7B\u578B") }),
+          attackThemes.map((t) => /* @__PURE__ */ jsx("option", { value: t.id, children: ui(t.label) }, t.id))
+        ] }),
+        (query || caseStatusFilter || caseTypeFilter) && /* @__PURE__ */ jsx("button", { type: "button", onClick: () => {
+          setQuery("");
+          setCaseStatusFilter("");
+          setCaseTypeFilter("");
+          setCasePage(1);
+        }, children: ui("\u91CD\u7F6E\u7B5B\u9009") })
       ] }),
-      /* @__PURE__ */ jsx("section", { className: "panel detail " + (tab === "settings" ? "settings-view" : ""), children: tab === "settings" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsxs("div", { className: "incident-ledger-table-wrap", children: [
+        /* @__PURE__ */ jsxs("table", { role: "table", "aria-label": ui("\u54CD\u5E94\u4E8B\u4EF6"), children: [
+          /* @__PURE__ */ jsx("thead", { role: "rowgroup", children: /* @__PURE__ */ jsx("tr", { role: "row", children: ["\u4E8B\u4EF6\u540D\u79F0 / \u7F16\u53F7", "\u4E8B\u4EF6\u7C7B\u578B", "\u6765\u6E90 \u2192 \u76EE\u6807", "\u72B6\u6001", "\u767B\u8BB0\u65F6\u95F4", "\u64CD\u4F5C"].map((name) => /* @__PURE__ */ jsx("th", { scope: "col", children: ui(name) }, name)) }) }),
+          /* @__PURE__ */ jsxs("tbody", { role: "rowgroup", children: [
+            pageCases.map((c) => {
+              const type = attackTheme(c);
+              return /* @__PURE__ */ jsxs("tr", { role: "row", "data-event-type": type.id, style: { "--event-type": type.accent, "--event-soft": type.soft, "--event-light-ink": type.ink, "--event-dark-ink": type.darkInk }, children: [
+                /* @__PURE__ */ jsxs("td", { role: "cell", children: [
+                  /* @__PURE__ */ jsx("strong", { children: c.title }),
+                  /* @__PURE__ */ jsxs("small", { children: [
+                    "IR-",
+                    c.id.slice(0, 10)
+                  ] })
+                ] }),
+                /* @__PURE__ */ jsx("td", { role: "cell", "data-label": ui("\u4E8B\u4EF6\u7C7B\u578B"), children: /* @__PURE__ */ jsx("span", { className: "incident-event-type", children: ui(type.label) }) }),
+                /* @__PURE__ */ jsx("td", { role: "cell", "data-label": ui("\u6765\u6E90 \u2192 \u76EE\u6807"), children: /* @__PURE__ */ jsx(IncidentEndpoints, { source: c.source, target: c.target }) }),
+                /* @__PURE__ */ jsx("td", { role: "cell", "data-label": ui("\u72B6\u6001"), children: /* @__PURE__ */ jsx("span", { className: "incident-event-state", "data-status": c.status, children: ui(labels[c.status] || c.status) }) }),
+                /* @__PURE__ */ jsx("td", { role: "cell", "data-label": ui("\u767B\u8BB0\u65F6\u95F4"), children: /* @__PURE__ */ jsx(IncidentRegisteredAt, { value: c.created }) }),
+                /* @__PURE__ */ jsx("td", { role: "cell", children: /* @__PURE__ */ jsxs("a", { className: "incident-open", href: caseHref(c.id), "aria-label": `${ui("\u67E5\u770B\u8BE6\u60C5")}: ${c.title}`, onClick: (event) => followCase(event, c.id), children: [
+                  ui("\u67E5\u770B\u8BE6\u60C5"),
+                  " ",
+                  /* @__PURE__ */ jsx("span", { "aria-hidden": "true", children: "\u2192" })
+                ] }) })
+              ] }, c.id);
+            }),
+            !pageCases.length && /* @__PURE__ */ jsx("tr", { role: "row", className: "incident-ledger-empty", children: /* @__PURE__ */ jsx("td", { role: "cell", colSpan: 6, children: ui(!casesReady ? "\u6B63\u5728\u52A0\u8F7D\u54CD\u5E94\u4E8B\u4EF6\u2026" : cases.length ? "\u6CA1\u6709\u7B26\u5408\u7B5B\u9009\u6761\u4EF6\u7684\u4E8B\u4EF6\u3002" : "\u6682\u65E0\u4E8B\u4EF6\uFF0C\u53EF\u901A\u8FC7\u300C\u65B0\u589E\u4E8B\u4EF6\u300D\u767B\u8BB0\uFF0C\u6216\u4ECE\u6B63\u5F0F\u544A\u8B66\u53D1\u8D77\u8C03\u67E5\u3002") }) })
+          ] })
+        ] }),
+        /* @__PURE__ */ jsxs("div", { className: "incident-ledger-footer", children: [
+          /* @__PURE__ */ jsx("span", { "aria-live": "polite", children: incidentLocale() ? `${shown.length} incidents \xB7 ${casePageSize} per page` : `\u5171 ${shown.length} \u6761 \xB7 \u6BCF\u9875 ${casePageSize} \u6761` }),
+          /* @__PURE__ */ jsxs("div", { className: "incident-ledger-pagination", children: [
+            /* @__PURE__ */ jsx("button", { type: "button", disabled: currentCasePage <= 1, onClick: () => setCasePage(currentCasePage - 1), children: ui("\u4E0A\u4E00\u9875") }),
+            /* @__PURE__ */ jsxs("span", { children: [
+              currentCasePage,
+              " / ",
+              casePageCount
+            ] }),
+            /* @__PURE__ */ jsx("button", { type: "button", disabled: currentCasePage >= casePageCount, onClick: () => setCasePage(currentCasePage + 1), children: ui("\u4E0B\u4E00\u9875") })
+          ] })
+        ] })
+      ] })
+    ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+      /* @__PURE__ */ jsxs("div", { className: "incident-breadcrumb", children: [
+        /* @__PURE__ */ jsxs("a", { className: "incident-back", href: caseHref(""), onClick: (event) => followCase(event, ""), children: [
+          "\u2190 ",
+          ui("\u8FD4\u56DE\u4E8B\u4EF6\u53F0\u8D26")
+        ] }),
+        /* @__PURE__ */ jsx("span", { children: ui(tab === "settings" ? "\u4E3B\u673A\u4E0E\u8FDE\u63A5" : "\u4E8B\u4EF6\u8C03\u67E5") })
+      ] }),
+      /* @__PURE__ */ jsx("div", { className: "layout incident-detail-layout", children: /* @__PURE__ */ jsx("section", { className: "panel detail " + (tab === "settings" ? "settings-view" : detail ? "incident-case-workbench" : ""), children: tab === "settings" ? /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsxs("div", { className: "head", children: [
           /* @__PURE__ */ jsxs("div", { children: [
-            /* @__PURE__ */ jsx("h2", { children: "\u4E3B\u673A\u4E0E\u8C03\u67E5\u8FDE\u63A5" }),
+            /* @__PURE__ */ jsx("h2", { children: ui("\u4E3B\u673A\u4E0E\u8C03\u67E5\u8FDE\u63A5") }),
             /* @__PURE__ */ jsx("p", { children: "\u4EC5\u767B\u8BB0\u53D7\u7BA1\u4E3B\u673A\uFF0C\u51ED\u636E\u4F7F\u7528\u5E73\u53F0 Secret Manager \u4FDD\u5B58\u3002" })
           ] }),
-          /* @__PURE__ */ jsx("button", { className: "primary", onClick: () => setModal(true), children: "\u767B\u8BB0\u4E3B\u673A" })
+          /* @__PURE__ */ jsx("button", { className: "primary", onClick: () => setModal(true), children: ui("\u767B\u8BB0\u4E3B\u673A") })
         ] }),
         /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
           /* @__PURE__ */ jsx("summary", { children: "\u4E3B\u673A\u63A5\u5165\u4E0E\u6743\u9650\u8BF4\u660E" }),
@@ -1036,7 +1328,7 @@ function IncidentPage() {
               h.username
             ] })
           ] }),
-          /* @__PURE__ */ jsx("span", { className: "badge", children: "\u5DF2\u767B\u8BB0" })
+          /* @__PURE__ */ jsx("span", { className: "badge", children: ui("\u5DF2\u767B\u8BB0") })
         ] }, h.id)),
         /* @__PURE__ */ jsx("h3", { style: { marginTop: 25 }, children: "\u5FAE\u6B65\u4E91\u6C99\u7BB1" }),
         /* @__PURE__ */ jsxs("p", { children: [
@@ -1052,36 +1344,41 @@ function IncidentPage() {
         ] }),
         /* @__PURE__ */ jsx("p", { children: "\u652F\u6301\u6587\u4EF6\u54C8\u5E0C\u67E5\u8BE2\u4E0E\u786E\u8BA4\u540E\u7684\u6837\u672C\u63D0\u4EA4\uFF0C\u591A\u5F15\u64CE\u7ED3\u679C\u5F52\u6863\u5230\u4E8B\u4EF6\u8BC1\u636E\u5E93\u3002" }),
         /* @__PURE__ */ jsx("a", { href: "https://www.virustotal.com/", target: "_blank", rel: "noreferrer", children: "\u6253\u5F00 VirusTotal \u2197" })
-      ] }) : !detail ? /* @__PURE__ */ jsxs("div", { className: "empty", children: [
+      ] }) : !detail ? /* @__PURE__ */ jsxs("div", { className: "empty", role: "status", children: [
         /* @__PURE__ */ jsx(Icon, {}),
-        /* @__PURE__ */ jsx("h2", { children: "\u8BA9\u7EBF\u7D22\u6210\u4E3A\u5B8C\u6574\u8C03\u67E5" }),
-        /* @__PURE__ */ jsxs("p", { children: [
-          "\u65B0\u589E\u5E94\u6025\u4E8B\u4EF6\uFF0C\u6216\u5728\u544A\u8B66\u8BE6\u60C5\u70B9\u51FB",
-          /* @__PURE__ */ jsx("br", {}),
-          "\u201C\u5E94\u6025\u54CD\u5E94\u201D\u5F00\u59CB\u8C03\u67E5\u3002"
-        ] }),
-        /* @__PURE__ */ jsx("div", { className: "notice", children: "\u8BBE\u5907\u65E5\u5FD7\u5173\u8054 \u2192 \u4E3B\u673A\u53EA\u8BFB\u6392\u67E5 \u2192 \u6837\u672C\u53D6\u8BC1 \u2192 \u6C99\u7BB1\u5206\u6790 \u2192 \u8BC1\u636E\u62A5\u544A" })
+        /* @__PURE__ */ jsx("h2", { children: error ? "\u65E0\u6CD5\u6253\u5F00\u6B64\u4E8B\u4EF6" : "\u6B63\u5728\u52A0\u8F7D\u4E8B\u4EF6\u8BE6\u60C5\u2026" }),
+        /* @__PURE__ */ jsx("p", { children: error ? "\u53EF\u8FD4\u56DE\u4E8B\u4EF6\u53F0\u8D26\uFF0C\u6216\u5237\u65B0\u540E\u91CD\u8BD5\u3002" : "\u6B63\u5728\u8BFB\u53D6\u8C03\u67E5\u8BB0\u5F55\u548C\u8BC1\u636E\u3002" })
       ] }) : /* @__PURE__ */ jsxs(Fragment2, { children: [
+        /* @__PURE__ */ jsx("div", { className: "case-stage-bar", children: /* @__PURE__ */ jsx("div", { className: "investigation-nav", role: "tablist", "aria-label": ui("\u8C03\u67E5\u529F\u80FD"), children: [["overview", "\u8C03\u67E5\u52A8\u6001", "intake"], ["logs", "\u8BBE\u5907\u5173\u8054", "logs"], ["host", "\u4E3B\u673A\u6392\u67E5", "host"], ["evidence", "\u6837\u672C\u4E0E\u9006\u5411", "sample"], ["sandbox", "\u6C99\u7BB1\u5206\u6790", "sandbox"], ["report", "\u54CD\u5E94\u62A5\u544A", "report"]].map(([key, name, stage]) => {
+          const events = detail.events.filter((e) => e.stage === stage);
+          const last = events[events.length - 1];
+          return /* @__PURE__ */ jsxs("button", { type: "button", role: "tab", id: `incident-tab-${key}`, "aria-controls": "incident-tab-content", "aria-selected": tab === key, className: tab === key ? "active" : "", onClick: () => setTab(key), children: [
+            /* @__PURE__ */ jsx("i", { children: /* @__PURE__ */ jsx(StageIcon, { stage }) }),
+            /* @__PURE__ */ jsxs("span", { children: [
+              /* @__PURE__ */ jsx("strong", { children: ui(name) }),
+              /* @__PURE__ */ jsx("small", { "data-status": last?.status || "pending", children: ui(labels[last?.status] || "\u5F85\u6267\u884C") })
+            ] })
+          ] }, key);
+        }) }) }),
         /* @__PURE__ */ jsxs("div", { className: "case-summary", children: [
-          /* @__PURE__ */ jsxs("div", { className: "head", children: [
-            /* @__PURE__ */ jsxs("div", { children: [
-              /* @__PURE__ */ jsx("span", { className: "badge", children: labels[detail.status] || detail.status }),
-              /* @__PURE__ */ jsx("h2", { style: { marginTop: 10 }, children: detail.title }),
-              /* @__PURE__ */ jsxs("p", { children: [
-                detail.source || "\u6765\u6E90\u5F85\u6838\u5B9E",
-                " \u2192 ",
-                detail.target,
-                " \xB7 ",
-                detail.actor
+          /* @__PURE__ */ jsxs("div", { className: "head incident-case-head", children: [
+            /* @__PURE__ */ jsxs("div", { className: "incident-case-identity", children: [
+              /* @__PURE__ */ jsxs("div", { className: "incident-case-kicker", children: [
+                /* @__PURE__ */ jsx("span", { className: "badge", children: ui(labels[detail.status] || detail.status) }),
+                /* @__PURE__ */ jsxs("code", { children: [
+                  "IR-",
+                  detail.id.slice(0, 10)
+                ] })
               ] }),
-              /* @__PURE__ */ jsxs("code", { children: [
-                "IR-",
-                detail.id.slice(0, 10)
+              /* @__PURE__ */ jsx("h2", { children: detail.title }),
+              /* @__PURE__ */ jsxs("div", { className: "incident-case-endpoints", children: [
+                /* @__PURE__ */ jsx(IncidentEndpoints, { source: detail.source, target: detail.target }),
+                detail.actor && /* @__PURE__ */ jsx("span", { children: detail.actor })
               ] }),
               /* @__PURE__ */ jsxs("div", { className: "source-device-line", children: [
-                /* @__PURE__ */ jsx("span", { children: "\u6765\u6E90\u8BBE\u5907" }),
-                /* @__PURE__ */ jsx("strong", { children: caseSource(detail)?.name || "\u5C1A\u672A\u660E\u786E\u6765\u6E90\u8BBE\u5907" }),
-                /* @__PURE__ */ jsx("button", { disabled: locked, onClick: openSource, children: caseSource(detail) ? "\u53D8\u66F4\u6765\u6E90" : "\u660E\u786E\u6765\u6E90\u8BBE\u5907" })
+                /* @__PURE__ */ jsx("span", { children: ui("\u6765\u6E90\u8BBE\u5907") }),
+                /* @__PURE__ */ jsx("strong", { children: caseSource(detail)?.name || ui("\u5C1A\u672A\u660E\u786E\u6765\u6E90\u8BBE\u5907") }),
+                /* @__PURE__ */ jsx("button", { type: "button", className: "ir-source-action", disabled: locked, onClick: openSource, children: ui(caseSource(detail) ? "\u53D8\u66F4\u6765\u6E90" : "\u660E\u786E\u6765\u6E90\u8BBE\u5907") })
               ] }),
               detail.status === "closed" && /* @__PURE__ */ jsxs("p", { className: "archive-fact", children: [
                 "\u5DF2\u5F52\u6863 \xB7 ",
@@ -1090,33 +1387,22 @@ function IncidentPage() {
                 detail.closed_by
               ] })
             ] }),
-            /* @__PURE__ */ jsxs("div", { className: "tools", children: [
+            /* @__PURE__ */ jsxs("div", { className: "tools incident-case-actions", role: "group", "aria-label": ui("\u4E8B\u4EF6\u64CD\u4F5C"), children: [
               /* @__PURE__ */ jsx("button", { className: "status-update", disabled: !!busy || detail.processing || !detail.status_actions?.length, onClick: () => {
                 setStatusAction(detail.status_actions?.[0]?.action || "");
                 setStatusNote("");
                 setStatusOpen(true);
-              }, children: "\u66F4\u65B0\u72B6\u6001" }),
+              }, children: ui("\u66F4\u65B0\u72B6\u6001") }),
               /* @__PURE__ */ jsxs("a", { className: "export-report", href: BASE + "/cases/" + detail.id + "/report.md", download: true, children: [
                 /* @__PURE__ */ jsx("svg", { viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "1.7", strokeLinecap: "round", strokeLinejoin: "round", "aria-hidden": "true", children: /* @__PURE__ */ jsx("path", { d: "M12 3v12m-4-4 4 4 4-4M4 16v5h16v-5" }) }),
-                "\u5BFC\u51FA\u62A5\u544A"
+                ui("\u5BFC\u51FA\u62A5\u544A")
               ] }),
-              /* @__PURE__ */ jsx("button", { className: "danger", disabled: !!busy || locked, onClick: () => setDeleteOpen(true), children: "\u5220\u9664\u4E8B\u4EF6" })
+              /* @__PURE__ */ jsx("button", { className: "danger", disabled: !!busy || locked, onClick: () => setDeleteOpen(true), children: ui("\u5220\u9664\u4E8B\u4EF6") })
             ] })
           ] }),
-          JSON.parse(detail.alert || "{}")._demo && /* @__PURE__ */ jsx("div", { className: "notice case-context", children: "\u6F14\u793A\u4E8B\u4EF6 \xB7 \u4EC5\u9884\u89C8\u6D41\u7A0B\uFF0C\u4E0D\u67E5\u8BE2\u771F\u5B9E\u8BBE\u5907\u3001\u4E0D\u4E0A\u673A\u3001\u4E0D\u4E0A\u4F20\u6837\u672C\u3002" }),
-          /* @__PURE__ */ jsx("div", { className: "investigation-nav", role: "tablist", "aria-label": "\u8C03\u67E5\u529F\u80FD", children: [["overview", "\u8C03\u67E5\u52A8\u6001", "intake"], ["logs", "\u8BBE\u5907\u5173\u8054", "logs"], ["host", "\u4E3B\u673A\u6392\u67E5", "host"], ["evidence", "\u6837\u672C\u4E0E\u9006\u5411", "sample"], ["sandbox", "\u6C99\u7BB1\u5206\u6790", "sandbox"], ["report", "\u54CD\u5E94\u62A5\u544A", "report"]].map(([key, name, stage]) => {
-            const events = detail.events.filter((e) => e.stage === stage);
-            const last = events[events.length - 1];
-            return /* @__PURE__ */ jsxs("button", { type: "button", role: "tab", "aria-selected": tab === key, className: tab === key ? "active" : "", onClick: () => setTab(key), children: [
-              /* @__PURE__ */ jsx("i", { children: /* @__PURE__ */ jsx(StageIcon, { stage }) }),
-              /* @__PURE__ */ jsxs("span", { children: [
-                /* @__PURE__ */ jsx("strong", { children: name }),
-                /* @__PURE__ */ jsx("small", { "data-status": last?.status || "pending", children: labels[last?.status] || "\u5F85\u6267\u884C" })
-              ] })
-            ] }, key);
-          }) })
+          JSON.parse(detail.alert || "{}")._demo && /* @__PURE__ */ jsx("div", { className: "notice case-context", children: ui("\u6F14\u793A\u4E8B\u4EF6 \xB7 \u4EC5\u9884\u89C8\u6D41\u7A0B\uFF0C\u4E0D\u67E5\u8BE2\u771F\u5B9E\u8BBE\u5907\u3001\u4E0D\u4E0A\u673A\u3001\u4E0D\u4E0A\u4F20\u6837\u672C\u3002") })
         ] }),
-        /* @__PURE__ */ jsxs("div", { className: "investigation-body", children: [
+        /* @__PURE__ */ jsxs("div", { id: "incident-tab-content", className: "investigation-body", role: "tabpanel", "aria-labelledby": `incident-tab-${tab}`, children: [
           optionalJobs.length > 0 && ["host", "evidence"].includes(tab) && /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
             /* @__PURE__ */ jsxs("summary", { children: [
               "\u53D6\u8BC1\u4E0E\u73AF\u5883\u4EFB\u52A1 \xB7 ",
@@ -1127,14 +1413,14 @@ function IncidentPage() {
               /* @__PURE__ */ jsxs("strong", { children: [
                 j.kind === "rea_install" ? "REA \u5B89\u88C5" : "Solar \u53D6\u8BC1",
                 " \xB7 ",
-                labels[j.status] || j.status
+                ui(labels[j.status] || j.status)
               ] }),
               /* @__PURE__ */ jsx("p", { children: j.result?.message }),
               j.kind === "rea_install" && /* @__PURE__ */ jsx("button", { onClick: () => req("/optional/jobs/" + j.id + "/log").then((r) => setOptionalLog(r.text)), children: "\u67E5\u770B\u65E5\u5FD7" })
             ] }, j.id))
           ] }),
           optionalLog && /* @__PURE__ */ jsx("div", { className: "modal", onClick: () => setOptionalLog(""), children: /* @__PURE__ */ jsxs("div", { className: "dialog", onClick: (e) => e.stopPropagation(), children: [
-            /* @__PURE__ */ jsx("button", { onClick: () => setOptionalLog(""), children: "\u5173\u95ED" }),
+            /* @__PURE__ */ jsx("button", { onClick: () => setOptionalLog(""), children: ui("\u5173\u95ED") }),
             /* @__PURE__ */ jsx("h3", { children: "\u5B89\u88C5\u65E5\u5FD7" }),
             /* @__PURE__ */ jsx("pre", { style: { whiteSpace: "pre-wrap", overflowWrap: "anywhere", fontSize: 12 }, children: optionalLog })
           ] }) }),
@@ -1144,29 +1430,29 @@ function IncidentPage() {
           ] }),
           tab === "overview" && /* @__PURE__ */ jsxs(Fragment2, { children: [
             /* @__PURE__ */ jsxs("div", { className: "work-section-head", children: [
-              /* @__PURE__ */ jsx("h3", { children: "\u8C03\u67E5\u52A8\u6001" }),
-              /* @__PURE__ */ jsx("button", { disabled: !!busy || locked, onClick: () => action("\u91CD\u65B0\u5173\u8054\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: "\u5237\u65B0\u5173\u8054\u65E5\u5FD7" })
+              /* @__PURE__ */ jsx("h3", { children: ui("\u8C03\u67E5\u52A8\u6001") }),
+              /* @__PURE__ */ jsx("button", { disabled: !!busy || locked, onClick: () => action("\u91CD\u65B0\u5173\u8054\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: ui("\u5237\u65B0\u5173\u8054\u65E5\u5FD7") })
             ] }),
             /* @__PURE__ */ jsx(ActivityTimeline, { events: detail.events })
           ] }),
           tab === "logs" && /* @__PURE__ */ jsxs(Fragment2, { children: [
             /* @__PURE__ */ jsxs("div", { className: "work-section-head", children: [
               /* @__PURE__ */ jsxs("div", { children: [
-                /* @__PURE__ */ jsx("h3", { children: "\u8BBE\u5907\u5173\u8054" }),
-                /* @__PURE__ */ jsx("small", { children: caseSource(detail)?.name || "\u5C1A\u672A\u7ED1\u5B9A\u6765\u6E90\u8BBE\u5907" })
+                /* @__PURE__ */ jsx("h3", { children: ui("\u8BBE\u5907\u5173\u8054") }),
+                /* @__PURE__ */ jsx("small", { children: caseSource(detail)?.name || ui("\u5C1A\u672A\u7ED1\u5B9A\u6765\u6E90\u8BBE\u5907") })
               ] }),
               /* @__PURE__ */ jsxs("div", { className: "tools", children: [
-                /* @__PURE__ */ jsx("button", { disabled: locked, onClick: openSource, children: caseSource(detail) ? "\u66F4\u6362\u8BBE\u5907" : "\u9009\u62E9\u8BBE\u5907" }),
-                /* @__PURE__ */ jsx("button", { className: "primary", disabled: !!busy || locked || !caseSource(detail), onClick: () => action("\u5173\u8054\u8BBE\u5907\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: "\u67E5\u8BE2\u5173\u8054\u65E5\u5FD7" })
+                /* @__PURE__ */ jsx("button", { disabled: locked, onClick: openSource, children: ui(caseSource(detail) ? "\u66F4\u6362\u8BBE\u5907" : "\u9009\u62E9\u8BBE\u5907") }),
+                /* @__PURE__ */ jsx("button", { className: "primary", disabled: !!busy || locked || !caseSource(detail), onClick: () => action("\u5173\u8054\u8BBE\u5907\u65E5\u5FD7", () => req("/cases/" + detail.id + "/run", {})), children: ui("\u67E5\u8BE2\u5173\u8054\u65E5\u5FD7") })
               ] })
             ] }),
             /* @__PURE__ */ jsx(DeviceLogCoverage, { detail }),
-            detail.events.some((e) => e.stage === "logs") && /* @__PURE__ */ jsxs("details", { className: "work-help", open: detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "blocked" || detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "failed", children: [
-              /* @__PURE__ */ jsx("summary", { children: "\u67E5\u8BE2\u8BB0\u5F55\u4E0E\u5F02\u5E38" }),
+            detail.events.some((e) => e.stage === "logs") && /* @__PURE__ */ jsxs("details", { className: "work-help ir-log-history", open: detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "blocked" || detail.events.filter((e) => e.stage === "logs").slice(-1)[0]?.status === "failed", children: [
+              /* @__PURE__ */ jsx("summary", { children: ui("\u67E5\u8BE2\u8BB0\u5F55\u4E0E\u5F02\u5E38") }),
               /* @__PURE__ */ jsx(ActivityTimeline, { compact: true, events: detail.events.filter((e) => e.stage === "logs") })
             ] }),
             /* @__PURE__ */ jsxs("details", { className: "work-help", children: [
-              /* @__PURE__ */ jsx("summary", { children: "\u67E5\u8BE2\u8303\u56F4\u8BF4\u660E" }),
+              /* @__PURE__ */ jsx("summary", { children: ui("\u67E5\u8BE2\u8303\u56F4\u8BF4\u660E") }),
               /* @__PURE__ */ jsx("p", { children: "\u4EC5\u67E5\u8BE2\u5F53\u524D\u4E8B\u4EF6\u7ED1\u5B9A\u7684\u8BBE\u5907\u3001\u544A\u8B66\u65F6\u95F4\u7A97\u53E3\u53CA\u5173\u8054 IP\u3002\u539F\u59CB\u54CD\u5E94\u4FDD\u7559\u5728\u8BC1\u636E\u5E93\uFF0C\u5B8C\u6574\u6027\u4EE5\u8BC1\u636E SHA-256 \u6821\u9A8C\u3002" })
             ] })
           ] }),
@@ -1174,7 +1460,7 @@ function IncidentPage() {
             /* @__PURE__ */ jsx("div", { className: "analysis-platform-tabs", role: "tablist", "aria-label": "\u6837\u672C\u5206\u6790\u5E73\u53F0", children: [["threatbook", "\u5FAE\u6B65\u4E91\u6C99\u7BB1", "threatbook-hd.svg", "\u52A8\u6001\u884C\u4E3A \xB7 \u4E91\u6C99\u7BB1"], ["virustotal", "VirusTotal", "virustotal.svg", "\u591A\u5F15\u64CE\u68C0\u6D4B \xB7 \u6587\u4EF6\u60C5\u62A5"]].map(([id, name, logo, desc]) => /* @__PURE__ */ jsxs("button", { role: "tab", "aria-selected": analysisProvider === id, onClick: () => setAnalysisProvider(id), style: { "--analysis-accent": id === "threatbook" ? "#b45f55" : "#586e9d", "--analysis-soft": id === "threatbook" ? "#fcf3f0" : "#f0f3fa" }, children: [
               /* @__PURE__ */ jsx("img", { src: "/vendor-logos/" + logo, alt: name }),
               /* @__PURE__ */ jsxs("span", { children: [
-                /* @__PURE__ */ jsx("strong", { children: name }),
+                /* @__PURE__ */ jsx("strong", { children: ui(name) }),
                 /* @__PURE__ */ jsx("small", { children: desc })
               ] }),
               /* @__PURE__ */ jsx("i", { children: (id === "threatbook" ? settings.sandbox_key_configured : settings.virustotal_key_configured) ? "\u5DF2\u914D\u7F6E" : "\u5F85\u914D\u7F6E" })
@@ -1227,7 +1513,7 @@ function IncidentPage() {
                 /* @__PURE__ */ jsx("strong", { children: e.label }),
                 /* @__PURE__ */ jsx("p", { children: new Date(e.created).toLocaleString() }),
                 /* @__PURE__ */ jsxs("div", { className: "sample-actions", children: [
-                  /* @__PURE__ */ jsx("button", { onClick: () => showExternalReport(e), children: "\u67E5\u770B\u8BE6\u60C5" }),
+                  /* @__PURE__ */ jsx("button", { onClick: () => showExternalReport(e), children: ui("\u67E5\u770B\u8BE6\u60C5") }),
                   /* @__PURE__ */ jsx("a", { href: BASE + "/cases/" + detail.id + "/evidence/" + e.id, children: "\u4E0B\u8F7D\u539F\u59CB\u62A5\u544A" })
                 ] })
               ] })
@@ -1236,11 +1522,8 @@ function IncidentPage() {
           ] }),
           tab === "host" && /* @__PURE__ */ jsxs(Fragment2, { children: [
             /* @__PURE__ */ jsxs("div", { className: "work-section-head", children: [
-              /* @__PURE__ */ jsx("h3", { children: "\u4E3B\u673A\u6392\u67E5" }),
-              /* @__PURE__ */ jsx("button", { onClick: () => {
-                setTab("settings");
-                setSelected("");
-              }, children: "\u7BA1\u7406\u4E3B\u673A" })
+              /* @__PURE__ */ jsx("h3", { children: ui("\u4E3B\u673A\u6392\u67E5") }),
+              /* @__PURE__ */ jsx("button", { onClick: openConnections, children: "\u7BA1\u7406\u4E3B\u673A" })
             ] }),
             /* @__PURE__ */ jsxs("section", { className: "host-operation", children: [
               /* @__PURE__ */ jsx("div", { className: "operation-number", children: "01" }),
@@ -1401,7 +1684,7 @@ function IncidentPage() {
             ] })
           ] })
         ] })
-      ] }) })
+      ] }) }) })
     ] }),
     sourceOpen && detail && /* @__PURE__ */ jsx("div", { className: "modal", onClick: () => !busy && setSourceOpen(false), children: /* @__PURE__ */ jsxs("form", { className: "dialog status-dialog", role: "dialog", "aria-modal": "true", "aria-label": "\u660E\u786E\u4E8B\u4EF6\u6765\u6E90\u8BBE\u5907", onClick: (e) => e.stopPropagation(), onSubmit: (e) => {
       e.preventDefault();
@@ -1412,13 +1695,13 @@ function IncidentPage() {
     }, children: [
       /* @__PURE__ */ jsxs("div", { className: "head", children: [
         /* @__PURE__ */ jsxs("div", { children: [
-          /* @__PURE__ */ jsx("h2", { children: "\u660E\u786E\u6765\u6E90\u8BBE\u5907" }),
+          /* @__PURE__ */ jsx("h2", { children: ui("\u660E\u786E\u6765\u6E90\u8BBE\u5907") }),
           /* @__PURE__ */ jsx("p", { children: "\u7ED1\u5B9A\u5B9E\u9645\u4EA7\u751F\u672C\u4E8B\u4EF6\u544A\u8B66\u6216\u65E5\u5FD7\u7684\u8BBE\u5907" })
         ] }),
         /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u5173\u95ED\u6765\u6E90\u7A97\u53E3", onClick: () => setSourceOpen(false), children: "\xD7" })
       ] }),
       /* @__PURE__ */ jsxs("label", { className: "field", children: [
-        "\u6765\u6E90\u8BBE\u5907",
+        ui("\u6765\u6E90\u8BBE\u5907"),
         /* @__PURE__ */ jsx(DeviceSourcePicker, { devices: settings.devices || [], value: sourceDeviceId, onChange: setSourceDeviceId, label: "\u4E8B\u4EF6\u6765\u6E90\u8BBE\u5907" })
       ] }),
       /* @__PURE__ */ jsx("div", { className: "notice", children: "\u6765\u6E90\u4E0E\u67E5\u8BE2\u76EE\u6807\u4F1A\u4FDD\u5B58\u5728\u4E8B\u4EF6\u4E2D\u3002\u672A\u9002\u914D\u7684\u8BBE\u5907\u4F1A\u660E\u786E\u63D0\u793A\uFF0C\u4E0D\u4F1A\u56DE\u9000\u67E5\u8BE2 TDP \u6216\u5176\u4ED6\u8BBE\u5907\u3002\u5386\u53F2\u67E5\u8BE2\u8BC1\u636E\u4FDD\u7559\u539F\u8BBE\u5907\u6807\u8BC6\u3002" }),
@@ -1428,7 +1711,7 @@ function IncidentPage() {
       ] }),
       error && /* @__PURE__ */ jsx("div", { role: "alert", className: "error", children: error }),
       /* @__PURE__ */ jsxs("div", { className: "form-footer", children: [
-        /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setSourceOpen(false), children: "\u53D6\u6D88" }),
+        /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setSourceOpen(false), children: ui("\u53D6\u6D88") }),
         /* @__PURE__ */ jsx("button", { className: "primary", disabled: locked || !sourceDeviceId || sourceNote.trim().length < 3, children: "\u4FDD\u5B58\u6765\u6E90\u8BBE\u5907" })
       ] })
     ] }) }),
@@ -1448,12 +1731,12 @@ function IncidentPage() {
       ] }),
       /* @__PURE__ */ jsxs("div", { className: "status-current", children: [
         "\u5F53\u524D\u72B6\u6001 ",
-        /* @__PURE__ */ jsx("strong", { children: labels[detail.status] || detail.status }),
+        /* @__PURE__ */ jsx("strong", { children: ui(labels[detail.status] || detail.status) }),
         /* @__PURE__ */ jsx("span", { children: "\u2192" }),
         /* @__PURE__ */ jsx("strong", { children: labels[selectedStatusAction?.target] || "\u8BF7\u9009\u62E9\u64CD\u4F5C" })
       ] }),
       /* @__PURE__ */ jsxs("label", { className: "field", children: [
-        "\u64CD\u4F5C",
+        ui("\u64CD\u4F5C"),
         /* @__PURE__ */ jsx("select", { value: statusAction, onChange: (e) => setStatusAction(e.target.value), children: (detail.status_actions || []).map((a) => /* @__PURE__ */ jsx("option", { value: a.action, children: a.label }, a.action)) })
       ] }),
       /* @__PURE__ */ jsxs("div", { className: "notice", children: [
@@ -1467,7 +1750,7 @@ function IncidentPage() {
       error && /* @__PURE__ */ jsx("div", { role: "alert", className: "error", children: error }),
       /* @__PURE__ */ jsx("p", { className: "note", children: "\u72B6\u6001\u53D8\u66F4\u5C06\u8BB0\u5F55\u64CD\u4F5C\u4EBA\u3001\u65F6\u95F4\u548C\u5904\u7406\u8BF4\u660E\u3002\u5F00\u59CB\u8C03\u67E5\u4E0D\u4F1A\u81EA\u52A8\u6267\u884C\u8FDC\u7A0B\u547D\u4EE4\u3002" }),
       /* @__PURE__ */ jsxs("div", { className: "form-footer", children: [
-        /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setStatusOpen(false), children: "\u53D6\u6D88" }),
+        /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setStatusOpen(false), children: ui("\u53D6\u6D88") }),
         /* @__PURE__ */ jsx("button", { className: "primary", type: "submit", disabled: !!busy || detail.processing || !selectedStatusAction?.enabled || statusNote.trim().length < 3, children: selectedStatusAction?.label || "\u786E\u8BA4\u66F4\u65B0" })
       ] })
     ] }) }),
@@ -1476,7 +1759,7 @@ function IncidentPage() {
       /* @__PURE__ */ jsx("p", { children: detail.title }),
       /* @__PURE__ */ jsx("div", { className: "notice", children: "\u5220\u9664\u540E\uFF0C\u4E8B\u4EF6\u5C06\u4ECE\u5DE5\u4F5C\u53F0\u79FB\u9664\u3002\u539F\u59CB\u8BC1\u636E\u548C\u5220\u9664\u8BB0\u5F55\u4FDD\u7559\u5728\u540E\u53F0\u3002\u6B63\u5728\u5904\u7406\u7684\u4E8B\u4EF6\u65E0\u6CD5\u5220\u9664\u3002" }),
       /* @__PURE__ */ jsxs("div", { className: "form-footer", children: [
-        /* @__PURE__ */ jsx("button", { disabled: !!busy, onClick: () => setDeleteOpen(false), children: "\u53D6\u6D88" }),
+        /* @__PURE__ */ jsx("button", { disabled: !!busy, onClick: () => setDeleteOpen(false), children: ui("\u53D6\u6D88") }),
         /* @__PURE__ */ jsx("button", { className: "danger", disabled: !!busy, onClick: () => void removeEvent(), children: busy ? "\u6B63\u5728\u5220\u9664\u2026" : "\u786E\u8BA4\u5220\u9664" })
       ] })
     ] }) }),
@@ -1504,7 +1787,7 @@ function IncidentPage() {
         ] }),
         /* @__PURE__ */ jsxs("div", { className: "grid", children: [
           /* @__PURE__ */ jsxs("label", { className: "field", children: [
-            "\u76EE\u6807 IP",
+            ui("\u76EE\u6807 IP"),
             /* @__PURE__ */ jsx("input", { required: true, value: newEvent.target, onChange: (e) => setNewEvent({ ...newEvent, target: e.target.value }), placeholder: "\u53D7\u5F71\u54CD\u4E3B\u673A\u7684 IP" })
           ] }),
           /* @__PURE__ */ jsxs("label", { className: "field", children: [
@@ -1531,7 +1814,7 @@ function IncidentPage() {
         ] }),
         /* @__PURE__ */ jsx("div", { className: "notice", children: "\u6309\u4E8B\u4EF6\u65F6\u95F4\u548C\u5DF2\u77E5 IP \u67E5\u8BE2\u8BBE\u5907\u65E5\u5FD7\uFF1B\u8FDC\u7A0B\u4E0A\u673A\u3001\u6587\u4EF6\u53D6\u8BC1\u548C\u5916\u90E8\u6C99\u7BB1\u4E0A\u4F20\u6309\u4E8B\u4EF6\u53E6\u884C\u64CD\u4F5C\u3002" }),
         /* @__PURE__ */ jsxs("div", { className: "form-footer", children: [
-          /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setEventModal(false), children: "\u53D6\u6D88" }),
+          /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setEventModal(false), children: ui("\u53D6\u6D88") }),
           /* @__PURE__ */ jsx("button", { className: "primary", type: "submit", disabled: !!busy, children: busy ? "\u6B63\u5728\u521B\u5EFA\u2026" : "\u521B\u5EFA\u4E8B\u4EF6" })
         ] })
       ] })
@@ -1559,7 +1842,7 @@ function IncidentPage() {
             /* @__PURE__ */ jsx("input", { required: true, value: host.name, onChange: (e) => setHost({ ...host, name: e.target.value }) })
           ] }),
           /* @__PURE__ */ jsxs("label", { className: "field", children: [
-            "\u76EE\u6807 IP",
+            ui("\u76EE\u6807 IP"),
             /* @__PURE__ */ jsx("input", { required: true, value: host.address, onChange: (e) => setHost({ ...host, address: e.target.value }) })
           ] })
         ] }),

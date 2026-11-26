@@ -2,6 +2,7 @@
   "id": "incident_response",
   "version": "1.0.0",
   "title": "应急响应",
+  "titleEn": "Incident Response",
   "icon": "ShieldAlert",
   "order": 30,
   "enabled": true,

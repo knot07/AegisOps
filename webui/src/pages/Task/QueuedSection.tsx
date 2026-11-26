@@ -16,6 +16,7 @@ import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
 import { extractErrorMessage } from '@/utils/error';
 import ModuleEmblem from '@/components/common/ModuleEmblem';
 import './execution-detail.css';
+import './execution-table.css';
 import WorkflowNodeHistory from './WorkflowNodeHistory';
 import ExecutionFilters, { type ExecutionSearchParams } from './ExecutionFilters';
 
@@ -290,7 +291,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         )}
       </div>
 
-      <div className="bg-white rounded-xl border border-gray-200 overflow-hidden max-md:overflow-x-auto">
+      <div className="aegis-execution-list rounded-xl border overflow-hidden max-md:overflow-x-auto">
         {loading && effectiveTasks.length === 0 ? (
           <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>
         ) : error ? (
@@ -304,7 +305,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
         ) : (
           <>
             <table className="w-full text-sm max-md:min-w-[44rem]">
-              <thead className="bg-gray-50 border-b border-gray-200">
+              <thead>
                 <tr>
                   <th className="w-10 px-3 py-3">
                     <input
@@ -322,28 +323,29 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                   <th className="text-left px-3 py-3 font-medium text-gray-600">{t('queued.colTime')}</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-gray-100">
+              <tbody>
                 {effectiveTasks.map(task => (
                   <tr
                     key={task.id}
                     onClick={() => openDetail(task)}
-                    className={`cursor-pointer transition-colors ${selectedId === task.id ? 'bg-slate-50' : 'hover:bg-gray-50'}`}
+                    data-active={selectedId === task.id || selectedTasks.has(task.id)}
+                    className="cursor-pointer motion-safe:transition-colors"
                   >
                     <td className="px-3 py-3" onClick={e => e.stopPropagation()}>
                       <input type="checkbox" checked={selectedTasks.has(task.id)} onChange={() => toggleSelect(task.id)} className="rounded border-gray-300" />
                     </td>
                     <td className="px-3 py-3"><StatusBadge status={task.status} /></td>
                     <td className="px-3 py-3"><div className="flex flex-wrap gap-1"><ExecutionTriggerBadge type={task.triggerType} /><SourceBadge sourceType={task.source?.sourceType ?? 'user_conversation'} /></div></td>
-                    <td className="px-3 py-3 font-medium text-gray-900 max-w-[200px] truncate">
+                    <td className="aegis-execution-title px-3 py-3 font-medium max-w-[200px] truncate">
                       {task.deliveryStatus !== 'viewed' && needsFailureReview(task) && <span className="mr-1.5 rounded-full bg-rose-500/10 px-2 py-0.5 text-xs text-rose-800 dark:text-rose-200">{t('attention.badge')}</span>}
                       {task.deliveryStatus === 'unread' && task.status === 'completed' && (
-                        <span className="w-1.5 h-1.5 bg-sky-500 rounded-full inline-block mr-1.5 mb-0.5 align-middle" />
+                        <span className="aegis-execution-unread w-1.5 h-1.5 rounded-full inline-block mr-1.5 mb-0.5 align-middle" />
                       )}
                       {task.title}
                     </td>
                     <td className="px-3 py-3"><ModeBadge mode={task.executionMode} agent={task.agentName} /></td>
                     <td className="px-3 py-3"><PriorityBadge priority={task.priority} /></td>
-                    <td className="px-3 py-3 text-gray-400 text-xs whitespace-nowrap">
+                    <td className="aegis-execution-time px-3 py-3 text-xs whitespace-nowrap">
                       {task.startedAt
                         ? formatTime(task.startedAt)
                         : task.queuedAt
@@ -354,15 +356,15 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                 ))}
               </tbody>
             </table>
-            <div className="flex items-center justify-between px-4 py-3 border-t border-gray-200 bg-gray-50">
-              <span className="text-sm text-gray-500">
+            <div className="aegis-execution-pagination flex items-center justify-between px-4 py-3 border-t">
+              <span className="text-sm">
                 {t('queued.pagination', { total, page: page + 1, totalPages })}
               </span>
               <div className="flex gap-2">
-                <button onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                <button onClick={() => handlePageChange(Math.max(0, page - 1))} disabled={page === 0} className="p-1.5 rounded-md disabled:opacity-50 disabled:cursor-not-allowed">
                   <ChevronLeft className="w-4 h-4" />
                 </button>
-                <button onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded hover:bg-gray-200 disabled:opacity-30 disabled:cursor-not-allowed">
+                <button onClick={() => handlePageChange(Math.min(totalPages - 1, page + 1))} disabled={page >= totalPages - 1} className="p-1.5 rounded-md disabled:opacity-50 disabled:cursor-not-allowed">
                   <ChevronRight className="w-4 h-4" />
                 </button>
               </div>

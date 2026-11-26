@@ -35,6 +35,48 @@ html[data-theme-skin]:not([data-theme-skin=sage]):not(.dark) .ir .work-help>summ
 html[data-theme-skin]:not([data-theme-skin=sage]):not(.dark) .ir .case.active{background:var(--skin-selected)!important;border-color:var(--skin-outline)!important;box-shadow:inset 3px 0 var(--skin-accent)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-skin-options>button[aria-pressed=true]{background:var(--skin-selected)!important;color:var(--skin-text)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) .yushu-theme-preview i:nth-child(2){background:var(--skin-buttonTo)!important}
+/* VulnOps navigation and ledger filters share the active palette, including idle controls. */
+html[data-theme-skin] [data-aegis-scene=vulnops] {
+  --vuln-tab-track: var(--skin-raised, #f3f6ee);
+  --vuln-tab-border: var(--skin-border, #e2e9d9);
+  --vuln-tab-label: var(--skin-secondary, #526645);
+  --vuln-tab-hover: var(--skin-hover, #e9efdf);
+  --vuln-tab-selected: var(--skin-selected, #e7efd9);
+  --vuln-tab-accent: var(--skin-accent, #47632e);
+  --vuln-tab-outline: var(--skin-outline, #829d6a);
+}
+html.dark[data-theme-skin=sage] [data-aegis-scene=vulnops] {
+  --vuln-tab-track: var(--night-raised);
+  --vuln-tab-border: var(--night-border);
+  --vuln-tab-label: var(--night-secondary);
+  --vuln-tab-hover: var(--night-hover);
+  --vuln-tab-selected: var(--night-selected);
+  --vuln-tab-accent: var(--night-green);
+  --vuln-tab-outline: #628465;
+}
+html[data-theme-skin] [data-aegis-scene=vulnops] .tabs {
+  background: var(--vuln-tab-track) !important;
+  border-color: var(--vuln-tab-border) !important;
+}
+html[data-theme-skin] [data-aegis-scene=vulnops] :is(.tabs > .tab, .scene-tabs > .scene-tab) {
+  color: var(--vuln-tab-label);
+}
+html[data-theme-skin] [data-aegis-scene=vulnops] :is(.tabs > .tab, .scene-tabs > .scene-tab):hover {
+  background: var(--vuln-tab-hover);
+  color: var(--vuln-tab-accent);
+}
+html[data-theme-skin] [data-aegis-scene=vulnops] :is(.tabs > .tab.active, .scene-tabs > .scene-tab.active) {
+  background: var(--vuln-tab-selected) !important;
+  border-color: var(--vuln-tab-outline) !important;
+  color: var(--vuln-tab-accent) !important;
+}
+html[data-theme-skin] [data-aegis-scene=vulnops] :is(.tabs > .tab, .scene-tabs > .scene-tab):focus-visible {
+  outline: 2px solid var(--vuln-tab-accent);
+  outline-offset: -2px;
+}
+html[data-theme-skin] [data-aegis-scene=vulnops] .scene-tab[data-view=overview] > .icon {
+  color: var(--vuln-tab-accent);
+}
 /* Dashboard graphics must follow the same palette as its primary actions. */
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-trend{background:radial-gradient(ellipse at 0 0,var(--skin-selected),transparent 72%),var(--skin-surface)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-gauge{background:conic-gradient(var(--skin-accent) calc(var(--rate) * 1%),var(--skin-border) 0)!important}
@@ -88,3 +130,213 @@ html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-chat-model-effort,.
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-log-toolbar{background:var(--skin-raised)!important;border-color:var(--skin-border)!important;color:var(--skin-secondary)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) .ir :is(.activity-digest small,.activity-item small,.work-help small,.case-status){color:var(--skin-muted)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) [data-aegis-scene=intelligence] :is(.source-notice,details>summary,details>p){color:var(--skin-muted)!important}
+
+/* Severity is semantic, independent of the selected workspace skin. */
+[data-aegis-scene=vulnops] select[name=severity] option[value=critical],
+[data-aegis-scene=vulnops] select[name=severity] option[value=critical_high] { --severity-ink:#ad1e38;--severity-dot:#ec3751;--severity-tint:#ffe7ec; }
+[data-aegis-scene=vulnops] select[name=severity] option[value=high] { --severity-ink:#983d08;--severity-dot:#e86712;--severity-tint:#ffebd9; }
+[data-aegis-scene=vulnops] select[name=severity] option[value=medium] { --severity-ink:#775703;--severity-dot:#d39e12;--severity-tint:#fff2c5; }
+[data-aegis-scene=vulnops] select[name=severity] option[value=low] { --severity-ink:#3b6417;--severity-dot:#6baf30;--severity-tint:#e8f7d5; }
+html.dark [data-aegis-scene=vulnops] select[name=severity] option:is([value=critical],[value=critical_high]) { --severity-ink:#ff9ca9;--severity-dot:#ff526d;--severity-tint:#492731; }
+html.dark [data-aegis-scene=vulnops] select[name=severity] option[value=high] { --severity-ink:#ffb775;--severity-dot:#ff902f;--severity-tint:#493323; }
+html.dark [data-aegis-scene=vulnops] select[name=severity] option[value=medium] { --severity-ink:#ffd863;--severity-dot:#ffc833;--severity-tint:#42371d; }
+html.dark [data-aegis-scene=vulnops] select[name=severity] option[value=low] { --severity-ink:#bae780;--severity-dot:#9ddd51;--severity-tint:#2f4023; }
+html [data-aegis-scene=vulnops] select[name=severity] option:not([value=""]) { color:var(--severity-ink) !important; }
+html [data-aegis-scene=vulnops] select[name=severity] option:not([value=""]):is(:hover,:focus-visible,:checked) { background:var(--severity-tint) !important; }
+@supports (appearance:base-select) {
+  [data-aegis-scene=vulnops] select[name=severity]::picker(select) {
+    background:var(--skin-surface,#fff);border-color:var(--skin-border,#dde5dc);
+  }
+  html.dark [data-aegis-scene=vulnops] select[name=severity]::picker(select) {
+    background:var(--skin-surface,#1b2431);border-color:var(--skin-border,#38485b);
+  }
+  [data-aegis-scene=vulnops] select[name=severity] option:focus-visible { outline:1px solid currentColor;outline-offset:-2px; }
+  [data-aegis-scene=vulnops] select[name=severity] option:not([value=""])::before { content:"";width:7px;height:7px;flex:none;border-radius:50%;background:var(--severity-dot);margin-inline-end:7px; }
+}
+[data-aegis-scene=vulnops] .overview-date-shortcuts { display:flex;gap:6px;flex-wrap:wrap;margin-bottom:16px; }
+[data-aegis-scene=vulnops] .overview-date-fields { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px; }
+@media(max-width:420px) { [data-aegis-scene=vulnops] .overview-date-fields{grid-template-columns:1fr} }
+
+/* Date filter controls stay legible in raised dark surfaces and on hover. */
+html [data-aegis-scene=vulnops] .modal:has(#overview-date-form) .close-btn,
+html [data-aegis-scene=vulnops] #overview-date-form button.btn:not([type=submit]) {
+  color:rgb(var(--ui-text, 33 53 43)) !important;
+  background:rgb(var(--ui-subtle, 241 245 234)) !important;
+}
+html [data-aegis-scene=vulnops] .modal:has(#overview-date-form) .close-btn:hover,
+html [data-aegis-scene=vulnops] #overview-date-form button.btn:not([type=submit]):hover {
+  background:rgb(var(--ui-hover, 229 237 218)) !important;
+}
+html [data-aegis-scene=vulnops] #overview-date-form button[type=submit] {
+  background:rgb(var(--ui-action, 190 215 157)) !important;
+  color:rgb(var(--ui-on-action, 36 55 29)) !important;
+}
+html [data-aegis-scene=vulnops] #overview-date-form button[type=submit]:hover { background:color-mix(in srgb,rgb(var(--ui-action, 190 215 157)) 85%,white) !important; }
+
+/* The date grid is part of the scene dialog, so all states follow the active skin. */
+html [data-aegis-scene=vulnops] #overview-date-form {
+  --date-surface:var(--skin-surface,#fff);--date-raised:var(--skin-raised,#f2f6ee);
+  --date-line:var(--skin-border,#dce6d5);--date-text:var(--skin-text,#23372a);
+  --date-muted:var(--skin-secondary,#50604e);--date-accent:var(--skin-accent,#42602f);
+  --date-selected:var(--skin-selected,#e9f2df);--date-fill:var(--skin-buttonTo,#bed79d);
+  --date-on-fill:var(--skin-buttonText,#24371d);
+}
+html.dark [data-aegis-scene=vulnops] #overview-date-form {
+  --date-surface:var(--skin-surface,#263025);--date-raised:var(--skin-raised,#303a2d);
+  --date-line:var(--skin-border,#435238);--date-text:var(--skin-text,#e5efdc);
+  --date-muted:var(--skin-secondary,#bfccb7);--date-accent:var(--skin-accent,#c5e9a4);
+  --date-selected:var(--skin-selected,#384833);
+}
+#overview-date-form .overview-date-field { display:grid;gap:6px;min-width:0;font-size:12px;color:var(--date-muted); }
+#overview-date-form :is(.date-field-trigger,.overview-calendar button) {
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;min-width:0;min-height:34px;
+  padding:6px 9px;border:1px solid transparent;border-radius:8px;background:var(--date-surface)!important;
+  color:var(--date-text)!important;box-shadow:none!important;font-variant-numeric:tabular-nums;
+}
+#overview-date-form .date-field-trigger { justify-content:flex-start;width:100%;min-height:38px;border-color:var(--date-line)!important; }
+#overview-date-form .date-field-trigger>span { flex:1;text-align:start; }
+#overview-date-form .date-field-trigger .icon { width:15px;height:15px;color:var(--date-accent); }
+#overview-date-form .overview-calendar {
+  width:min(100%,330px);margin:12px auto 0;padding:12px;border:1px solid var(--date-line);
+  border-radius:12px;background:var(--date-surface);color:var(--date-text);box-shadow:0 8px 22px #00000013;
+}
+#overview-date-form .overview-calendar[hidden] { display:none; }
+#overview-date-form :is(.overview-calendar-header,.overview-calendar-footer) { display:flex;align-items:center;justify-content:space-between;gap:8px; }
+#overview-date-form .overview-calendar-header small { display:block;color:var(--date-muted); }
+#overview-date-form .overview-calendar-header strong { font-size:15px; }
+#overview-date-form .overview-calendar-nav { display:flex;gap:4px; }
+#overview-date-form .overview-calendar-nav button { background:var(--date-raised)!important;border-color:var(--date-line); }
+#overview-date-form .overview-calendar-nav .icon { width:16px;height:16px; }
+#overview-date-form .overview-calendar-grid { display:grid;grid-template-columns:repeat(7,minmax(0,1fr));text-align:center;gap:3px;margin:9px 0; }
+#overview-date-form .overview-calendar-grid>span { align-content:center;min-height:22px;color:var(--date-muted);font-size:11px; }
+#overview-date-form .overview-calendar-grid button { padding:0;min-height:32px; }
+#overview-date-form .overview-calendar button[aria-current=date] { border-color:var(--date-accent)!important;font-weight:700; }
+#overview-date-form .overview-calendar-footer { padding-top:7px;border-top:1px solid var(--date-line); }
+#overview-date-form .overview-calendar-footer button { color:var(--date-accent)!important; }
+html [data-aegis-scene=vulnops] #overview-date-form :is(.date-field-trigger[aria-expanded=true],.date-field-trigger:hover,.overview-calendar button:hover:not(:disabled)) {
+  background:var(--date-selected)!important;color:var(--date-accent)!important;
+}
+html [data-aegis-scene=vulnops] #overview-date-form .overview-calendar button[aria-pressed=true] {
+  background:var(--date-fill)!important;color:var(--date-on-fill)!important;font-weight:700;
+}
+html [data-aegis-scene=vulnops] #overview-date-form :is(.date-field-trigger,.overview-calendar button):focus-visible {
+  outline:2px solid var(--date-accent)!important;outline-offset:1px;
+}
+#overview-date-form .overview-calendar button:disabled { opacity:.45;cursor:not-allowed; }
+
+/* Source-specific actions keep vendor colors even when the workspace skin changes. */
+html [data-aegis-scene=intelligence] :is(.intel-filter,.group-heading) {
+  --intel-action-ink:color-mix(in srgb,var(--source-accent) 46%,#1a2635);
+  --intel-action-fill:color-mix(in srgb,var(--source-accent) 23%,#fff);
+  --intel-action-soft:var(--source-soft);
+  --intel-action-hover:color-mix(in srgb,var(--source-accent) 32%,#fff);
+  --intel-action-border:color-mix(in srgb,var(--source-accent) 54%,#fff);
+}
+html.dark [data-aegis-scene=intelligence] :is(.intel-filter,.group-heading) {
+  --intel-action-ink:color-mix(in srgb,var(--source-accent) 28%,#fff);
+  --intel-action-fill:color-mix(in srgb,var(--source-accent) 27%,#15202c);
+  --intel-action-soft:color-mix(in srgb,var(--source-accent) 15%,#18222e);
+  --intel-action-hover:color-mix(in srgb,var(--source-accent) 37%,#15202c);
+  --intel-action-border:color-mix(in srgb,var(--source-accent) 57%,#273242);
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] #filter.intel-filter :is(button.primary,.date-shortcuts button) {
+  color:var(--intel-action-ink)!important;
+  border:1px solid var(--intel-action-border)!important;
+  background:var(--intel-action-soft)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] #filter.intel-filter button.primary {
+  background:var(--intel-action-fill)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] #filter.intel-filter :is(button.primary,.date-shortcuts button):is(:hover,:focus-visible) {
+  background:var(--intel-action-hover)!important;
+  color:var(--intel-action-ink)!important;
+  border-color:var(--intel-action-border)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] #filter.intel-filter :is(button.primary,.date-shortcuts button):focus-visible {
+  outline:2px solid var(--intel-action-ink)!important;outline-offset:2px;
+}
+
+html[data-theme-skin] [data-aegis-scene=intelligence] .group-heading button[data-do=back-groups]:is(:hover,:focus-visible) {
+  background:var(--intel-action-hover)!important;
+  color:var(--intel-action-ink)!important;
+  border-color:var(--intel-action-border)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] .group-heading button[data-do=back-groups]:focus-visible {
+  outline:2px solid var(--intel-action-ink)!important;outline-offset:2px;
+}
+
+html.dark [data-aegis-scene=intelligence] .group-heading {
+  background:linear-gradient(110deg,color-mix(in srgb,var(--source-accent) 19%,#18222e),#18222e)!important;
+  color:#d6e0ec!important;
+}
+html.dark [data-aegis-scene=intelligence] .group-heading h2 { color:var(--intel-action-ink)!important; }
+html.dark [data-aegis-scene=intelligence] .group-heading small { color:#bfcbd9!important; }
+html.dark [data-aegis-scene=intelligence] .group-heading .daily-logo { background:#f2f5f8!important; }
+
+/* Asset workflows use the workspace skin, independently of source branding. */
+html[data-theme-skin]:has(>body[data-aegis-scene=intelligence]),
+html[data-theme-skin] body[data-aegis-scene=intelligence] {
+  background-color:var(--skin-canvas,var(--night-canvas,#f8faf7))!important;
+}
+html[data-theme-skin] body[data-aegis-scene=intelligence] {
+  --intel-asset-surface:var(--skin-surface,var(--night-surface,#fff));
+  --intel-asset-raised:var(--skin-raised,var(--night-raised,#f3f6ee));
+  --intel-asset-selected:var(--skin-selected,var(--night-selected,#e7efd9));
+  --intel-asset-hover:var(--skin-hover,var(--night-hover,#e9efdf));
+  --intel-asset-border:var(--skin-border,var(--night-border,#dce5d6));
+  --intel-asset-outline:var(--skin-outline,var(--night-control,#829d6a));
+  --intel-asset-accent:var(--skin-accent,var(--night-green,#47632e));
+  --intel-asset-text:var(--skin-text,var(--night-text,#27362e));
+  --intel-asset-secondary:var(--skin-secondary,var(--night-secondary,#526645));
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] .tabs {
+  background:transparent!important;
+  border-color:var(--intel-asset-border)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] .tabs button[data-tab] {
+  color:var(--intel-asset-secondary)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] .tabs button[data-tab]:hover {
+  background:var(--intel-asset-hover)!important;
+  color:var(--intel-asset-accent)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] .tabs button[data-tab][aria-pressed=true] {
+  background:var(--intel-asset-selected)!important;
+  border-color:var(--intel-asset-outline)!important;
+  color:var(--intel-asset-accent)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.intel-asset-view,#detail:has(#inventory,#review)) {
+  color:var(--intel-asset-text);
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.intel-asset-view .card,.intel-asset-view .impact-empty,#detail:has(#inventory,#review)) {
+  background:linear-gradient(135deg,var(--intel-asset-surface) 25%,var(--intel-asset-raised))!important;
+  border-color:var(--intel-asset-border)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.intel-asset-view,#detail:has(#inventory,#review)) :is(.banner,.tools,.inventory-list,.intel-select-trigger,.intel-select-list) {
+  background:var(--intel-asset-raised)!important;
+  border-color:var(--intel-asset-border)!important;
+  color:var(--intel-asset-secondary)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.intel-asset-view,#detail:has(#inventory,#review)) .inventory-list {
+  padding:8px 10px;
+  border-radius:8px;
+  box-shadow:none!important;
+  overflow-wrap:anywhere;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.intel-asset-view,#detail:has(#inventory,#review)) :is(h2,h3) {color:var(--intel-asset-text)!important}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.intel-asset-view,#detail:has(#inventory,#review)) :is(small,.muted,.impact-empty p,.intel-select-list button) {color:var(--intel-asset-secondary)!important}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.intel-asset-view,#detail:has(#inventory,#review)) :is(.link,.selected) {color:var(--intel-asset-accent)!important}
+html[data-theme-skin] [data-aegis-scene=intelligence] .intel-asset-view .intel-select-list button:is(:hover,[aria-selected=true]) {
+  background:var(--intel-asset-selected)!important;
+  color:var(--intel-asset-accent)!important;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] :is(.tabs button,.intel-asset-view button,.intel-asset-view .link):focus-visible {
+  outline:2px solid var(--intel-asset-accent);
+  outline-offset:2px;
+}
+html[data-theme-skin] [data-aegis-scene=intelligence] .impact-empty .empty-symbol {
+  background:var(--intel-asset-selected);
+  border-color:var(--intel-asset-border);
+  color:var(--intel-asset-accent);
+}
+.impact-empty .empty-symbol svg {width:32px;height:32px}

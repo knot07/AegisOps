@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { useTranslation } from 'react-i18next';
-import { History, Loader2, MessageSquareText, MessagesSquare, RefreshCw, Save, ScrollText, type LucideIcon } from 'lucide-react';
+import { History, Loader2, MessageSquareText, MessagesSquare, RefreshCw, ScrollText, type LucideIcon } from 'lucide-react';
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import { useToast } from '@/components/common/Toast';
 import { requestConfirm } from '@/components/common/ConfirmDialog';
 import {
@@ -298,9 +299,9 @@ export default function DataRetentionSection() {
           type="button"
           onClick={() => void handleSave()}
           disabled={loading || saving || !changed}
-          className="inline-flex h-9 shrink-0 items-center justify-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
+          className="aegis-bright-action inline-flex h-9 shrink-0 items-center justify-center gap-2 px-4 text-sm font-semibold"
         >
-          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+          {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <WorkspaceGlyph kind="save" size="xs" />}
           {t('dataRetentionSave')}
         </button>
       </div>

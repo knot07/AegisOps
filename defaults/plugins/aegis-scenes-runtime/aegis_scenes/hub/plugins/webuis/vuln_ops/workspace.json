@@ -2,6 +2,7 @@
   "id": "vuln_ops",
   "version": "1.0.0",
   "title": "漏洞运营",
+  "titleEn": "Vulnerability Operations",
   "icon": "ScanSearch",
   "order": 20,
   "enabled": true,

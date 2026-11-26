@@ -3,6 +3,11 @@ import { api } from '@aegisops/webui-contract-sdk';
 import {modelBrand} from './model-brands';
 
 
+const reviewTranslations:Record<string,string>={"固定样例数据 · 只读演示 · 不连接生产环境的态势感知告警数据源":"Fixed sample data · Read-only demo · Not connected to a live situational awareness alert source","演示":"Demo","研判环境切换":"Review environment","正式研判":"Live review","演示平台":"Demo workspace","AI 研判平台":"AI review workspace","设备告警汇总、AI 研判与响应联动":"Device alert summary, AI review & response","更换 Logo":"Change logo","点击更换 Logo":"Change logo","恢复默认 Logo":"Reset logo","点击自定义平台名称":"Customize workspace name","修改平台名称":"Rename workspace","Atlas快速接入使用":"Atlas quick start","立即刷新":"Refresh now","刷新":"Refresh","刷新中":"Refreshing","连接异常":"Connection error","同步中":"Syncing","已同步":"Synced","手动刷新":"Manual refresh","时间范围":"Time range","快捷时间":"Quick ranges","自定义时间":"Custom range","开始时间":"Start time","结束时间":"End time","取消":"Cancel","应用":"Apply","刷新频率":"Refresh interval","5秒":"5 sec","30秒":"30 sec","1分钟":"1 min","已关闭":"Off","AI自动研判":"Automatic AI review","已开启":"On","最近更新":"Last update","汇总攻击":"Total attacks","当前时间范围事件总量":"Events in selected range","设备告警":"Device alerts","已接入设备告警汇总":"Alerts from connected devices","攻击 IP 数":"Source IPs","按攻击源去重统计":"Unique source addresses","AI 已研判":"Reviewed","已形成处置建议":"Recommendations available","AI 研判中":"In review","正在排队或运行":"Queued or running","AI 研判率":"Review rate","完成数 / 攻击 IP 数":"Completed / source IPs","外网攻击趋势":"External attack trend","告警次数":"Alert count","攻击类型分布":"Attack type distribution","当前时间范围内的告警占比":"Share of alerts in selected range","告警事件列表":"Alert register","告警列表":"Alerts","AI研判":"AI review","下载":"Download","最近30分钟":"Last 30 min","最近1小时":"Last 1 hour","最近2小时":"Last 2 hours","最近6小时":"Last 6 hours","最近12小时":"Last 12 hours","最近1天":"Last day","查看详情":"View details","研判详情分类":"Review details","分析摘要":"Summary","处置建议":"Recommendations","告警信息":"Alert information","证据评估":"Evidence assessment","支持证据":"Supporting evidence","反证与疑点":"Contradictions and uncertainties","核验范围":"Verification scope","缺失信息与取证限制":"Missing information & limitations","受影响目标":"Affected targets","关键 IOC":"Key IOCs","核心研判依据":"Key assessment evidence","核查与处置清单":"Review checklist","每页条数":"Rows per page","每页/10条":"10 per page","每页/20条":"20 per page","每页/50条":"50 per page"};
+const reviewEnglish=()=>document.documentElement.lang.startsWith('en');
+const ui=(label:string)=>reviewEnglish()?(reviewTranslations[label]||label):label;
+function useReviewLanguage(){const [english,setEnglish]=useState(reviewEnglish);useEffect(()=>{const observer=new MutationObserver(()=>setEnglish(reviewEnglish()));observer.observe(document.documentElement,{attributes:true,attributeFilter:['lang']});return()=>observer.disconnect()},[]);return english;}
+
 const C = {
   bg: 'var(--dt-bg)', pageBg: 'var(--dt-page-bg)', panel: 'var(--dt-panel)', panelSoft: 'var(--dt-panel-soft)', panelHead: 'var(--dt-panel-head)',
   border: 'var(--dt-border)', borderLight: 'var(--dt-border-strong)', text: 'var(--dt-text)',
@@ -611,12 +616,13 @@ function Pager({ current, total, totalItems, pageSize, onChange, onPageSizeChang
       ? <button key={`page-${token}`} aria-label={`第${token}页`} onClick={() => onChange(token)} style={{ ...pagerStyle, background: token === current ? 'var(--dt-control)' : C.panel, color: token === current ? 'var(--dt-control-text)' : C.textDim }}>{token}</button>
       : <span key={token} style={{ minWidth: 30, textAlign: 'center', color: C.textMuted }}>…</span>)}
     <button aria-label="下一页" disabled={current >= total} onClick={() => onChange(current + 1)} style={{ ...pagerStyle, opacity: current >= total ? .45 : 1 }}>›</button>
-    <StyledSelect ariaLabel="每页条数" value={pageSize} options={[{ value: 10, label: '每页/10条' }, { value: 20, label: '每页/20条' }, { value: 50, label: '每页/50条' }]} onChange={onPageSizeChange} placement="top" buttonStyle={{ width: 132, height: 40, background: C.panel }} />
+    <StyledSelect ariaLabel={ui("每页条数")} value={pageSize} options={[{ value: 10, label: '每页/10条' }, { value: 20, label: '每页/20条' }, { value: 50, label: '每页/50条' }]} onChange={onPageSizeChange} placement="top" buttonStyle={{ width: 132, height: 40, background: C.panel }} />
     <label style={{ display: 'inline-flex', alignItems: 'center', gap: 7, color: C.textMid, whiteSpace: 'nowrap' }}>跳至<input aria-label="跳转页码" inputMode="numeric" value={jumpPage} onChange={event => setJumpPage(event.target.value.replace(/\D/g, ''))} onKeyDown={event => { if (event.key === 'Enter') applyJump(); }} onBlur={applyJump} style={jumpInputStyle} />页</label>
   </div>;
 }
 
 export default function Page() {
+  useReviewLanguage();
   const { isDark, viewportWidth } = useAegisOpsHostState();
   const brandLogo = useBrandLogo('datang-ai-v2-demo-custom-brand-logo-v1');
   const brandNameKey = 'tdp-custom-platform-name';
@@ -836,7 +842,7 @@ export default function Page() {
         const completed = await api.page.post('/judgement/complete', {
           task_key: prepared.data.task_key,
           result: prepared.data.demo_result,
-          raw_output: '演示环境使用包内固定证据，不调用生产 TDP 或模型。',
+          raw_output: '演示环境使用包内固定证据，不连接生产环境的态势感知告警数据源，也不调用模型。',
         });
         if (!completed.data?.ok) throw new Error(completed.data?.error || '演示研判完成失败');
         setTdp(current => ({ ...current, rows: current.rows.map(item => rowKey(item) === rowKey(row) ? mergeAi(item, {
@@ -1078,16 +1084,16 @@ export default function Page() {
  [data-tdp-stat] small{color:#839087!important;font-size:12px!important;font-weight:400!important;line-height:1.5!important}
 
     `}</style>
-<nav aria-label="研判环境切换" style={{display:"flex",gap:8,padding:"12px 24px",borderBottom:`1px solid ${C.border}`,background:C.panel}}><a href="/contracts/webui/workspaces/tdp_ai/ai" aria-current={undefined} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"transparent",color:C.textMuted}}>正式研判</a><a href="/contracts/webui/workspaces/tdp_ai/ai-demo" aria-current={"page"} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"#edf4e5",color:"#526e3d"}}>演示平台</a></nav>
+<nav aria-label={ui("研判环境切换")} style={{display:"flex",gap:8,padding:"12px 24px",borderBottom:`1px solid ${C.border}`,background:C.panel}}><a href="/contracts/webui/workspaces/tdp_ai/ai" aria-current={undefined} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"transparent",color:C.textMuted}}>{ui("正式研判")}</a><a href="/contracts/webui/workspaces/tdp_ai/ai-demo" aria-current={"page"} style={{padding:"7px 18px",borderRadius:10,textDecoration:"none",fontSize:13,fontWeight:600,background:"#edf4e5",color:"#526e3d"}}>{ui("演示平台")}</a></nav>
     <header style={topbarStyle}>
       <div style={brandStyle}>
-        <div style={{ position: 'relative' }}><button type="button" aria-label="更换 Logo" title="点击更换 Logo" onClick={brandLogo.chooseLogo} style={brandLogoStyle}>{brandLogo.logo ? <img src={brandLogo.logo} alt="工作台 Logo" style={{ maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: 'contain' }} /> : <img data-scene-logo="review" src="/api/scenes/assistant/logos/review.svg" alt="态势感知 AI 研判 Logo" style={{width:48,height:48,objectFit:"contain"}}/>}</button><input ref={brandLogo.inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onChange={brandLogo.onLogoChange} style={{ display: 'none' }} />{brandLogo.logo && <button type="button" aria-label="恢复默认 Logo" title="恢复默认 Logo" onClick={brandLogo.resetLogo} style={resetLogoButtonStyle}>×</button>}</div>
-        <div style={{ minWidth: 0 }}><h1 style={brandTitleStyle}><button type="button" onClick={renamePlatform} title="点击自定义平台名称" aria-label="修改平台名称" style={{ font: 'inherit', color: 'inherit', background: 'none', border: 0, padding: 0, cursor: 'pointer', textAlign: 'left' }}>{brandName} · 演示</button></h1><div style={{ marginTop: 4, color: C.textDim, fontSize: 12, fontWeight: 600 }}>固定样例数据 · 只读演示 · 不连接生产 TDP</div></div>
+        <div style={{ position: 'relative' }}><button type="button" aria-label={ui("更换 Logo")} title={ui("点击更换 Logo")} onClick={brandLogo.chooseLogo} style={brandLogoStyle}>{brandLogo.logo ? <img src={brandLogo.logo} alt="工作台 Logo" style={{ maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: 'contain' }} /> : <img data-scene-logo="review" src="/api/scenes/assistant/logos/review.svg" alt="态势感知 AI 研判 Logo" style={{width:48,height:48,objectFit:"contain"}}/>}</button><input ref={brandLogo.inputRef} type="file" accept="image/png,image/jpeg,image/webp,image/svg+xml" onChange={brandLogo.onLogoChange} style={{ display: 'none' }} />{brandLogo.logo && <button type="button" aria-label={ui("恢复默认 Logo")} title={ui("恢复默认 Logo")} onClick={brandLogo.resetLogo} style={resetLogoButtonStyle}>×</button>}</div>
+        <div style={{ minWidth: 0 }}><h1 style={brandTitleStyle}><button type="button" onClick={renamePlatform} title={ui("点击自定义平台名称")} aria-label={ui("修改平台名称")} style={{ font: 'inherit', color: 'inherit', background: 'none', border: 0, padding: 0, cursor: 'pointer', textAlign: 'left' }}>{brandName === 'AI 研判平台' ? ui(brandName) : brandName} · {ui('演示')}</button></h1><div style={{ marginTop: 4, color: C.textDim, fontSize: 12, fontWeight: 600 }}>{ui('固定样例数据 · 只读演示 · 不连接生产环境的态势感知告警数据源')}</div></div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', justifyContent: isMobile ? 'flex-start' : 'flex-end' }}>
-        <button type="button" className="review-atlas-entry" onClick={()=>void askAlertAI()} style={{...secondaryButton,color:"#526d42",borderColor:"#d8e4cc",background:"#f3f7ee"}}><Icon name="spark" size={15}/>Atlas快速接入使用</button><span className="review-sync-chip" style={chipStyle}><span style={{ ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green }} />{syncText}</span>
+        <button type="button" className="review-atlas-entry" onClick={()=>void askAlertAI()} style={{...secondaryButton,color:"#526d42",borderColor:"#d8e4cc",background:"#f3f7ee"}}><Icon name="spark" size={15}/>{ui("Atlas快速接入使用")}</button><span className="review-sync-chip" style={chipStyle}><span style={{ ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green }} />{ui(syncText)}</span>
         <span className="review-time-chip" style={chipStyle}><Icon name="clock" size={16} />{error || fmtTime(updatedAt)}</span>
-        <button type="button" className="review-refresh" title="立即刷新" onClick={() => void loadDashboard()} style={primaryButton}><Icon name="refresh" size={16} />{loading ? '刷新中' : '刷新'}</button>
+        <button type="button" className="review-refresh" title={ui("立即刷新")} onClick={() => void loadDashboard()} style={primaryButton}><Icon name="refresh" size={16} />{ui(loading ? '刷新中' : '刷新')}</button>
       </div>
     </header>
 
@@ -1096,50 +1102,50 @@ export default function Page() {
         <section style={{ padding: 0 }}>
           <div data-tdp-controls style={{ display: 'grid', gridTemplateColumns: isMobile ? 'minmax(0, 1fr)' : isCompact ? 'repeat(2, minmax(0, 1fr))' : '1.05fr .8fr .95fr 1fr 1.15fr', gap: 12, alignItems: 'stretch' }}>
             <div style={{ ...syncFieldStyle, position: 'relative', padding: 0 }}>
-              <button type="button" aria-label="时间范围" aria-expanded={timePickerOpen} onClick={() => { setDraftStart(customStart); setDraftEnd(customEnd); setTimePickerOpen(open => !open); }} style={{ width: '100%', height: '100%', minHeight: 58, border: 'none', background: 'transparent', color: C.text, textAlign: 'left', cursor: 'pointer', padding: '10px 12px' }}>
-                <span style={syncLabelStyle}>时间范围</span><span style={syncValueStyle}><span>{timeControlValue}</span><small>▾</small></span>
+              <button type="button" aria-label={ui("时间范围")} aria-expanded={timePickerOpen} onClick={() => { setDraftStart(customStart); setDraftEnd(customEnd); setTimePickerOpen(open => !open); }} style={{ width: '100%', height: '100%', minHeight: 58, border: 'none', background: 'transparent', color: C.text, textAlign: 'left', cursor: 'pointer', padding: '10px 12px' }}>
+                <span style={syncLabelStyle}>{ui("时间范围")}</span><span style={syncValueStyle}><span>{ui(timeControlValue)}</span><small>▾</small></span>
               </button>
               {timePickerOpen && <div style={{ position: 'absolute', right: isMobile ? 'auto' : 0, left: isMobile ? 0 : 'auto', top: 'calc(100% + 8px)', zIndex: 80, width: isMobile ? 'min(340px, calc(100vw - 42px))' : 360, boxSizing: 'border-box', padding: 14, background: C.panel, border: `1px solid ${C.borderLight}`, borderRadius: 8, boxShadow: C.shadow }}>
-                <div style={{ color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }}>快捷时间</div>
-                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginBottom: 13 }}>{TIME_PRESETS.map(item => <button type="button" key={item.minutes} onClick={() => { setMinutes(item.minutes); setTimeMode('preset'); saveTimeSetting('preset', item.minutes, customStart, customEnd); setTimePickerOpen(false); }} style={{ padding: '7px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', background: timeMode === 'preset' && minutes === item.minutes ? C.blueDark : C.panelSoft, color: timeMode === 'preset' && minutes === item.minutes ? C.blueLight : C.textMid, border: `1px solid ${timeMode === 'preset' && minutes === item.minutes ? C.blue : C.border}` }}>{item.label}</button>)}</div>
-                <div style={{ color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }}>自定义时间</div>
-                <DateTimeField label="开始时间" value={draftStart} onChange={setDraftStart} />
-                <div style={{ marginTop: 9 }}><DateTimeField label="结束时间" value={draftEnd} onChange={setDraftEnd} /></div>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 13 }}><button type="button" onClick={() => setTimePickerOpen(false)} style={secondaryButton}>取消</button><button type="button" onClick={() => { const nextStart = draftStart; const nextEnd = draftEnd; const start = new Date(nextStart).getTime(); const end = new Date(nextEnd).getTime(); if (!nextStart || !nextEnd || Number.isNaN(start) || Number.isNaN(end) || end <= start) { setError('自定义结束时间必须晚于开始时间'); return; } setCustomStart(nextStart); setCustomEnd(nextEnd); setTimeMode('custom'); saveTimeSetting('custom', minutes, nextStart, nextEnd); setTimePickerOpen(false); }} style={primaryButton}>应用</button></div>
+                <div style={{ color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }}>{ui("快捷时间")}</div>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 7, marginBottom: 13 }}>{TIME_PRESETS.map(item => <button type="button" key={item.minutes} onClick={() => { setMinutes(item.minutes); setTimeMode('preset'); saveTimeSetting('preset', item.minutes, customStart, customEnd); setTimePickerOpen(false); }} style={{ padding: '7px 10px', borderRadius: 6, fontSize: 11, cursor: 'pointer', background: timeMode === 'preset' && minutes === item.minutes ? C.blueDark : C.panelSoft, color: timeMode === 'preset' && minutes === item.minutes ? C.blueLight : C.textMid, border: `1px solid ${timeMode === 'preset' && minutes === item.minutes ? C.blue : C.border}` }}>{ui(item.label)}</button>)}</div>
+                <div style={{ color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }}>{ui("自定义时间")}</div>
+                <DateTimeField label={ui("开始时间")} value={draftStart} onChange={setDraftStart} />
+                <div style={{ marginTop: 9 }}><DateTimeField label={ui("结束时间")} value={draftEnd} onChange={setDraftEnd} /></div>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 13 }}><button type="button" onClick={() => setTimePickerOpen(false)} style={secondaryButton}>{ui("取消")}</button><button type="button" onClick={() => { const nextStart = draftStart; const nextEnd = draftEnd; const start = new Date(nextStart).getTime(); const end = new Date(nextEnd).getTime(); if (!nextStart || !nextEnd || Number.isNaN(start) || Number.isNaN(end) || end <= start) { setError('自定义结束时间必须晚于开始时间'); return; } setCustomStart(nextStart); setCustomEnd(nextEnd); setTimeMode('custom'); saveTimeSetting('custom', minutes, nextStart, nextEnd); setTimePickerOpen(false); }} style={primaryButton}>{ui("应用")}</button></div>
               </div>}
             </div>
-            <div style={syncFieldStyle}><span style={syncLabelStyle}>刷新频率</span><StyledSelect ariaLabel="刷新频率" value={refreshMs} options={[{ value: 5000, label: '5秒' }, { value: 30000, label: '30秒' }, { value: 60000, label: '1分钟' }, { value: 0, label: '已关闭' }]} onChange={setRefreshMs} buttonStyle={{ minHeight: 24, padding: 0, background: 'transparent', border: 'none', color: C.text, fontSize: 15, justifyContent: 'space-between' }} /></div>
-            <button type="button" role="switch" aria-label="AI自动研判" aria-checked={autoJudge} onClick={() => { const next = !autoJudge; setAutoJudge(next); localStorage.setItem('datang-ai-v2-auto', next ? '1' : '0'); }} style={{ ...syncFieldStyle, fontFamily: 'inherit', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', color: C.text, cursor: 'pointer' }}>
-              <span><span style={syncLabelStyle}>AI自动研判</span><span style={{ color: autoJudge ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }}>{autoJudge ? '已开启' : '已关闭'}</span></span>
+            <div style={syncFieldStyle}><span style={syncLabelStyle}>{ui("刷新频率")}</span><StyledSelect ariaLabel={ui("刷新频率")} value={refreshMs} options={[{ value: 5000, label: '5秒' }, { value: 30000, label: '30秒' }, { value: 60000, label: '1分钟' }, { value: 0, label: '已关闭' }]} onChange={setRefreshMs} buttonStyle={{ minHeight: 24, padding: 0, background: 'transparent', border: 'none', color: C.text, fontSize: 15, justifyContent: 'space-between' }} /></div>
+            <button type="button" role="switch" aria-label={ui("AI自动研判")} aria-checked={autoJudge} onClick={() => { const next = !autoJudge; setAutoJudge(next); localStorage.setItem('datang-ai-v2-auto', next ? '1' : '0'); }} style={{ ...syncFieldStyle, fontFamily: 'inherit', flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', color: C.text, cursor: 'pointer' }}>
+              <span><span style={syncLabelStyle}>{ui("AI自动研判")}</span><span style={{ color: autoJudge ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }}>{ui(autoJudge ? '已开启' : '已关闭')}</span></span>
               <span style={{ width: 48, height: 26, padding: 3, borderRadius: 999, background: autoJudge ? C.blue : C.borderLight, flex: '0 0 auto', display: 'flex', justifyContent: autoJudge ? 'flex-end' : 'flex-start', transition: '.2s' }}><span style={{ display: 'block', width: 20, height: 20, borderRadius: '50%', background: '#fff', boxShadow: '0 3px 8px rgba(28,44,66,.18)' }} /></span>
             </button>
             <CurrentModelCard model={currentModel}/>
-            <div style={{ ...syncFieldStyle, borderColor: error ? C.red : C.border }}><span style={syncLabelStyle}>{error ? '连接异常' : '最近更新'}</span><span style={{ color: error ? C.redLight : C.textMid, fontSize: 14, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{error || fmtTime(updatedAt)}</span></div>
+            <div style={{ ...syncFieldStyle, borderColor: error ? C.red : C.border }}><span style={syncLabelStyle}>{ui(error ? '连接异常' : '最近更新')}</span><span style={{ color: error ? C.redLight : C.textMid, fontSize: 14, fontWeight: 700, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{error || fmtTime(updatedAt)}</span></div>
           </div>
         </section>
 
         <section style={{ display: 'grid', gridTemplateColumns: isMobile ? 'repeat(2, minmax(0, 1fr))' : isCompact ? 'repeat(3, minmax(0, 1fr))' : 'repeat(6, minmax(0, 1fr))', gap: 14 }}>
           {metricCards.map((card, index) => <div className="dt-metric" key={card.label} style={{ ...metricStyle, animationDelay: (index*45)+'ms', background: index === 0 ? 'var(--dt-accent-soft)' : C.panel }}>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}><div style={{ ...labelStyle, color: C.textDim, fontWeight: 600 }}>{card.label}</div><div style={{ ...metricIconStyle, background: 'transparent', color: index === 0 ? C.greenLight : C.textMuted }}><Icon name={card.icon} size={17} /></div></div>
-            <div style={{ minWidth: 0 }}><div style={metricValueStyle}>{String(card.value)}</div><div style={{ ...hintStyle, marginTop: 7 }}>{card.hint}</div></div>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}><div style={{ ...labelStyle, color: C.textDim, fontWeight: 600 }}>{ui(card.label)}</div><div style={{ ...metricIconStyle, background: 'transparent', color: index === 0 ? C.greenLight : C.textMuted }}><Icon name={card.icon} size={17} /></div></div>
+            <div style={{ minWidth: 0 }}><div style={metricValueStyle}>{String(card.value)}</div><div style={{ ...hintStyle, marginTop: 7 }}>{ui(card.hint)}</div></div>
           </div>)}
         </section>
 
         <section style={{ padding: 0 }}>
-          <div style={sectionHeadStyle}><div><h2 style={sectionTitleStyle}>外网攻击趋势</h2><p style={sectionDescStyle}>{fmtTime(tdp.start_time)} ~ {fmtTime(tdp.end_time)}</p></div><div style={legendStyle}><span style={{ ...legendDotStyle, background: C.green }} />告警次数</div></div>
+          <div style={sectionHeadStyle}><div><h2 style={sectionTitleStyle}>{ui("外网攻击趋势")}</h2><p style={sectionDescStyle}>{fmtTime(tdp.start_time)} ~ {fmtTime(tdp.end_time)}</p></div><div style={legendStyle}><span style={{ ...legendDotStyle, background: C.green }} />{ui("告警次数")}</div></div>
           <div style={{ display: 'grid', gridTemplateColumns: isCompact ? '1fr' : 'minmax(0, 1.8fr) minmax(330px, .82fr)', gap: 14, alignItems: 'stretch' }}>
             <div style={{ ...panelStyle, background: 'linear-gradient(120deg, var(--dt-accent-soft), var(--dt-panel) 68%)', minWidth: 0, minHeight: 290, display: 'grid', alignItems: 'center', padding: '14px 10px', overflow: 'hidden' }}><TrendChart trend={trend} /></div>
-            <div style={{ ...panelStyle, minWidth: 0, padding: '18px 20px', boxSizing: 'border-box' }}><div style={{ marginBottom: 4, color: C.text, fontSize: 14, fontWeight: 800 }}>攻击类型分布</div><div style={{ marginBottom: 8, color: C.textMuted, fontSize: 11 }}>当前时间范围内的告警占比</div><AttackTypePie rows={tdp.rows} /></div>
+            <div style={{ ...panelStyle, minWidth: 0, padding: '18px 20px', boxSizing: 'border-box' }}><div style={{ marginBottom: 4, color: C.text, fontSize: 14, fontWeight: 800 }}>{ui("攻击类型分布")}</div><div style={{ marginBottom: 8, color: C.textMuted, fontSize: 11 }}>{ui("当前时间范围内的告警占比")}</div><AttackTypePie rows={tdp.rows} /></div>
           </div>
         </section>
 
         <section style={{ ...panelStyle, height: 782, minHeight: 782, maxHeight: 782, boxSizing: 'border-box', padding: 0, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
           <div style={{ ...sectionHeadStyle, marginBottom: 0, padding: '20px 20px 14px', borderBottom: `1px solid ${C.border}`, flex: '0 0 auto' }}>
-            <div style={{ minWidth: 0 }}><h2 style={sectionTitleStyle}>告警事件列表</h2><p style={sectionDescStyle}>共 {rows.length} 条 · 每页 {pageSize} 条 · 第 {page}/{pages} 页</p></div>
+            <div style={{ minWidth: 0 }}><h2 style={sectionTitleStyle}>{ui("告警事件列表")}</h2><p style={sectionDescStyle}>{reviewEnglish()?`${rows.length} alerts · ${pageSize} per page · Page ${page}/${pages}`:`共 ${rows.length} 条 · 每页 ${pageSize} 条 · 第 ${page}/${pages} 页`}</p></div>
             <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-              <MiniStat icon="shield" label="告警列表" value={`${rows.length} 个研判事件`} />
-              <MiniStat icon="bot" label="AI研判" value={`${done} 已完成 / ${pending} 进行中`} />
-              <button onClick={() => downloadCsv(rows)} style={secondaryButton}><Icon name="download" size={15} />下载</button>
+              <MiniStat icon="shield" label={ui("告警列表")} value={`${rows.length} 个研判事件`} />
+              <MiniStat icon="bot" label={ui("AI研判")} value={`${done} 已完成 / ${pending} 进行中`} />
+              <button onClick={() => downloadCsv(rows)} style={secondaryButton}><Icon name="download" size={15} />{ui("下载")}</button>
             </div>
           </div>
           <div data-tdp-table-scroll style={{ overflow: 'auto', flex: '1 1 auto', minHeight: 0, WebkitOverflowScrolling: 'touch', scrollbarGutter: 'stable' }}><table style={{ width: '100%', borderCollapse: 'collapse', tableLayout: 'fixed', minWidth: 1320 }}><colgroup>
@@ -1158,7 +1164,7 @@ export default function Page() {
               <td style={tdStyle}><AIResultBadge row={row} onStart={item => void startJudge(item)} /></td>
               <td style={{ ...tdStyle, color: severityColor, fontWeight: 700, whiteSpace: 'nowrap' }}>{severity === '--' ? '--' : <><span style={{ color: severityColor }}>●</span> {severity}</>}</td>
               <td style={{ ...tdStyle, textAlign: 'right', fontWeight: 750, color: row.count >= 50 ? C.redLight : C.text }}>{row.count}</td>
-              <td style={tdStyle}><button type="button" onClick={() => void openDetail(row)} className="dt-detail-button" style={detailLinkStyle}>查看详情</button></td>
+              <td style={tdStyle}><button type="button" onClick={() => void openDetail(row)} className="dt-detail-button" style={detailLinkStyle}>{ui("查看详情")}</button></td>
             </tr>;
           })}{rows.length > 0 && Array.from({ length: Math.max(0, 10 - pageRows.length) }, (_, index) => <tr aria-hidden="true" key={`empty-row-${index}`} style={{ height: 58, background: (pageRows.length + index) % 2 ? C.rowAlt : 'transparent' }}><td colSpan={9} style={{ ...tdStyle, color: 'transparent' }}>&nbsp;</td></tr>)}</tbody></table></div>
           {!rows.length && <div style={{ padding: 38, textAlign: 'center', color: C.textMuted }}>{loading ? '正在获取设备告警...' : error || '当前时间范围暂无数据'}</div>}
@@ -1278,17 +1284,17 @@ function ReviewReport({ row, compact }: { row: TdpRow; compact: boolean }) {
         <div><DetailMetric label="置信度" value={isDone && row.ai_confidence !== undefined ? row.ai_confidence+'%' : '--'} /><div style={{ height: 3, marginTop: 8, maxWidth: 90, background: C.border, borderRadius: 2 }}><span style={{ display: 'block', width: (isDone ? Math.max(0,Math.min(100,row.ai_confidence || 0)) : 0)+'%', height: '100%', background: C.green, borderRadius: 2 }} /></div></div>
       </div>
     </div>
-    <div role="tablist" aria-label="研判详情分类" className="dt-report-tabs">
+    <div role="tablist" aria-label={ui("研判详情分类")} className="dt-report-tabs">
       {[['overview','研判概览'],['evidence','流量证据'],['additional','补充信息']].map(([id,label]) => <button key={id} id={'review-tab-'+id} type="button" role="tab" aria-selected={tab===id} aria-controls={'review-panel-'+id} onClick={() => { setTab(id); scrollRef.current?.scrollTo(0,0); }} style={{ minHeight: 44, padding: '0 3px', marginRight: 24, background: 'transparent', border: 'none', borderBottom: '2px solid '+(tab===id ? C.text : 'transparent'), color: tab===id ? C.text : C.textDim, cursor: 'pointer', fontSize: 13, fontWeight: tab===id ? 700 : 500 }}>{label}</button>)}
     </div>
     <div key={tab} ref={scrollRef} role="tabpanel" id={'review-panel-'+tab} aria-labelledby={'review-tab-'+tab} tabIndex={0} className="dt-report-content">
       {tab==='overview' && <>
         <div className="dt-report-columns">
-          <section style={{ minWidth: 0 }}><h2 className="dt-report-heading">分析摘要</h2><p style={{ margin: '12px 0 0', fontSize: 14, color: C.textMid, lineHeight: 1.9, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{row.ai_summary || row.ai_progress || row.ai_error || '当前暂无研判结论。'}</p><EvidenceSection title="核心研判依据" items={row.ai_evidence} tone="support" /></section>
-          <section style={{ minWidth: 0, paddingLeft: compact ? 0 : 24, borderLeft: compact ? 'none' : '1px solid '+C.border }}><h2 className="dt-report-heading">处置建议</h2><p style={{ margin: '12px 0 0', fontSize: 14, color: C.textMid, lineHeight: 1.9, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{row.ai_recommended_action || '请根据研判证据进行人工复核后处置。'}</p><EvidenceSection title="核查与处置清单" items={row.ai_human_checkpoints} tone="check" /></section>
+          <section style={{ minWidth: 0 }}><h2 className="dt-report-heading">{ui("分析摘要")}</h2><p style={{ margin: '12px 0 0', fontSize: 14, color: C.textMid, lineHeight: 1.9, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{row.ai_summary || row.ai_progress || row.ai_error || '当前暂无研判结论。'}</p><EvidenceSection title={ui("核心研判依据")} items={row.ai_evidence} tone="support" /></section>
+          <section style={{ minWidth: 0, paddingLeft: compact ? 0 : 24, borderLeft: compact ? 'none' : '1px solid '+C.border }}><h2 className="dt-report-heading">{ui("处置建议")}</h2><p style={{ margin: '12px 0 0', fontSize: 14, color: C.textMid, lineHeight: 1.9, whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{row.ai_recommended_action || '请根据研判证据进行人工复核后处置。'}</p><EvidenceSection title={ui("核查与处置清单")} items={row.ai_human_checkpoints} tone="check" /></section>
         </div>
-        <section className="dt-report-section"><h2 className="dt-report-heading">告警信息</h2><OverviewTable row={row} paths={paths} /></section>
-        <section className="dt-report-section"><h2 className="dt-report-heading">证据评估</h2><div className="dt-report-columns"><EvidenceSection title="支持证据" items={row.ai_supporting_evidence} tone="support" /><EvidenceSection title="反证与疑点" items={row.ai_contradicting_evidence} tone="oppose" /></div></section>
+        <section className="dt-report-section"><h2 className="dt-report-heading">{ui("告警信息")}</h2><OverviewTable row={row} paths={paths} /></section>
+        <section className="dt-report-section"><h2 className="dt-report-heading">{ui("证据评估")}</h2><div className="dt-report-columns"><EvidenceSection title={ui("支持证据")} items={row.ai_supporting_evidence} tone="support" /><EvidenceSection title={ui("反证与疑点")} items={row.ai_contradicting_evidence} tone="oppose" /></div></section>
       </>}
       {tab==='evidence' && <>
         <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', paddingBottom: 20 }}>
@@ -1296,7 +1302,7 @@ function ReviewReport({ row, compact }: { row: TdpRow; compact: boolean }) {
         </div>
         <TrafficPaths paths={paths} compact={compact} /><HttpEvidencePanel items={row.ai_http_evidence} />
       </>}
-      {tab==='additional' && <><section><h2 className="dt-report-heading">核验范围</h2><EvidenceSection title="缺失信息与取证限制" items={row.ai_missing_information} tone="missing" /></section><section className="dt-report-section"><div className="dt-report-columns"><EvidenceSection title="受影响目标" items={row.ai_affected_targets} tone="target" /><EvidenceSection title="关键 IOC" items={row.ai_key_iocs} tone="ioc" /></div></section></>}
+      {tab==='additional' && <><section><h2 className="dt-report-heading">{ui("核验范围")}</h2><EvidenceSection title={ui("缺失信息与取证限制")} items={row.ai_missing_information} tone="missing" /></section><section className="dt-report-section"><div className="dt-report-columns"><EvidenceSection title={ui("受影响目标")} items={row.ai_affected_targets} tone="target" /><EvidenceSection title={ui("关键 IOC")} items={row.ai_key_iocs} tone="ioc" /></div></section></>}
     </div>
   </div>;
 }

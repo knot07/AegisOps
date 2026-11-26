@@ -12,11 +12,15 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-blue)](LICENSE.txt)
 [![Python](https://img.shields.io/badge/Python-3.12-3776AB)](pyproject.toml)
 
-[下载部署](https://github.com/knot07/AegisOps/releases/latest) · [部署与操作](DEPLOY.md) · [Windows 安装](WINDOWS.md) · [本次更新](docs/CHANGELOG-2026.11.25.md) · [页面导览](#页面导览)
+[下载部署](https://github.com/knot07/AegisOps/releases/latest) · [部署与操作](DEPLOY.md) · [Windows 安装](WINDOWS.md) · [本次更新](docs/CHANGELOG-2026.11.26.md) · [页面导览](#页面导览)
 
 </div>
 
 ![AegisOps 工作台首页](docs/images/2026.11.25/dashboard-dial.png)
+
+## 2026.11.26：日期联动与深色体验修复
+
+漏洞运营趋势图按所选日期刷新完整范围，支持曲线入场动效；首页执行量与时间筛选同步。应急响应优先打开事件台账，任务列表和报告空状态适配浅色、深色主题。详见[更新说明](docs/CHANGELOG-2026.11.26.md)与[浅色／深色界面对比](docs/SCREENSHOTS-2026.11.26.md)。
 
 ## 2026.11.25：任务记录与工作台交互升级
 

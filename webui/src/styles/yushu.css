@@ -381,6 +381,37 @@ select:not([multiple]) { appearance: none; padding-right: 38px !important; backg
 [data-yushu-confirm][data-variant=default] button:last-child:hover { background: #34472c; }
 [data-yushu-confirm][data-variant=danger] button:last-child { background: #c6453b; }
 [data-yushu-confirm][data-variant=warning] button:last-child { background: #b68027; }
+/* Signing out ends the session without deleting data: a softer, theme-safe warning. */
+[data-yushu-confirm][data-variant=logout] button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border: 1px solid var(--logout-border, rgb(var(--ui-border)));
+  background-color: var(--logout-bg, rgb(var(--ui-surface)));
+  color: var(--logout-ink, rgb(var(--ui-text)));
+  font-size: 13px;
+  transition: background-color .18s, border-color .18s;
+}
+[data-yushu-confirm][data-variant=logout] button:hover {
+  background-color: var(--logout-hover, rgb(var(--ui-hover)));
+}
+[data-yushu-confirm][data-variant=logout] button:focus-visible {
+  outline: 2px solid var(--logout-ink, rgb(var(--ui-focus)));
+  outline-offset: 2px;
+}
+[data-yushu-confirm] .yushu-logout-confirm {
+  --logout-bg: #f9e9e6;
+  --logout-hover: #f3dad5;
+  --logout-border: #e7bdb6;
+  --logout-ink: #96352c;
+}
+html.dark [data-yushu-confirm] .yushu-logout-confirm {
+  --logout-bg: #462d34;
+  --logout-hover: #54343c;
+  --logout-border: #80505b;
+  --logout-ink: #ffc2b8;
+}
 [data-yushu-drawer] { border-left: 1px solid rgb(var(--ui-border)); background: rgb(var(--ui-surface)); box-shadow: -18px 0 60px #14261d14; animation: ao-sheet-in .35s cubic-bezier(.16,1,.3,1) both; }
 [role=menu] { border-radius: 13px; border-color: rgb(var(--ui-border)); background: rgb(var(--ui-surface)); box-shadow: 0 8px 30px #14261d15; animation: ao-modal-in .18s cubic-bezier(.16,1,.3,1) both; }
 /* Tool inventories: categories are filters rather than a second navigation rail. */
@@ -463,6 +494,8 @@ select:not([multiple]) { appearance: none; padding-right: 38px !important; backg
 @media (max-width: 767px) { .yushu-device-creation .yushu-guide-actions { grid-template-columns: 1fr; } }
 .aegis-dashboard { --aegis-grid: rgb(var(--ui-border) / .7); width: 100%; padding: 0 0 12px; color: rgb(var(--ui-text)); }
 .aegis-dashboard-heading { display:flex; align-items:center; justify-content:space-between; gap:18px; margin-bottom:24px; }
+.aegis-dashboard-identity { display:flex;align-items:center;gap:14px; }
+.aegis-dashboard-identity .aegis-module-emblem { flex:none; }
 .aegis-dashboard-heading p { font-size:12px; color:rgb(var(--ui-muted)); margin-bottom:9px; }
 .aegis-dashboard-heading h1 { font-size:28px; font-weight:650; letter-spacing:-.04em; margin-bottom:6px; }
 .aegis-dashboard-heading span { font-size:12px; color:rgb(var(--ui-secondary)); }
@@ -561,8 +594,14 @@ select:not([multiple]) { appearance: none; padding-right: 38px !important; backg
 .aegis-gauge-label span,.aegis-success dt { font-size:10px; color:var(--text-secondary); }
 .aegis-gauge-label span { letter-spacing:.17em; }
 .aegis-success dd { font-size:17px; margin:5px 0 17px; }.aegis-success dt:last-child { font-size:9px; }
-.aegis-resource-list { display:grid; gap:19px; margin-top:28px; }.aegis-resource-list a { display:flex; align-items:center; gap:11px; font-size:11px; }
-.aegis-resource-list svg { color:#8da17c; flex-shrink:0; }.aegis-resource-list a > div { flex:1; height:5px; border-radius:8px; overflow:hidden; background:rgb(var(--ui-border) / .5); }
+/* Use the same columns for every link, independent of label length or browser subgrid support. */
+.aegis-resource-list { display:grid; gap:19px; margin-top:28px; }
+.aegis-resource-list a {
+  display:grid; grid-template-columns:24px 5.5em minmax(0,1fr) 7ch 12px; gap:11px;
+  align-items:center; font-size:11px; min-width:0;
+}
+.aegis-resource-list a > span:nth-child(2) { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.aegis-resource-list svg { color:#8da17c; flex-shrink:0; }.aegis-resource-list a > div { width:100%; min-width:0; height:5px; border-radius:8px; overflow:hidden; background:rgb(var(--ui-border) / .5); }
 .aegis-resource-list i { display:block; height:100%; background:#b1cb92; border-radius:8px; transition:width .6s; }.aegis-resource-list strong { min-width:25px; text-align:right; font-size:12px; font-weight:500; }
 .aegis-today { grid-column:span 2; }.aegis-empty { min-height:205px; display:flex; align-items:center; justify-content:center; flex-direction:column; gap:14px; color:rgb(var(--ui-muted)); font-size:12px; }
 .aegis-empty svg { width:44px; height:44px; padding:12px; background:rgb(var(--ui-border) / .4); border-radius:15px; stroke-width:1.5; }

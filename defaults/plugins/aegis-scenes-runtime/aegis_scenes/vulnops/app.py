@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import sqlite3
+from collections import Counter
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -406,7 +407,7 @@ def delete_asset(asset_id: int, user=Depends(current_user)):
     return {"ok":True}
 
 
-def selection(user, q="", severity="", status="", owner_id=None, overdue=False, mine=False, asset_id=None):
+def selection(user, q="", severity="", status="", owner_id=None, overdue=False, mine=False, asset_id=None, *, discovered_from=None, discovered_to=None):
     where, args = ["1=1"], []
     if user["role"] == "owner" or mine:
         where.append("v.owner_id=?")
@@ -421,6 +422,14 @@ def selection(user, q="", severity="", status="", owner_id=None, overdue=False, 
                 continue
             where.append(f"v.{column}=?")
             args.append(value)
+    if discovered_from and discovered_to and discovered_from > discovered_to:
+        raise HTTPException(422, "开始日期不能晚于结束日期")
+    if discovered_from:
+        where.append("v.discovered_at>=?")
+        args.append(discovered_from.isoformat())
+    if discovered_to:
+        where.append("v.discovered_at<=?")
+        args.append(discovered_to.isoformat())
     if overdue:
         where.append("v.status!='closed' AND v.due_date<?")
         args.append(today().isoformat())
@@ -428,9 +437,9 @@ def selection(user, q="", severity="", status="", owner_id=None, overdue=False, 
 
 
 @app.get("/api/vulnerabilities")
-def vulnerabilities(q: str = "", severity: str = "", status: str = "", owner_id: int | None = None, overdue: bool = False, mine: bool = False, asset_id: int | None = None, page: int = 1, page_size: int = 10, user=Depends(current_user)):
+def vulnerabilities(q: str = "", severity: str = "", status: str = "", owner_id: int | None = None, overdue: bool = False, mine: bool = False, asset_id: int | None = None, page: int = 1, page_size: int = 10, discovered_from: date | None = None, discovered_to: date | None = None, user=Depends(current_user)):
     page, page_size = max(1, page), min(100, max(1, page_size))
-    where, args = selection(user, q, severity, status, owner_id, overdue, mine, asset_id)
+    where, args = selection(user, q, severity, status, owner_id, overdue, mine, asset_id, discovered_from=discovered_from, discovered_to=discovered_to)
     with db() as con:
         total = con.execute("SELECT COUNT(*) FROM vulnerabilities v JOIN assets a ON a.id=v.asset_id" + where, args).fetchone()[0]
         rows = con.execute(VULN_SELECT + where + " ORDER BY CASE WHEN v.status='closed' THEN 1 ELSE 0 END, v.due_date,v.id DESC LIMIT ? OFFSET ?", [*args, page_size, (page - 1) * page_size]).fetchall()
@@ -587,31 +596,66 @@ def download(aid: int, user=Depends(current_user)):
     return FileResponse(target, filename=row["filename"], media_type="application/octet-stream")
 
 
+def dashboard_trend(rows, closed, discovered_from, discovered_to, business_today):
+    end = discovered_to or business_today
+    new_counts = Counter(date.fromisoformat(r["discovered_at"]) for r in rows)
+    close_counts = Counter(
+        datetime.fromisoformat(r["closed_at"]).astimezone(timezone(timedelta(hours=8))).date()
+        for r in closed if r["closed_at"]
+    )
+    if discovered_from:
+        start = discovered_from
+    elif discovered_to:
+        # An open start means the first matching discovery, or the selected end if empty.
+        start = min(new_counts, default=end)
+    else:
+        start = end - timedelta(days=min(13, end.toordinal() - 1))
+
+    days = (end - start).days + 1
+    # Keep daily detail for ordinary ranges. Group longer spans rather than truncating them.
+    max_buckets = 90
+    bucket_days = 1 if days <= max_buckets else 7 * ((days + 7 * max_buckets - 1) // (7 * max_buckets))
+    trend = []
+    for offset in range(0, days, bucket_days):
+        first = start + timedelta(days=offset)
+        point = {"date": first.isoformat(), "new": 0, "closed": 0}
+        if bucket_days > 1:
+            point["end_date"] = (start + timedelta(days=min(days - 1, offset + bucket_days - 1))).isoformat()
+        trend.append(point)
+    for series, counts in (("new", new_counts), ("closed", close_counts)):
+        for day, count in counts.items():
+            if start <= day <= end:
+                trend[(day - start).days // bucket_days][series] += count
+    meta = {"start_date": start.isoformat(), "end_date": end.isoformat(), "days": days,
+            "bucket_days": bucket_days, "daily_peak": max((n for day, n in new_counts.items() if start <= day <= end), default=0)}
+    return trend, meta
+
+
 @app.get("/api/dashboard")
-def dashboard(user=Depends(current_user)):
-    where, args = selection(user)
+def dashboard(discovered_from: date | None = None, discovered_to: date | None = None, user=Depends(current_user)):
+    business_today = today()
+    if any(day and day > business_today for day in (discovered_from, discovered_to)):
+        raise HTTPException(422, "发现日期不能晚于今天")
+    where, args = selection(user, discovered_from=discovered_from, discovered_to=discovered_to)
     with db() as con:
         rows = [present(r) for r in con.execute(VULN_SELECT + where, args)]
     opened = [r for r in rows if r["status"] != "closed"]
     closed = [r for r in rows if r["status"] == "closed"]
     overdue = [r for r in opened if r["overdue_days"] > 0]
     durations = [(datetime.fromisoformat(r["closed_at"]).astimezone(timezone(timedelta(hours=8))).date() - date.fromisoformat(r["discovered_at"])).days for r in closed]
-    trend = []
-    for i in range(13, -1, -1):
-        day = today() - timedelta(days=i)
-        trend.append({"date": day.isoformat(), "new": sum(r["discovered_at"] == day.isoformat() for r in rows), "closed": sum(bool(r["closed_at"]) and datetime.fromisoformat(r["closed_at"]).astimezone(timezone(timedelta(hours=8))).date() == day for r in rows)})
+    trend, trend_range = dashboard_trend(rows, closed, discovered_from, discovered_to, business_today)
     departments = {}
     for r in rows:
         d = departments.setdefault(r["department"] or "未设置部门", {"name": r["department"] or "未设置部门", "total": 0, "closed": 0, "overdue": 0})
         d["total"] += 1
         d["closed"] += r["status"] == "closed"
         d["overdue"] += r["overdue_days"] > 0
-    return {"total": len(rows), "open": len(opened), "critical_high": sum(r["severity"] in {"critical", "high"} for r in opened), "overdue": len(overdue), "retest": sum(r["status"] == "retest" for r in rows), "closed": len(closed), "close_rate": round(len(closed) * 100 / len(rows), 1) if rows else 0, "avg_days": round(sum(durations) / len(durations), 1) if durations else None, "severity": {s: sum(r["severity"] == s for r in opened) for s in SEVERITIES}, "statuses": {s: sum(r["status"] == s for r in rows) for s in STATES}, "trend": trend, "departments": sorted(departments.values(), key=lambda d: (-d["overdue"], -d["total"])), "urgent": sorted(opened, key=lambda r: (r["due_date"], list(SEVERITIES).index(r["severity"])))[:6]}
+    return {"total": len(rows), "open": len(opened), "critical_high": sum(r["severity"] in {"critical", "high"} for r in opened), "overdue": len(overdue), "retest": sum(r["status"] == "retest" for r in rows), "closed": len(closed), "close_rate": round(len(closed) * 100 / len(rows), 1) if rows else 0, "avg_days": round(sum(durations) / len(durations), 1) if durations else None, "severity": {s: sum(r["severity"] == s for r in opened) for s in SEVERITIES}, "statuses": {s: sum(r["status"] == s for r in rows) for s in STATES}, "trend": trend, "trend_range": trend_range, "departments": sorted(departments.values(), key=lambda d: (-d["overdue"], -d["total"])), "urgent": sorted(opened, key=lambda r: (r["due_date"], list(SEVERITIES).index(r["severity"])))[:6]}
 
 
 @app.get("/api/export")
-def export(q: str = "", severity: str = "", status: str = "", owner_id: int | None = None, overdue: bool = False, mine: bool = False, asset_id: int | None = None, user=Depends(current_user)):
-    where, args = selection(user, q, severity, status, owner_id, overdue, mine, asset_id)
+def export(q: str = "", severity: str = "", status: str = "", owner_id: int | None = None, overdue: bool = False, mine: bool = False, asset_id: int | None = None, discovered_from: date | None = None, discovered_to: date | None = None, user=Depends(current_user)):
+    where, args = selection(user, q, severity, status, owner_id, overdue, mine, asset_id, discovered_from=discovered_from, discovered_to=discovered_to)
     with db() as con:
         rows = [present(r) for r in con.execute(VULN_SELECT + where + " ORDER BY v.id DESC", args)]
         event(con, user["id"], "导出台账", f"导出 {len(rows)} 条可访问记录")

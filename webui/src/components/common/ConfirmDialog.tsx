@@ -1,5 +1,5 @@
 import { useState, createContext, useContext, useCallback, useEffect, useId, useRef, ReactNode } from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, LogOut } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 interface ConfirmOptions {
@@ -9,7 +9,7 @@ interface ConfirmOptions {
   cancelText?: string;
   /** Information dialogs (e.g. shortcuts) only need the confirm button. */
   hideCancel?: boolean;
-  variant?: 'danger' | 'warning' | 'default';
+  variant?: 'danger' | 'warning' | 'logout' | 'default';
 }
 
 interface ConfirmContextType {
@@ -38,6 +38,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
     options: ConfirmOptions;
     resolve: (value: boolean) => void;
   } | null>(null);
+  const cancelButtonRef = useRef<HTMLButtonElement>(null);
   const confirmButtonRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -75,7 +76,8 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
       if (typeof dialog.showModal === 'function') dialog.showModal();
       else dialog.setAttribute('open', '');
     }
-    confirmButtonRef.current?.focus();
+    const initialFocus = state.options.variant === 'logout' ? cancelButtonRef.current : null;
+    (initialFocus ?? confirmButtonRef.current)?.focus();
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault();
@@ -93,6 +95,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
   const variantStyles = {
     danger: 'bg-red-600 hover:bg-red-700 text-white',
     warning: 'bg-yellow-500 hover:bg-yellow-600 text-white',
+    logout: 'yushu-logout-confirm',
     default: 'bg-[#43583a] hover:bg-[#34472c] text-white',
   };
   const hideCancel = state?.options.hideCancel || state?.options.cancelText === '';
@@ -140,9 +143,12 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
             <div className="mt-5 flex justify-end gap-3">
               {!hideCancel && (
                 <button
+                  ref={cancelButtonRef}
                   type="button"
                   onClick={handleCancel}
-                  className="rounded-lg bg-gray-100 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700"
+                  className={state.options.variant === 'logout'
+                    ? 'yushu-logout-cancel'
+                    : 'rounded-lg bg-gray-100 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700'}
                 >
                   {state.options.cancelText || t('button.cancel')}
                 </button>
@@ -153,6 +159,7 @@ export function ConfirmProvider({ children }: { children: ReactNode }) {
                 onClick={handleConfirm}
                 className={`rounded-lg px-4 py-2 text-sm transition-colors ${variantStyles[state.options.variant ?? 'default']}`}
               >
+                {state.options.variant === 'logout' && <LogOut className="h-4 w-4 shrink-0" aria-hidden="true" />}
                 {state.options.confirmText ?? t('button.confirm')}
               </button>
             </div>

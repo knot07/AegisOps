@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { Link } from 'react-router-dom';
+import { useTranslation } from 'react-i18next';
+import ModuleEmblem from '@/components/common/ModuleEmblem';
 import { ArrowRight, Check, RefreshCw, Plus, Pause, Play } from 'lucide-react';
 import { Area, AreaChart, Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { useAuth } from '@/contexts/AuthContext';
@@ -9,7 +11,7 @@ import { DAY, taskTrend } from './trends';
 import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ClockTicks, { CLOCK_TICK_COUNT } from '@/components/common/ClockTicks';
 
-const statusNames: Record<string, string> = { completed: '已完成', failed: '失败', running: '进行中', queued: '排队中', pending: '待执行', cancelled: '已取消' };
+const translatedStatuses = new Set(['completed', 'failed', 'running', 'queued', 'pending', 'cancelled']);
 function Empty({ text }: { text: string }) { return <div className="aegis-empty"><WorkspaceGlyph kind="timeline" size="empty" /><span>{text}</span></div>; }
 
 const reduceMotionQuery = '(prefers-reduced-motion: reduce)';
@@ -21,6 +23,8 @@ function subscribeToMotionPreference(notify: () => void) {
 }
 
 export default function Home() {
+  const { t, i18n } = useTranslation('home', { keyPrefix: 'dashboard' });
+  const locale = i18n.resolvedLanguage || i18n.language || 'zh-CN';
   const reducedMotion = useSyncExternalStore(subscribeToMotionPreference, systemReducesMotion, () => true);
   const [gaugeMotionOverride, setGaugeMotionOverride] = useState<boolean | null>(null);
   const gaugeMotion = gaugeMotionOverride ?? !reducedMotion;
@@ -57,50 +61,49 @@ export default function Home() {
     if (request !== requestRef.current) return;
     if (results[0].status === 'fulfilled') {
       setTasks(results[0].value.items); setPartial(results[0].value.partial); setNow(timestamp); setReady(true); setUpdated(timestamp); setError('');
-    } else setError('任务趋势暂时无法加载，请重试。');
+    } else setError('trendUnavailable');
     setCounts(results[1].status === 'fulfilled' ? results[1].value.data : null);
     setBusy(false);
   };
   useEffect(() => { void refresh(); return () => { requestRef.current++; }; }, []);
-  const trend = taskTrend(tasks, days, now);
-  const weekly = taskTrend(tasks, 7, now);
+  const trend = taskTrend(tasks, days, now, locale);
   const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0);
   const recent = tasks.filter(t => Date.parse(t.startedAt || '') >= todayStart.getTime()).slice(0, 6);
   const hour = new Date(now).getHours();
-  const greeting = hour < 6 ? '夜深了' : hour < 12 ? '上午好' : hour < 18 ? '下午好' : '晚上好';
-  const value = (n: number | undefined) => n === undefined ? '—' : n.toLocaleString();
+  const greeting = t(hour < 6 ? 'greetingLate' : hour < 12 ? 'greetingMorning' : hour < 18 ? 'greetingAfternoon' : 'greetingEvening');
+  const value = (n: number | undefined) => n === undefined ? '—' : n.toLocaleString(locale);
   const resources = [
-    { label: '智能体', value: stats?.agents.total, to: '/agents', icon: 'agent' },
-    { label: '工作流', value: stats?.workflows.total, to: '/workflows', icon: 'flow' },
-    { label: '技能', value: stats?.skills.total, to: '/skills', icon: 'skill' },
-    { label: '工具', value: stats?.tools.total, to: '/tools', icon: 'tools' },
+    { label: t('agent'), value: stats?.agents.total, to: '/agents', icon: 'agent' },
+    { label: t('workflow'), value: stats?.workflows.total, to: '/workflows', icon: 'flow' },
+    { label: t('skill'), value: stats?.skills.total, to: '/skills', icon: 'skill' },
+    { label: t('tools'), value: stats?.tools.total, to: '/tools', icon: 'tools' },
   ] as const;
   const resourceTotal = resources.reduce((sum, r) => sum + (r.value || 0), 0);
   const successRate = ready && trend.rate !== null ? Math.round(trend.rate) : null;
   const litTicks = successRate === 100 ? CLOCK_TICK_COUNT : successRate
     ? Math.min(CLOCK_TICK_COUNT - 1, Math.max(1, Math.round(successRate * CLOCK_TICK_COUNT / 100)))
     : 0;
-  const period = days === 1 ? '近 24 小时' : `近 ${days} 天`;
+  const period = days === 1 ? t('periodHours') : t('periodDays', { count: days });
   const chart = (bar = false) => <ResponsiveContainer width="100%" height="100%">{bar ?
-    <BarChart data={weekly.points} margin={{ top: 16, right: 8, left: -30, bottom: 0 }}><CartesianGrid vertical={false} stroke="var(--aegis-grid)" /><XAxis dataKey="label" axisLine={false} tickLine={false} minTickGap={16} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} /><YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} domain={[0, 'auto']} /><Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [v, '执行任务']} cursor={{ fill: 'var(--skin-selected,#84bc4a10)' }} /><Bar dataKey="count" fill="var(--skin-buttonTo,#a0c879)" radius={[5, 5, 0, 0]} maxBarSize={26} /></BarChart> :
-    <AreaChart data={trend.points} margin={{ top: 18, right: 12, left: -24, bottom: 0 }}><defs><linearGradient id="task-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--skin-accent,#97c961)" stopOpacity={0.32} /><stop offset="100%" stopColor="var(--skin-accent,#97c961)" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="2 6" vertical={false} stroke="var(--aegis-grid)" /><XAxis dataKey="label" axisLine={false} tickLine={false} minTickGap={42} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} /><YAxis allowDecimals={false} axisLine={false} tickLine={false} domain={[0, (max: number) => Math.max(2, max)]} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} /><Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [v, '执行任务']} /><Area type="monotone" dataKey="count" stroke="var(--skin-accent,#7fa957)" strokeWidth={2.5} fill="url(#task-area)" activeDot={{ r: 5, stroke: '#fff', strokeWidth: 3 }} /></AreaChart>
+    <BarChart data={trend.points} margin={{ top: 16, right: 8, left: -30, bottom: 0 }}><CartesianGrid vertical={false} stroke="var(--aegis-grid)" /><XAxis dataKey="label" axisLine={false} tickLine={false} minTickGap={16} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} /><YAxis allowDecimals={false} axisLine={false} tickLine={false} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} domain={[0, 'auto']} /><Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [v, t('executions')]} cursor={{ fill: 'var(--skin-selected,#84bc4a10)' }} /><Bar dataKey="count" fill="var(--skin-buttonTo,#a0c879)" radius={[5, 5, 0, 0]} maxBarSize={26} /></BarChart> :
+    <AreaChart data={trend.points} margin={{ top: 18, right: 12, left: -24, bottom: 0 }}><defs><linearGradient id="task-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="var(--skin-accent,#97c961)" stopOpacity={0.32} /><stop offset="100%" stopColor="var(--skin-accent,#97c961)" stopOpacity={0} /></linearGradient></defs><CartesianGrid strokeDasharray="2 6" vertical={false} stroke="var(--aegis-grid)" /><XAxis dataKey="label" axisLine={false} tickLine={false} minTickGap={42} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} /><YAxis allowDecimals={false} axisLine={false} tickLine={false} domain={[0, (max: number) => Math.max(2, max)]} tick={{ fill: 'rgb(var(--ui-muted))', fontSize: 10 }} /><Tooltip contentStyle={{ borderRadius: 12, fontSize: 12 }} formatter={(v: number) => [v, t('executions')]} /><Area type="monotone" dataKey="count" stroke="var(--skin-accent,#7fa957)" strokeWidth={2.5} fill="url(#task-area)" activeDot={{ r: 5, stroke: '#fff', strokeWidth: 3 }} /></AreaChart>
   }</ResponsiveContainer>;
   return <div className="aegis-dashboard" aria-busy={busy}>
-    <header className="aegis-dashboard-heading"><div className="min-w-0"><p>{new Date(now).toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p><h1>{greeting}，{user?.username || '欢迎回来'}</h1><span>任务执行趋势、能力资产与今日工作动态。</span></div><Link className="aegis-dashboard-primary" to="/sessions" state={{ skipLastSelectedSessionRestore: true }}><Plus size={15} />开始对话</Link></header>
-    {(error || statsError || partial) && <div className="aegis-dashboard-notice" role="status">{error || (partial ? '当前展示最近 5,000 条执行记录，统计为部分数据。' : '部分资源数据暂不可用。')}{error && <button onClick={() => void refresh()}>重新加载</button>}</div>}
+    <header className="aegis-dashboard-heading"><div className="aegis-dashboard-identity min-w-0"><ModuleEmblem kind="home" /><div className="min-w-0"><p>{new Date(now).toLocaleDateString(locale, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' })}</p><h1>{user?.username ? t('welcomeUser', { greeting, user: user.username }) : t('welcome')}</h1><span>{t('subtitle')}</span></div></div><Link className="aegis-dashboard-primary" to="/sessions" state={{ skipLastSelectedSessionRestore: true }}><Plus size={15} />{t('startChat')}</Link></header>
+    {(error || statsError || partial) && <div className="aegis-dashboard-notice" role="status">{t(error || (partial ? 'partial' : 'statsUnavailable'))}{error && <button onClick={() => void refresh()}>{t('reload')}</button>}</div>}
     <div className="aegis-dashboard-grid">
-      <section className="aegis-card aegis-trend"><div className="aegis-card-heading"><h2>任务脉搏</h2><div className="aegis-range" aria-label="趋势时间范围">{[1, 7, 30].map(d => <button key={d} aria-pressed={days === d} onClick={() => setDays(d)}>{d === 1 ? '24 小时' : `${d} 天`}</button>)}</div></div><div className="aegis-trend-content"><div className="aegis-trend-summary"><div className="aegis-big-number">{ready ? value(trend.current.length) : '—'}<small>次</small></div><p className="aegis-comparison"><span>{!ready ? '—' : trend.change === null ? (trend.previous === 0 && trend.current.length === 0 ? '持平' : '新增') : `${trend.change > 0 ? '+' : ''}${trend.change.toFixed(0)}%`}</span>较上一周期</p><div className="aegis-trend-facts"><div>峰值<strong>{ready ? trend.peak : '—'}</strong></div><div>{days === 1 ? '每小时均值' : '每日均值'}<strong>{ready ? trend.average.toFixed(1) : '—'}</strong></div><div>范围<strong>{period}</strong></div></div><div className="aegis-trend-actions"><Link className="aegis-dashboard-primary" to="/tasks">查看任务<ArrowRight size={14} /></Link><button disabled={busy} onClick={() => void refresh()}><RefreshCw size={14} className={busy ? 'motion-safe:animate-spin' : ''} />刷新</button></div><span className="aegis-updated" aria-live="polite">{busy ? '正在更新…' : updated ? `更新于 ${new Date(updated).toLocaleTimeString('zh-CN')}` : '等待数据'}</span></div><div className="aegis-main-chart" role="img" aria-label={`${period}执行任务趋势，共${ready ? trend.current.length : '未知'}次`}>{chart()}{!ready && <span className="aegis-chart-note">{busy ? '正在加载趋势' : '趋势数据暂不可用'}</span>}</div></div></section>
-      <div className="aegis-side-metrics"><Link className="aegis-card aegis-metric" to="/tasks"><div><h2>当前任务 · 执行队列</h2><WorkspaceGlyph kind="queue" size="lg" /></div><strong>{value(counts?.running)}<small>进行中</small></strong><p>{value(counts?.queued)} 个任务等待执行</p></Link><Link className="aegis-card aegis-metric" to="/tasks"><div><h2>计划任务 · 自动化</h2><WorkspaceGlyph kind="schedule" size="lg" /></div><strong>{value(counts?.scheduled_active)}<small>个</small></strong><p>已启用的定时任务</p></Link></div>
-      <section className="aegis-card aegis-weekly"><div className="aegis-card-heading"><h2>近 7 天执行量</h2><span>{ready ? weekly.current.length : '—'} 次</span></div><div className="aegis-small-chart" role="img" aria-label={`近7天执行${ready ? weekly.current.length : '未知'}次`}>{chart(true)}</div></section>
+      <section className="aegis-card aegis-trend"><div className="aegis-card-heading"><h2>{t('pulse')}</h2><div className="aegis-range" aria-label={t('trendRange')}>{[1, 7, 30].map(d => <button key={d} aria-pressed={days === d} onClick={() => setDays(d)}>{d === 1 ? t('hours') : t('days', { count: d })}</button>)}</div></div><div className="aegis-trend-content"><div className="aegis-trend-summary"><div className="aegis-big-number">{ready ? value(trend.current.length) : '—'}<small>{t('runs')}</small></div><p className="aegis-comparison"><span>{!ready ? '—' : trend.change === null ? (trend.previous === 0 && trend.current.length === 0 ? t('steady') : t('new')) : `${trend.change > 0 ? '+' : ''}${trend.change.toFixed(0)}%`}</span>{t('previous')}</p><div className="aegis-trend-facts"><div>{t('peak')}<strong>{ready ? trend.peak : '—'}</strong></div><div>{days === 1 ? t('hourly') : t('daily')}<strong>{ready ? trend.average.toFixed(1) : '—'}</strong></div><div>{t('range')}<strong>{period}</strong></div></div><div className="aegis-trend-actions"><Link className="aegis-dashboard-primary" to="/tasks">{t('viewTasks')}<ArrowRight size={14} /></Link><button disabled={busy} onClick={() => void refresh()}><RefreshCw size={14} className={busy ? 'motion-safe:animate-spin' : ''} />{t('refresh')}</button></div><span className="aegis-updated" aria-live="polite">{busy ? t('updating') : updated ? t('updatedAt', { time: new Date(updated).toLocaleTimeString(locale) }) : t('waitingData')}</span></div><div className="aegis-main-chart" role="img" aria-label={t('trendChart', { period, total: ready ? value(trend.current.length) : t('unknown') })}>{chart()}{!ready && <span className="aegis-chart-note">{busy ? t('loadingTrend') : t('noTrend')}</span>}</div></div></section>
+      <div className="aegis-side-metrics"><Link className="aegis-card aegis-metric" to="/tasks"><div><h2>{t('queue')}</h2><WorkspaceGlyph kind="queue" size="lg" /></div><strong>{value(counts?.running)}<small>{t('running')}</small></strong><p>{t('waitingTasks', { countText: value(counts?.queued) })}</p></Link><Link className="aegis-card aegis-metric" to="/tasks"><div><h2>{t('schedule')}</h2><WorkspaceGlyph kind="schedule" size="lg" /></div><strong>{value(counts?.scheduled_active)}<small>{t('items')}</small></strong><p>{t('activeSchedules')}</p></Link></div>
+      <section className="aegis-card aegis-weekly"><div className="aegis-card-heading"><h2>{t('executionVolume', { period })}</h2><span>{t('executionVolumeTotal', { count: ready ? trend.current.length : undefined, total: ready ? value(trend.current.length) : '—' })}</span></div><div className="aegis-small-chart" role="img" aria-label={t('executionVolumeChart', { period, count: ready ? trend.current.length : undefined, total: ready ? value(trend.current.length) : t('unknown') })}>{chart(true)}</div></section>
       <section className="aegis-card aegis-success">
         <div className="aegis-card-heading">
-          <h2>任务成功率</h2>
+          <h2>{t('successRate')}</h2>
           <div className="aegis-gauge-actions">
             <span>{period}</span>
             {litTicks > 0 && <button type="button" className="aegis-gauge-motion"
-              aria-label="成功率呼吸动效" aria-pressed={gaugeMotion} title={gaugeMotion ? '暂停呼吸动效' : '播放呼吸动效'}
+              aria-label={t('motionLabel')} aria-pressed={gaugeMotion} title={gaugeMotion ? t('pauseMotion') : t('playMotion')}
               onClick={() => setGaugeMotionOverride(!gaugeMotion)}>
-              {gaugeMotion ? <Pause size={12} aria-hidden="true" /> : <Play size={12} aria-hidden="true" />} 动效
+              {gaugeMotion ? <Pause size={12} aria-hidden="true" /> : <Play size={12} aria-hidden="true" />} {t('motion')}
             </button>}
           </div>
         </div>
@@ -108,14 +111,14 @@ export default function Home() {
           <div className="aegis-gauge" data-filled={litTicks ? '' : undefined}
             data-motion={gaugeMotion ? 'on' : 'off'}>
             <ClockTicks lit={litTicks} layered />
-            <div className="aegis-gauge-label"><strong>{successRate === null ? '—' : <>{successRate}<small>%</small></>}</strong><span>{successRate === null ? '暂无统计' : '成功'}</span></div>
+            <div className="aegis-gauge-label"><strong>{successRate === null ? '—' : <>{successRate}<small>%</small></>}</strong><span>{successRate === null ? t('noStats') : t('success')}</span></div>
           </div>
-          <dl><dt>已完成</dt><dd>{ready ? trend.completed : '—'}</dd><dt>失败</dt><dd>{ready ? trend.failed : '—'}</dd><dt>仅统计已结束任务</dt></dl>
+          <dl><dt>{t('completed')}</dt><dd>{ready ? trend.completed : '—'}</dd><dt>{t('failed')}</dt><dd>{ready ? trend.failed : '—'}</dd><dt>{t('endedOnly')}</dt></dl>
         </div>
       </section>
-      <section className="aegis-card aegis-resources"><div className="aegis-card-heading"><h2>能力资产</h2><span>{value(stats ? resourceTotal : undefined)} 项</span></div><div className="aegis-resource-list">{resources.map(r => <Link key={r.to} to={r.to}><WorkspaceGlyph kind={r.icon} size="xs" /><span>{r.label}</span><div><i style={{ width: `${resourceTotal ? (r.value || 0) / resourceTotal * 100 : 0}%` }} /></div><strong>{value(r.value)}</strong><ArrowRight size={12} /></Link>)}</div></section>
-      <section className="aegis-card aegis-today"><div className="aegis-card-heading"><h2>今日执行轨迹</h2><Link to="/tasks">任务中心<ArrowRight size={14} /></Link></div>{recent.length ? <div className="aegis-timeline">{recent.map(t => <Link to="/tasks" key={t.id}><span className={`aegis-status-dot ${t.status}`} /><time>{new Date(t.startedAt!).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })}</time><strong>{t.title}</strong><span>{statusNames[t.status] || t.status}</span></Link>)}</div> : <Empty text={ready ? '今天还没有执行记录' : busy ? '正在加载执行记录' : '执行记录暂不可用'} />}</section>
-      <section className="aegis-card aegis-quick-start"><div className="aegis-card-heading"><h2>工作入口</h2><span>随时开始</span></div><Link to="/sessions" state={{ skipLastSelectedSessionRestore: true }}><WorkspaceGlyph kind="chat" size="lg" /><div><strong>与智能体对话</strong><span>让想法成为下一步行动</span></div><ArrowRight size={16} /></Link><Link to="/workflows"><WorkspaceGlyph kind="flow" size="lg" /><div><strong>编排工作流</strong><span>串联能力，自动处理重复任务</span></div><ArrowRight size={16} /></Link><div className="aegis-health"><Check size={14} />{stats?.system.status === 'healthy' ? '服务运行正常' : stats ? '部分服务需要关注' : '正在获取服务状态'}</div></section>
+      <section className="aegis-card aegis-resources"><div className="aegis-card-heading"><h2>{t('resources')}</h2><span>{t('resourcesTotal', { total: value(stats ? resourceTotal : undefined) })}</span></div><div className="aegis-resource-list">{resources.map(r => <Link key={r.to} to={r.to}><WorkspaceGlyph kind={r.icon} size="xs" /><span>{r.label}</span><div><i style={{ width: `${resourceTotal ? (r.value || 0) / resourceTotal * 100 : 0}%` }} /></div><strong>{value(r.value)}</strong><ArrowRight size={12} /></Link>)}</div></section>
+      <section className="aegis-card aegis-today"><div className="aegis-card-heading"><h2>{t('today')}</h2><Link to="/tasks">{t('taskCenter')}<ArrowRight size={14} /></Link></div>{recent.length ? <div className="aegis-timeline">{recent.map(task => <Link to="/tasks" key={task.id}><span className={`aegis-status-dot ${task.status}`} /><time>{new Date(task.startedAt!).toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit' })}</time><strong>{task.title}</strong><span>{translatedStatuses.has(task.status) ? t(`status.${task.status}`) : task.status}</span></Link>)}</div> : <Empty text={ready ? t('noRuns') : busy ? t('loadingRuns') : t('unavailableRuns')} />}</section>
+      <section className="aegis-card aegis-quick-start"><div className="aegis-card-heading"><h2>{t('quickStart')}</h2><span>{t('ready')}</span></div><Link to="/sessions" state={{ skipLastSelectedSessionRestore: true }}><WorkspaceGlyph kind="chat" size="lg" /><div><strong>{t('chatAgent')}</strong><span>{t('chatHint')}</span></div><ArrowRight size={16} /></Link><Link to="/workflows"><WorkspaceGlyph kind="flow" size="lg" /><div><strong>{t('createWorkflow')}</strong><span>{t('workflowHint')}</span></div><ArrowRight size={16} /></Link><div className="aegis-health"><Check size={14} />{stats?.system.status === 'healthy' ? t('healthy') : stats ? t('attention') : t('checking')}</div></section>
     </div>
   </div>;
 }

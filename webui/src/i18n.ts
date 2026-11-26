@@ -35,6 +35,13 @@ i18n
     },
   });
 
+// Contract pages share this document; same-origin frames observe its language.
+const applyDocumentLanguage = (language: string) => {
+  if (typeof document !== 'undefined') document.documentElement.lang = language.startsWith('zh') ? 'zh-CN' : 'en-US';
+};
+i18n.on('languageChanged', applyDocumentLanguage);
+if (i18n.language) applyDocumentLanguage(i18n.language);
+
 registerI18nInstance(i18n);
 
 export { preloadI18nNamespaces };

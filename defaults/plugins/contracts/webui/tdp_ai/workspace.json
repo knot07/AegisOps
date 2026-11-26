@@ -2,6 +2,7 @@
   "id": "tdp_ai",
   "version": "1.0.0",
   "title": "态势感知 AI 研判",
+  "titleEn": "AI Situation Analysis",
   "icon": "ShieldCheck",
   "order": 10,
   "enabled": true,

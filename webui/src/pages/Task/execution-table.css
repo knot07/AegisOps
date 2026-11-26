@@ -1,0 +1,48 @@
+.aegis-execution-list {
+  --execution-accent: var(--skin-accent, var(--night-green, var(--module-accent)));
+  --execution-text: rgb(var(--ui-text));
+  --execution-ink: color-mix(in srgb, var(--execution-accent) 82%, var(--execution-text));
+  --execution-surface: rgb(var(--ui-surface));
+  --execution-edge: rgb(var(--ui-border));
+  --execution-tint: color-mix(in srgb, var(--execution-accent) 9%, var(--execution-surface));
+  background-color: var(--execution-surface);
+  border-color: var(--execution-edge);
+}
+
+/* Override legacy table presets in both modes, only in the execution list. */
+.aegis-execution-list :is(thead, th) {
+  background: var(--execution-tint) !important;
+  color: var(--execution-ink) !important;
+}
+
+.aegis-execution-list tbody > tr:hover { background-color: var(--execution-tint); }
+.aegis-execution-list tbody > tr[data-active=true] { background-color: rgb(var(--ui-selected)); }
+.aegis-execution-list tbody > tr + tr > td { border-top: 1px solid var(--execution-edge); }
+.aegis-execution-list input[type=checkbox] { accent-color: var(--execution-accent); }
+.aegis-execution-list .aegis-execution-title { color: var(--execution-text); }
+.aegis-execution-list .aegis-execution-unread { background-color: var(--execution-accent); }
+.aegis-execution-list :is(.aegis-execution-time, .aegis-execution-pagination) { color: rgb(var(--ui-secondary)); }
+.aegis-execution-list .aegis-execution-time { font-variant-numeric: tabular-nums; }
+
+.aegis-execution-list .aegis-execution-pagination {
+  background-color: var(--execution-tint);
+  border-color: var(--execution-edge);
+}
+.aegis-execution-list .aegis-execution-pagination button:not(:disabled) { color: var(--execution-ink); }
+.aegis-execution-list .aegis-execution-pagination button:hover:not(:disabled) {
+  background-color: rgb(var(--ui-selected));
+}
+
+.aegis-execution-list [data-task-mode] { color: var(--execution-ink); }
+.aegis-execution-list [data-task-mode] .workspace-glyph {
+  --glyph-ink: var(--execution-ink);
+  --glyph-pigment: var(--execution-accent);
+}
+.aegis-execution-list :is([data-task-source], [data-task-trigger], [data-task-priority=normal], [data-task-priority=low]) {
+  background-color: var(--execution-tint);
+  color: var(--execution-ink);
+}
+
+/* Task outcomes and high/urgent priorities retain their semantic colors. */
+.aegis-execution-list :is([data-task-status=running], [data-task-status=completed]) { color: color-mix(in srgb, var(--status-success) 80%, var(--execution-text)); }
+.aegis-execution-list [data-task-status=failed] { color: color-mix(in srgb, var(--status-danger) 80%, var(--execution-text)); }

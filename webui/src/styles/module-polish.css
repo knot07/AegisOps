@@ -265,10 +265,6 @@
 .aegis-model-sheet [role=tab]{border-radius:9px;font-size:12px;min-height:36px}
 .aegis-model-sheet [role=tab][aria-selected=true]{color:var(--brand-accent);background:#fff;box-shadow:0 2px 5px #30442b0b}
 .aegis-model-discovery>ul{border:0!important;background:transparent!important;display:flex;flex-direction:column;gap:8px;padding:2px}
-.aegis-model-discovery .aegis-discovery-row{border:1px solid color-mix(in srgb,var(--brand-accent) 15%,#eee);border-radius:12px;background:linear-gradient(125deg,var(--brand-soft),#fff 82%);padding:12px;min-height:60px}
-.aegis-discovery-row .aegis-model-brand-icon{width:30px;height:30px;padding:6px}
-.aegis-discovery-row>span{font-size:13px;line-height:1.6}
-.aegis-discovery-row [role=switch][aria-checked=true]{background:var(--brand-accent)!important}
 .aegis-model-sheet label{font-size:12px!important;color:#64715b!important}
 .aegis-model-sheet .aegis-model-discovery button{transition:background-color .16s,color .16s}
 

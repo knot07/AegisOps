@@ -93,30 +93,12 @@ export function useOptionalToast() {
 }
 
 // Toast 配置
-const toastConfig: Record<ToastType, { icon: typeof CheckCircle; className: string }> = {
-  success: {
-    icon: CheckCircle,
-    className: 'bg-green-50 border-green-200 text-green-800',
-  },
-  error: {
-    icon: AlertCircle,
-    className: 'bg-red-50 border-red-200 text-red-800',
-  },
-  warning: {
-    icon: AlertTriangle,
-    className: 'bg-yellow-50 border-yellow-200 text-yellow-800',
-  },
-  info: {
-    icon: Info,
-    className: 'bg-red-50 border-red-200 text-red-800',
-  },
-};
+const toastIcons = { success: CheckCircle, error: AlertCircle, warning: AlertTriangle, info: Info } satisfies Record<ToastType, typeof CheckCircle>;
 
 // 单个 Toast 组件
 function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void }) {
   const { t } = useTranslation('common');
-  const config = toastConfig[toast.type];
-  const Icon = config.icon;
+  const Icon = toastIcons[toast.type];
 
   useEffect(() => {
     if (toast.duration && toast.duration > 0) {
@@ -127,19 +109,21 @@ function Toast({ toast, onRemove }: { toast: ToastMessage; onRemove: () => void 
 
   return (
     <div
-      className={`flex items-start gap-3 p-4 rounded-lg border shadow-lg animate-slide-in ${config.className}`}
+      className="aegis-toast"
+      data-tone={toast.type}
       role={toast.type === 'error' || toast.type === 'warning' ? 'alert' : 'status'}
     >
-      <Icon className="w-5 h-5 flex-shrink-0 mt-0.5" />
+      <span className="aegis-toast-icon" aria-hidden="true"><Icon size={17} /></span>
       <div className="flex-1 min-w-0">
-        <p className="font-medium text-sm">{toast.title}</p>
+        <p className="aegis-toast-title">{toast.title}</p>
         {toast.description && (
-          <p className="mt-1 text-sm opacity-80">{toast.description}</p>
+          <p className="aegis-toast-description">{toast.description}</p>
         )}
       </div>
       <button
         onClick={onRemove}
-        className="flex-shrink-0 p-1 rounded hover:bg-black/10 transition-colors"
+        type="button"
+        className="aegis-toast-close"
         aria-label={t('button.close')}
       >
         <X className="w-4 h-4" />
@@ -168,22 +152,3 @@ function ToastContainer({
     </div>
   );
 }
-
-// 添加动画样式
-const style = document.createElement('style');
-style.textContent = `
-  @keyframes slide-in {
-    from {
-      transform: translateX(100%);
-      opacity: 0;
-    }
-    to {
-      transform: translateX(0);
-      opacity: 1;
-    }
-  }
-  .animate-slide-in {
-    animation: slide-in 0.3s ease-out;
-  }
-`;
-document.head.appendChild(style);

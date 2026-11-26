@@ -162,6 +162,7 @@ export function SessionModeOption({
     <button
       {...props}
       type={type}
+      data-popup-selected={selected}
       title={`${label}\n${description}`}
       className={`aegis-mode-option grid w-full min-w-0 ${OPTION_COLUMNS} items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ui-focus disabled:cursor-not-allowed disabled:opacity-50 ${
         selected

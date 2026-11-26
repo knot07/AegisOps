@@ -105,6 +105,19 @@ var jsxs = runtime.jsxs;
 var Fragment2 = runtime.React.Fragment;
 
 // src/Page.tsx
+var missingAlertSource = "\u5C1A\u672A\u914D\u7F6E\u6001\u52BF\u611F\u77E5\u544A\u8B66\u6570\u636E\u6E90\uFF0C\u8BF7\u5728\u300C\u8BBE\u5907\u63A5\u5165\u300D\u4E2D\u914D\u7F6E\u5E76\u542F\u7528\u544A\u8B66\u6570\u636E\u6E90\uFF0C\u6216\u5148\u5207\u6362\u5230\u6F14\u793A\u73AF\u5883\u3002";
+var reviewTranslations = { [missingAlertSource]: "No situational awareness alert source is configured. Set one up and enable it in Device Integration, or switch to the demo.", "\u770B\u677F\u6570\u636E\u83B7\u53D6\u5931\u8D25": "Could not load the dashboard", "\u7814\u5224\u73AF\u5883\u5207\u6362": "Review environment", "\u6B63\u5F0F\u7814\u5224": "Live review", "\u6F14\u793A\u5E73\u53F0": "Demo workspace", "AI \u7814\u5224\u5E73\u53F0": "AI review workspace", "\u8BBE\u5907\u544A\u8B66\u6C47\u603B\u3001AI \u7814\u5224\u4E0E\u54CD\u5E94\u8054\u52A8": "Device alert summary, AI review & response", "\u66F4\u6362 Logo": "Change logo", "\u70B9\u51FB\u66F4\u6362 Logo": "Change logo", "\u6062\u590D\u9ED8\u8BA4 Logo": "Reset logo", "\u70B9\u51FB\u81EA\u5B9A\u4E49\u5E73\u53F0\u540D\u79F0": "Customize workspace name", "\u4FEE\u6539\u5E73\u53F0\u540D\u79F0": "Rename workspace", "Atlas\u5FEB\u901F\u63A5\u5165\u4F7F\u7528": "Atlas quick start", "\u7ACB\u5373\u5237\u65B0": "Refresh now", "\u5237\u65B0": "Refresh", "\u5237\u65B0\u4E2D": "Refreshing", "\u8FDE\u63A5\u5F02\u5E38": "Connection error", "\u540C\u6B65\u4E2D": "Syncing", "\u5DF2\u540C\u6B65": "Synced", "\u624B\u52A8\u5237\u65B0": "Manual refresh", "\u65F6\u95F4\u8303\u56F4": "Time range", "\u5FEB\u6377\u65F6\u95F4": "Quick ranges", "\u81EA\u5B9A\u4E49\u65F6\u95F4": "Custom range", "\u5F00\u59CB\u65F6\u95F4": "Start time", "\u7ED3\u675F\u65F6\u95F4": "End time", "\u53D6\u6D88": "Cancel", "\u5E94\u7528": "Apply", "\u5237\u65B0\u9891\u7387": "Refresh interval", "5\u79D2": "5 sec", "30\u79D2": "30 sec", "1\u5206\u949F": "1 min", "\u5DF2\u5173\u95ED": "Off", "AI\u81EA\u52A8\u7814\u5224": "Automatic AI review", "\u5DF2\u5F00\u542F": "On", "\u6700\u8FD1\u66F4\u65B0": "Last update", "\u6C47\u603B\u653B\u51FB": "Total attacks", "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u4E8B\u4EF6\u603B\u91CF": "Events in selected range", "\u8BBE\u5907\u544A\u8B66": "Device alerts", "\u5DF2\u63A5\u5165\u8BBE\u5907\u544A\u8B66\u6C47\u603B": "Alerts from connected devices", "\u653B\u51FB IP \u6570": "Source IPs", "\u6309\u653B\u51FB\u6E90\u53BB\u91CD\u7EDF\u8BA1": "Unique source addresses", "AI \u5DF2\u7814\u5224": "Reviewed", "\u5DF2\u5F62\u6210\u5904\u7F6E\u5EFA\u8BAE": "Recommendations available", "AI \u7814\u5224\u4E2D": "In review", "\u6B63\u5728\u6392\u961F\u6216\u8FD0\u884C": "Queued or running", "AI \u7814\u5224\u7387": "Review rate", "\u5B8C\u6210\u6570 / \u653B\u51FB IP \u6570": "Completed / source IPs", "\u5916\u7F51\u653B\u51FB\u8D8B\u52BF": "External attack trend", "\u544A\u8B66\u6B21\u6570": "Alert count", "\u653B\u51FB\u7C7B\u578B\u5206\u5E03": "Attack type distribution", "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u5185\u7684\u544A\u8B66\u5360\u6BD4": "Share of alerts in selected range", "\u544A\u8B66\u4E8B\u4EF6\u5217\u8868": "Alert register", "\u544A\u8B66\u5217\u8868": "Alerts", "AI\u7814\u5224": "AI review", "\u4E0B\u8F7D": "Download", "\u6700\u8FD130\u5206\u949F": "Last 30 min", "\u6700\u8FD11\u5C0F\u65F6": "Last 1 hour", "\u6700\u8FD12\u5C0F\u65F6": "Last 2 hours", "\u6700\u8FD16\u5C0F\u65F6": "Last 6 hours", "\u6700\u8FD112\u5C0F\u65F6": "Last 12 hours", "\u6700\u8FD11\u5929": "Last day", "\u67E5\u770B\u8BE6\u60C5": "View details", "\u7814\u5224\u8BE6\u60C5\u5206\u7C7B": "Review details", "\u5206\u6790\u6458\u8981": "Summary", "\u5904\u7F6E\u5EFA\u8BAE": "Recommendations", "\u544A\u8B66\u4FE1\u606F": "Alert information", "\u8BC1\u636E\u8BC4\u4F30": "Evidence assessment", "\u652F\u6301\u8BC1\u636E": "Supporting evidence", "\u53CD\u8BC1\u4E0E\u7591\u70B9": "Contradictions and uncertainties", "\u6838\u9A8C\u8303\u56F4": "Verification scope", "\u7F3A\u5931\u4FE1\u606F\u4E0E\u53D6\u8BC1\u9650\u5236": "Missing information & limitations", "\u53D7\u5F71\u54CD\u76EE\u6807": "Affected targets", "\u5173\u952E IOC": "Key IOCs", "\u6838\u5FC3\u7814\u5224\u4F9D\u636E": "Key assessment evidence", "\u6838\u67E5\u4E0E\u5904\u7F6E\u6E05\u5355": "Review checklist", "\u6BCF\u9875\u6761\u6570": "Rows per page", "\u6BCF\u9875/10\u6761": "10 per page", "\u6BCF\u9875/20\u6761": "20 per page", "\u6BCF\u9875/50\u6761": "50 per page" };
+var reviewEnglish = () => document.documentElement.lang.startsWith("en");
+var ui = (label) => reviewEnglish() ? reviewTranslations[label] || label : label;
+function useReviewLanguage() {
+  const [english, setEnglish] = useState(reviewEnglish);
+  useEffect(() => {
+    const observer = new MutationObserver(() => setEnglish(reviewEnglish()));
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+    return () => observer.disconnect();
+  }, []);
+  return english;
+}
 var C = {
   bg: "var(--dt-bg)",
   pageBg: "var(--dt-page-bg)",
@@ -845,7 +858,7 @@ function Pager({ current, total, totalItems, pageSize, onChange, onPageSizeChang
     /* @__PURE__ */ jsx("button", { "aria-label": "\u4E0A\u4E00\u9875", disabled: current <= 1, onClick: () => onChange(current - 1), style: { ...pagerStyle, opacity: current <= 1 ? 0.45 : 1 }, children: "\u2039" }),
     pageTokens(current, total).map((token) => typeof token === "number" ? /* @__PURE__ */ jsx("button", { "aria-label": `\u7B2C${token}\u9875`, onClick: () => onChange(token), style: { ...pagerStyle, background: token === current ? "var(--dt-control)" : C.panel, color: token === current ? "var(--dt-control-text)" : C.textDim }, children: token }, `page-${token}`) : /* @__PURE__ */ jsx("span", { style: { minWidth: 30, textAlign: "center", color: C.textMuted }, children: "\u2026" }, token)),
     /* @__PURE__ */ jsx("button", { "aria-label": "\u4E0B\u4E00\u9875", disabled: current >= total, onClick: () => onChange(current + 1), style: { ...pagerStyle, opacity: current >= total ? 0.45 : 1 }, children: "\u203A" }),
-    /* @__PURE__ */ jsx(StyledSelect, { ariaLabel: "\u6BCF\u9875\u6761\u6570", value: pageSize, options: [{ value: 10, label: "\u6BCF\u9875/10\u6761" }, { value: 20, label: "\u6BCF\u9875/20\u6761" }, { value: 50, label: "\u6BCF\u9875/50\u6761" }], onChange: onPageSizeChange, placement: "top", buttonStyle: { width: 132, height: 40, background: C.panel } }),
+    /* @__PURE__ */ jsx(StyledSelect, { ariaLabel: ui("\u6BCF\u9875\u6761\u6570"), value: pageSize, options: [{ value: 10, label: "\u6BCF\u9875/10\u6761" }, { value: 20, label: "\u6BCF\u9875/20\u6761" }, { value: 50, label: "\u6BCF\u9875/50\u6761" }], onChange: onPageSizeChange, placement: "top", buttonStyle: { width: 132, height: 40, background: C.panel } }),
     /* @__PURE__ */ jsxs("label", { style: { display: "inline-flex", alignItems: "center", gap: 7, color: C.textMid, whiteSpace: "nowrap" }, children: [
       "\u8DF3\u81F3",
       /* @__PURE__ */ jsx("input", { "aria-label": "\u8DF3\u8F6C\u9875\u7801", inputMode: "numeric", value: jumpPage, onChange: (event) => setJumpPage(event.target.value.replace(/\D/g, "")), onKeyDown: (event) => {
@@ -856,6 +869,7 @@ function Pager({ current, total, totalItems, pageSize, onChange, onPageSizeChang
   ] });
 }
 function Page() {
+  useReviewLanguage();
   const { isDark, viewportWidth } = useAegisOpsHostState();
   const brandLogo = useBrandLogo("datang-ai-v2-custom-brand-logo-v1");
   const brandNameKey = "tdp-custom-platform-name";
@@ -1007,7 +1021,7 @@ function Page() {
       params.trend_refresh = lastTrendRangeRef.current === trendRangeKey ? timeMode === "preset" ? "current" : "none" : "range";
       const response = await api.page.get("/dashboard", { params });
       const payload = response.data;
-      if (!payload?.ok) throw new Error(payload?.error || "\u770B\u677F\u6570\u636E\u83B7\u53D6\u5931\u8D25");
+      if (!payload?.ok) throw new Error(payload?.error === "\u5C1A\u672A\u914D\u7F6E TDP \u6570\u636E\u6E90\uFF0C\u8BF7\u5728\u8BBE\u5907\u63A5\u5165\u4E2D\u914D\u7F6E\u5E76\u542F\u7528 TDP OpenAPI\uFF1B\u53EF\u5148\u5207\u6362\u5230\u6F14\u793A\u73AF\u5883\u3002" ? missingAlertSource : payload?.error || "\u770B\u677F\u6570\u636E\u83B7\u53D6\u5931\u8D25");
       if (seq !== requestSeq.current) return;
       const latest = payload.data.tdp || { rows: [], start_time: 0, end_time: 0 };
       setTdp((current) => ({
@@ -1264,6 +1278,7 @@ function Page() {
     { label: "AI \u7814\u5224\u7387", value: cards[5][1], hint: "\u5B8C\u6210\u6570 / \u653B\u51FB IP \u6570", icon: "clock", accent: C.blue, soft: C.blueDark }
   ];
   const timeControlValue = timeMode === "custom" ? "\u81EA\u5B9A\u4E49\u65F6\u95F4" : TIME_PRESETS.find((item) => item.minutes === minutes)?.label || "\u6700\u8FD12\u5C0F\u65F6";
+  const displayError = error ? ui(error) : "";
   const syncText = error ? "\u8FDE\u63A5\u5F02\u5E38" : loading ? "\u540C\u6B65\u4E2D" : refreshMs ? "\u5DF2\u540C\u6B65" : "\u624B\u52A8\u5237\u65B0";
   useEffect(() => {
     if (page > pages) setPage(pages);
@@ -1344,68 +1359,68 @@ function Page() {
  [data-tdp-stat] small{color:#839087!important;font-size:12px!important;font-weight:400!important;line-height:1.5!important}
 
     ` }),
-    /* @__PURE__ */ jsxs("nav", { "aria-label": "\u7814\u5224\u73AF\u5883\u5207\u6362", style: { display: "flex", gap: 8, padding: "12px 24px", borderBottom: `1px solid ${C.border}`, background: C.panel }, children: [
-      /* @__PURE__ */ jsx("a", { href: "/contracts/webui/workspaces/tdp_ai/ai", "aria-current": "page", style: { padding: "7px 18px", borderRadius: 10, textDecoration: "none", fontSize: 13, fontWeight: 600, background: "#edf4e5", color: "#526e3d" }, children: "\u6B63\u5F0F\u7814\u5224" }),
-      /* @__PURE__ */ jsx("a", { href: "/contracts/webui/workspaces/tdp_ai/ai-demo", "aria-current": void 0, style: { padding: "7px 18px", borderRadius: 10, textDecoration: "none", fontSize: 13, fontWeight: 600, background: "transparent", color: C.textMuted }, children: "\u6F14\u793A\u5E73\u53F0" })
+    /* @__PURE__ */ jsxs("nav", { "aria-label": ui("\u7814\u5224\u73AF\u5883\u5207\u6362"), style: { display: "flex", gap: 8, padding: "12px 24px", borderBottom: `1px solid ${C.border}`, background: C.panel }, children: [
+      /* @__PURE__ */ jsx("a", { href: "/contracts/webui/workspaces/tdp_ai/ai", "aria-current": "page", style: { padding: "7px 18px", borderRadius: 10, textDecoration: "none", fontSize: 13, fontWeight: 600, background: "#edf4e5", color: "#526e3d" }, children: ui("\u6B63\u5F0F\u7814\u5224") }),
+      /* @__PURE__ */ jsx("a", { href: "/contracts/webui/workspaces/tdp_ai/ai-demo", "aria-current": void 0, style: { padding: "7px 18px", borderRadius: 10, textDecoration: "none", fontSize: 13, fontWeight: 600, background: "transparent", color: C.textMuted }, children: ui("\u6F14\u793A\u5E73\u53F0") })
     ] }),
     /* @__PURE__ */ jsxs("header", { style: topbarStyle, children: [
       /* @__PURE__ */ jsxs("div", { style: brandStyle, children: [
         /* @__PURE__ */ jsxs("div", { style: { position: "relative" }, children: [
-          /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u66F4\u6362 Logo", title: "\u70B9\u51FB\u66F4\u6362 Logo", onClick: brandLogo.chooseLogo, style: brandLogoStyle, children: brandLogo.logo ? /* @__PURE__ */ jsx("img", { src: brandLogo.logo, alt: "\u5DE5\u4F5C\u53F0 Logo", style: { maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: "contain" } }) : /* @__PURE__ */ jsx("img", { "data-scene-logo": "review", src: "/api/scenes/assistant/logos/review.svg", alt: "\u6001\u52BF\u611F\u77E5 AI \u7814\u5224 Logo", style: { width: 48, height: 48, objectFit: "contain" } }) }),
+          /* @__PURE__ */ jsx("button", { type: "button", "aria-label": ui("\u66F4\u6362 Logo"), title: ui("\u70B9\u51FB\u66F4\u6362 Logo"), onClick: brandLogo.chooseLogo, style: brandLogoStyle, children: brandLogo.logo ? /* @__PURE__ */ jsx("img", { src: brandLogo.logo, alt: "\u5DE5\u4F5C\u53F0 Logo", style: { maxWidth: isMobile ? 160 : 220, height: isMobile ? 24 : 28, objectFit: "contain" } }) : /* @__PURE__ */ jsx("img", { "data-scene-logo": "review", src: "/api/scenes/assistant/logos/review.svg", alt: "\u6001\u52BF\u611F\u77E5 AI \u7814\u5224 Logo", style: { width: 48, height: 48, objectFit: "contain" } }) }),
           /* @__PURE__ */ jsx("input", { ref: brandLogo.inputRef, type: "file", accept: "image/png,image/jpeg,image/webp,image/svg+xml", onChange: brandLogo.onLogoChange, style: { display: "none" } }),
-          brandLogo.logo && /* @__PURE__ */ jsx("button", { type: "button", "aria-label": "\u6062\u590D\u9ED8\u8BA4 Logo", title: "\u6062\u590D\u9ED8\u8BA4 Logo", onClick: brandLogo.resetLogo, style: resetLogoButtonStyle, children: "\xD7" })
+          brandLogo.logo && /* @__PURE__ */ jsx("button", { type: "button", "aria-label": ui("\u6062\u590D\u9ED8\u8BA4 Logo"), title: ui("\u6062\u590D\u9ED8\u8BA4 Logo"), onClick: brandLogo.resetLogo, style: resetLogoButtonStyle, children: "\xD7" })
         ] }),
         /* @__PURE__ */ jsxs("div", { style: { minWidth: 0 }, children: [
-          /* @__PURE__ */ jsx("h1", { style: brandTitleStyle, children: /* @__PURE__ */ jsx("button", { type: "button", onClick: renamePlatform, title: "\u70B9\u51FB\u81EA\u5B9A\u4E49\u5E73\u53F0\u540D\u79F0", "aria-label": "\u4FEE\u6539\u5E73\u53F0\u540D\u79F0", style: { font: "inherit", color: "inherit", background: "none", border: 0, padding: 0, cursor: "pointer", textAlign: "left" }, children: brandName }) }),
-          /* @__PURE__ */ jsx("div", { style: { marginTop: 4, color: C.textDim, fontSize: 12, fontWeight: 600 }, children: "\u8BBE\u5907\u544A\u8B66\u6C47\u603B\u3001AI \u7814\u5224\u4E0E\u54CD\u5E94\u8054\u52A8" })
+          /* @__PURE__ */ jsx("h1", { style: brandTitleStyle, children: /* @__PURE__ */ jsx("button", { type: "button", onClick: renamePlatform, title: ui("\u70B9\u51FB\u81EA\u5B9A\u4E49\u5E73\u53F0\u540D\u79F0"), "aria-label": ui("\u4FEE\u6539\u5E73\u53F0\u540D\u79F0"), style: { font: "inherit", color: "inherit", background: "none", border: 0, padding: 0, cursor: "pointer", textAlign: "left" }, children: brandName === "AI \u7814\u5224\u5E73\u53F0" ? ui(brandName) : brandName }) }),
+          /* @__PURE__ */ jsx("div", { style: { marginTop: 4, color: C.textDim, fontSize: 12, fontWeight: 600 }, children: ui("\u8BBE\u5907\u544A\u8B66\u6C47\u603B\u3001AI \u7814\u5224\u4E0E\u54CD\u5E94\u8054\u52A8") })
         ] })
       ] }),
       /* @__PURE__ */ jsxs("div", { style: { display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", justifyContent: isMobile ? "flex-start" : "flex-end" }, children: [
         /* @__PURE__ */ jsxs("button", { type: "button", className: "review-atlas-entry", onClick: () => void askAlertAI(), style: { ...secondaryButton, color: "#526d42", borderColor: "#d8e4cc", background: "#f3f7ee" }, children: [
           /* @__PURE__ */ jsx(Icon, { name: "spark", size: 15 }),
-          "Atlas\u5FEB\u901F\u63A5\u5165\u4F7F\u7528"
+          ui("Atlas\u5FEB\u901F\u63A5\u5165\u4F7F\u7528")
         ] }),
         /* @__PURE__ */ jsxs("span", { className: "review-sync-chip", style: chipStyle, children: [
           /* @__PURE__ */ jsx("span", { style: { ...statusDotStyle, background: error ? C.red : loading ? C.orange : C.green } }),
-          syncText
+          ui(syncText)
         ] }),
         /* @__PURE__ */ jsxs("span", { className: "review-time-chip", style: chipStyle, children: [
           /* @__PURE__ */ jsx(Icon, { name: "clock", size: 16 }),
-          error || fmtTime(updatedAt)
+          displayError || fmtTime(updatedAt)
         ] }),
-        /* @__PURE__ */ jsxs("button", { type: "button", className: "review-refresh", title: "\u7ACB\u5373\u5237\u65B0", onClick: () => void loadDashboard(), style: primaryButton, children: [
+        /* @__PURE__ */ jsxs("button", { type: "button", className: "review-refresh", title: ui("\u7ACB\u5373\u5237\u65B0"), onClick: () => void loadDashboard(), style: primaryButton, children: [
           /* @__PURE__ */ jsx(Icon, { name: "refresh", size: 16 }),
-          loading ? "\u5237\u65B0\u4E2D" : "\u5237\u65B0"
+          ui(loading ? "\u5237\u65B0\u4E2D" : "\u5237\u65B0")
         ] })
       ] })
     ] }),
     /* @__PURE__ */ jsx("div", { style: { display: "grid", gridTemplateColumns: "minmax(0, 1fr)", gap: 16, padding: isMobile ? 12 : "20px 28px 32px", alignItems: "start", minHeight: "calc(100vh - 68px)" }, children: /* @__PURE__ */ jsxs("main", { className: "dt-dashboard-main", style: { display: "grid", gap: 14, minWidth: 0 }, children: [
       /* @__PURE__ */ jsx("section", { style: { padding: 0 }, children: /* @__PURE__ */ jsxs("div", { "data-tdp-controls": true, style: { display: "grid", gridTemplateColumns: isMobile ? "minmax(0, 1fr)" : isCompact ? "repeat(2, minmax(0, 1fr))" : "1.05fr .8fr .95fr 1fr 1.15fr", gap: 12, alignItems: "stretch" }, children: [
         /* @__PURE__ */ jsxs("div", { style: { ...syncFieldStyle, position: "relative", padding: 0 }, children: [
-          /* @__PURE__ */ jsxs("button", { type: "button", "aria-label": "\u65F6\u95F4\u8303\u56F4", "aria-expanded": timePickerOpen, onClick: () => {
+          /* @__PURE__ */ jsxs("button", { type: "button", "aria-label": ui("\u65F6\u95F4\u8303\u56F4"), "aria-expanded": timePickerOpen, onClick: () => {
             setDraftStart(customStart);
             setDraftEnd(customEnd);
             setTimePickerOpen((open) => !open);
           }, style: { width: "100%", height: "100%", minHeight: 58, border: "none", background: "transparent", color: C.text, textAlign: "left", cursor: "pointer", padding: "10px 12px" }, children: [
-            /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: "\u65F6\u95F4\u8303\u56F4" }),
+            /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: ui("\u65F6\u95F4\u8303\u56F4") }),
             /* @__PURE__ */ jsxs("span", { style: syncValueStyle, children: [
-              /* @__PURE__ */ jsx("span", { children: timeControlValue }),
+              /* @__PURE__ */ jsx("span", { children: ui(timeControlValue) }),
               /* @__PURE__ */ jsx("small", { children: "\u25BE" })
             ] })
           ] }),
           timePickerOpen && /* @__PURE__ */ jsxs("div", { style: { position: "absolute", right: isMobile ? "auto" : 0, left: isMobile ? 0 : "auto", top: "calc(100% + 8px)", zIndex: 80, width: isMobile ? "min(340px, calc(100vw - 42px))" : 360, boxSizing: "border-box", padding: 14, background: C.panel, border: `1px solid ${C.borderLight}`, borderRadius: 8, boxShadow: C.shadow }, children: [
-            /* @__PURE__ */ jsx("div", { style: { color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }, children: "\u5FEB\u6377\u65F6\u95F4" }),
+            /* @__PURE__ */ jsx("div", { style: { color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }, children: ui("\u5FEB\u6377\u65F6\u95F4") }),
             /* @__PURE__ */ jsx("div", { style: { display: "flex", flexWrap: "wrap", gap: 7, marginBottom: 13 }, children: TIME_PRESETS.map((item) => /* @__PURE__ */ jsx("button", { type: "button", onClick: () => {
               setMinutes(item.minutes);
               setTimeMode("preset");
               saveTimeSetting("preset", item.minutes, customStart, customEnd);
               setTimePickerOpen(false);
-            }, style: { padding: "7px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", background: timeMode === "preset" && minutes === item.minutes ? C.blueDark : C.panelSoft, color: timeMode === "preset" && minutes === item.minutes ? C.blueLight : C.textMid, border: `1px solid ${timeMode === "preset" && minutes === item.minutes ? C.blue : C.border}` }, children: item.label }, item.minutes)) }),
-            /* @__PURE__ */ jsx("div", { style: { color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }, children: "\u81EA\u5B9A\u4E49\u65F6\u95F4" }),
-            /* @__PURE__ */ jsx(DateTimeField, { label: "\u5F00\u59CB\u65F6\u95F4", value: draftStart, onChange: setDraftStart }),
-            /* @__PURE__ */ jsx("div", { style: { marginTop: 9 }, children: /* @__PURE__ */ jsx(DateTimeField, { label: "\u7ED3\u675F\u65F6\u95F4", value: draftEnd, onChange: setDraftEnd }) }),
+            }, style: { padding: "7px 10px", borderRadius: 6, fontSize: 11, cursor: "pointer", background: timeMode === "preset" && minutes === item.minutes ? C.blueDark : C.panelSoft, color: timeMode === "preset" && minutes === item.minutes ? C.blueLight : C.textMid, border: `1px solid ${timeMode === "preset" && minutes === item.minutes ? C.blue : C.border}` }, children: ui(item.label) }, item.minutes)) }),
+            /* @__PURE__ */ jsx("div", { style: { color: C.textMid, fontSize: 12, fontWeight: 650, marginBottom: 8 }, children: ui("\u81EA\u5B9A\u4E49\u65F6\u95F4") }),
+            /* @__PURE__ */ jsx(DateTimeField, { label: ui("\u5F00\u59CB\u65F6\u95F4"), value: draftStart, onChange: setDraftStart }),
+            /* @__PURE__ */ jsx("div", { style: { marginTop: 9 }, children: /* @__PURE__ */ jsx(DateTimeField, { label: ui("\u7ED3\u675F\u65F6\u95F4"), value: draftEnd, onChange: setDraftEnd }) }),
             /* @__PURE__ */ jsxs("div", { style: { display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 13 }, children: [
-              /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setTimePickerOpen(false), style: secondaryButton, children: "\u53D6\u6D88" }),
+              /* @__PURE__ */ jsx("button", { type: "button", onClick: () => setTimePickerOpen(false), style: secondaryButton, children: ui("\u53D6\u6D88") }),
               /* @__PURE__ */ jsx("button", { type: "button", onClick: () => {
                 const nextStart = draftStart;
                 const nextEnd = draftEnd;
@@ -1420,45 +1435,45 @@ function Page() {
                 setTimeMode("custom");
                 saveTimeSetting("custom", minutes, nextStart, nextEnd);
                 setTimePickerOpen(false);
-              }, style: primaryButton, children: "\u5E94\u7528" })
+              }, style: primaryButton, children: ui("\u5E94\u7528") })
             ] })
           ] })
         ] }),
         /* @__PURE__ */ jsxs("div", { style: syncFieldStyle, children: [
-          /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: "\u5237\u65B0\u9891\u7387" }),
-          /* @__PURE__ */ jsx(StyledSelect, { ariaLabel: "\u5237\u65B0\u9891\u7387", value: refreshMs, options: [{ value: 5e3, label: "5\u79D2" }, { value: 3e4, label: "30\u79D2" }, { value: 6e4, label: "1\u5206\u949F" }, { value: 0, label: "\u5DF2\u5173\u95ED" }], onChange: setRefreshMs, buttonStyle: { minHeight: 24, padding: 0, background: "transparent", border: "none", color: C.text, fontSize: 15, justifyContent: "space-between" } })
+          /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: ui("\u5237\u65B0\u9891\u7387") }),
+          /* @__PURE__ */ jsx(StyledSelect, { ariaLabel: ui("\u5237\u65B0\u9891\u7387"), value: refreshMs, options: [{ value: 5e3, label: "5\u79D2" }, { value: 3e4, label: "30\u79D2" }, { value: 6e4, label: "1\u5206\u949F" }, { value: 0, label: "\u5DF2\u5173\u95ED" }], onChange: setRefreshMs, buttonStyle: { minHeight: 24, padding: 0, background: "transparent", border: "none", color: C.text, fontSize: 15, justifyContent: "space-between" } })
         ] }),
-        /* @__PURE__ */ jsxs("button", { type: "button", role: "switch", "aria-label": "AI\u81EA\u52A8\u7814\u5224", "aria-checked": autoJudge, onClick: () => {
+        /* @__PURE__ */ jsxs("button", { type: "button", role: "switch", "aria-label": ui("AI\u81EA\u52A8\u7814\u5224"), "aria-checked": autoJudge, onClick: () => {
           const next = !autoJudge;
           setAutoJudge(next);
           localStorage.setItem("datang-ai-v2-auto", next ? "1" : "0");
         }, style: { ...syncFieldStyle, fontFamily: "inherit", flexDirection: "row", alignItems: "center", justifyContent: "space-between", color: C.text, cursor: "pointer" }, children: [
           /* @__PURE__ */ jsxs("span", { children: [
-            /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: "AI\u81EA\u52A8\u7814\u5224" }),
-            /* @__PURE__ */ jsx("span", { style: { color: autoJudge ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }, children: autoJudge ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED" })
+            /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: ui("AI\u81EA\u52A8\u7814\u5224") }),
+            /* @__PURE__ */ jsx("span", { style: { color: autoJudge ? C.blueLight : C.textDim, fontSize: 15, fontWeight: 700 }, children: ui(autoJudge ? "\u5DF2\u5F00\u542F" : "\u5DF2\u5173\u95ED") })
           ] }),
           /* @__PURE__ */ jsx("span", { style: { width: 48, height: 26, padding: 3, borderRadius: 999, background: autoJudge ? C.blue : C.borderLight, flex: "0 0 auto", display: "flex", justifyContent: autoJudge ? "flex-end" : "flex-start", transition: ".2s" }, children: /* @__PURE__ */ jsx("span", { style: { display: "block", width: 20, height: 20, borderRadius: "50%", background: "#fff", boxShadow: "0 3px 8px rgba(28,44,66,.18)" } }) })
         ] }),
         /* @__PURE__ */ jsx(CurrentModelCard, { model: currentModel }),
         /* @__PURE__ */ jsxs("div", { style: { ...syncFieldStyle, borderColor: error ? C.red : C.border }, children: [
-          /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: error ? "\u8FDE\u63A5\u5F02\u5E38" : "\u6700\u8FD1\u66F4\u65B0" }),
-          /* @__PURE__ */ jsx("span", { style: { color: error ? C.redLight : C.textMid, fontSize: 14, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, children: error || fmtTime(updatedAt) })
+          /* @__PURE__ */ jsx("span", { style: syncLabelStyle, children: ui(error ? "\u8FDE\u63A5\u5F02\u5E38" : "\u6700\u8FD1\u66F4\u65B0") }),
+          /* @__PURE__ */ jsx("span", { title: displayError || void 0, style: { color: error ? C.redLight : C.textMid, fontSize: 14, fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }, children: displayError || fmtTime(updatedAt) })
         ] })
       ] }) }),
       /* @__PURE__ */ jsx("section", { style: { display: "grid", gridTemplateColumns: isMobile ? "repeat(2, minmax(0, 1fr))" : isCompact ? "repeat(3, minmax(0, 1fr))" : "repeat(6, minmax(0, 1fr))", gap: 14 }, children: metricCards.map((card, index) => /* @__PURE__ */ jsxs("div", { className: "dt-metric", style: { ...metricStyle, animationDelay: index * 45 + "ms", background: index === 0 ? "var(--dt-accent-soft)" : C.panel }, children: [
         /* @__PURE__ */ jsxs("div", { style: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }, children: [
-          /* @__PURE__ */ jsx("div", { style: { ...labelStyle, color: C.textDim, fontWeight: 600 }, children: card.label }),
+          /* @__PURE__ */ jsx("div", { style: { ...labelStyle, color: C.textDim, fontWeight: 600 }, children: ui(card.label) }),
           /* @__PURE__ */ jsx("div", { style: { ...metricIconStyle, background: "transparent", color: index === 0 ? C.greenLight : C.textMuted }, children: /* @__PURE__ */ jsx(Icon, { name: card.icon, size: 17 }) })
         ] }),
         /* @__PURE__ */ jsxs("div", { style: { minWidth: 0 }, children: [
           /* @__PURE__ */ jsx("div", { style: metricValueStyle, children: String(card.value) }),
-          /* @__PURE__ */ jsx("div", { style: { ...hintStyle, marginTop: 7 }, children: card.hint })
+          /* @__PURE__ */ jsx("div", { style: { ...hintStyle, marginTop: 7 }, children: ui(card.hint) })
         ] })
       ] }, card.label)) }),
       /* @__PURE__ */ jsxs("section", { style: { padding: 0 }, children: [
         /* @__PURE__ */ jsxs("div", { style: sectionHeadStyle, children: [
           /* @__PURE__ */ jsxs("div", { children: [
-            /* @__PURE__ */ jsx("h2", { style: sectionTitleStyle, children: "\u5916\u7F51\u653B\u51FB\u8D8B\u52BF" }),
+            /* @__PURE__ */ jsx("h2", { style: sectionTitleStyle, children: ui("\u5916\u7F51\u653B\u51FB\u8D8B\u52BF") }),
             /* @__PURE__ */ jsxs("p", { style: sectionDescStyle, children: [
               fmtTime(tdp.start_time),
               " ~ ",
@@ -1467,14 +1482,14 @@ function Page() {
           ] }),
           /* @__PURE__ */ jsxs("div", { style: legendStyle, children: [
             /* @__PURE__ */ jsx("span", { style: { ...legendDotStyle, background: C.green } }),
-            "\u544A\u8B66\u6B21\u6570"
+            ui("\u544A\u8B66\u6B21\u6570")
           ] })
         ] }),
         /* @__PURE__ */ jsxs("div", { style: { display: "grid", gridTemplateColumns: isCompact ? "1fr" : "minmax(0, 1.8fr) minmax(330px, .82fr)", gap: 14, alignItems: "stretch" }, children: [
           /* @__PURE__ */ jsx("div", { style: { ...panelStyle, background: "linear-gradient(120deg, var(--dt-accent-soft), var(--dt-panel) 68%)", minWidth: 0, minHeight: 290, display: "grid", alignItems: "center", padding: "14px 10px", overflow: "hidden" }, children: /* @__PURE__ */ jsx(TrendChart, { trend }) }),
           /* @__PURE__ */ jsxs("div", { style: { ...panelStyle, minWidth: 0, padding: "18px 20px", boxSizing: "border-box" }, children: [
-            /* @__PURE__ */ jsx("div", { style: { marginBottom: 4, color: C.text, fontSize: 14, fontWeight: 800 }, children: "\u653B\u51FB\u7C7B\u578B\u5206\u5E03" }),
-            /* @__PURE__ */ jsx("div", { style: { marginBottom: 8, color: C.textMuted, fontSize: 11 }, children: "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u5185\u7684\u544A\u8B66\u5360\u6BD4" }),
+            /* @__PURE__ */ jsx("div", { style: { marginBottom: 4, color: C.text, fontSize: 14, fontWeight: 800 }, children: ui("\u653B\u51FB\u7C7B\u578B\u5206\u5E03") }),
+            /* @__PURE__ */ jsx("div", { style: { marginBottom: 8, color: C.textMuted, fontSize: 11 }, children: ui("\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u5185\u7684\u544A\u8B66\u5360\u6BD4") }),
             /* @__PURE__ */ jsx(AttackTypePie, { rows: tdp.rows })
           ] })
         ] })
@@ -1482,25 +1497,15 @@ function Page() {
       /* @__PURE__ */ jsxs("section", { style: { ...panelStyle, height: 782, minHeight: 782, maxHeight: 782, boxSizing: "border-box", padding: 0, overflow: "hidden", display: "flex", flexDirection: "column" }, children: [
         /* @__PURE__ */ jsxs("div", { style: { ...sectionHeadStyle, marginBottom: 0, padding: "20px 20px 14px", borderBottom: `1px solid ${C.border}`, flex: "0 0 auto" }, children: [
           /* @__PURE__ */ jsxs("div", { style: { minWidth: 0 }, children: [
-            /* @__PURE__ */ jsx("h2", { style: sectionTitleStyle, children: "\u544A\u8B66\u4E8B\u4EF6\u5217\u8868" }),
-            /* @__PURE__ */ jsxs("p", { style: sectionDescStyle, children: [
-              "\u5171 ",
-              rows.length,
-              " \u6761 \xB7 \u6BCF\u9875 ",
-              pageSize,
-              " \u6761 \xB7 \u7B2C ",
-              page,
-              "/",
-              pages,
-              " \u9875"
-            ] })
+            /* @__PURE__ */ jsx("h2", { style: sectionTitleStyle, children: ui("\u544A\u8B66\u4E8B\u4EF6\u5217\u8868") }),
+            /* @__PURE__ */ jsx("p", { style: sectionDescStyle, children: reviewEnglish() ? `${rows.length} alerts \xB7 ${pageSize} per page \xB7 Page ${page}/${pages}` : `\u5171 ${rows.length} \u6761 \xB7 \u6BCF\u9875 ${pageSize} \u6761 \xB7 \u7B2C ${page}/${pages} \u9875` })
           ] }),
           /* @__PURE__ */ jsxs("div", { style: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }, children: [
-            /* @__PURE__ */ jsx(MiniStat, { icon: "shield", label: "\u544A\u8B66\u5217\u8868", value: `${rows.length} \u4E2A\u7814\u5224\u4E8B\u4EF6` }),
-            /* @__PURE__ */ jsx(MiniStat, { icon: "bot", label: "AI\u7814\u5224", value: `${done} \u5DF2\u5B8C\u6210 / ${pending} \u8FDB\u884C\u4E2D` }),
+            /* @__PURE__ */ jsx(MiniStat, { icon: "shield", label: ui("\u544A\u8B66\u5217\u8868"), value: `${rows.length} \u4E2A\u7814\u5224\u4E8B\u4EF6` }),
+            /* @__PURE__ */ jsx(MiniStat, { icon: "bot", label: ui("AI\u7814\u5224"), value: `${done} \u5DF2\u5B8C\u6210 / ${pending} \u8FDB\u884C\u4E2D` }),
             /* @__PURE__ */ jsxs("button", { onClick: () => downloadCsv(rows), style: secondaryButton, children: [
               /* @__PURE__ */ jsx(Icon, { name: "download", size: 15 }),
-              "\u4E0B\u8F7D"
+              ui("\u4E0B\u8F7D")
             ] })
           ] })
         ] }),
@@ -1531,13 +1536,13 @@ function Page() {
                   severity
                 ] }) }),
                 /* @__PURE__ */ jsx("td", { style: { ...tdStyle, textAlign: "right", fontWeight: 750, color: row.count >= 50 ? C.redLight : C.text }, children: row.count }),
-                /* @__PURE__ */ jsx("td", { style: tdStyle, children: /* @__PURE__ */ jsx("button", { type: "button", onClick: () => void openDetail(row), className: "dt-detail-button", style: detailLinkStyle, children: "\u67E5\u770B\u8BE6\u60C5" }) })
+                /* @__PURE__ */ jsx("td", { style: tdStyle, children: /* @__PURE__ */ jsx("button", { type: "button", onClick: () => void openDetail(row), className: "dt-detail-button", style: detailLinkStyle, children: ui("\u67E5\u770B\u8BE6\u60C5") }) })
               ] }, rowKey(row));
             }),
             rows.length > 0 && Array.from({ length: Math.max(0, 10 - pageRows.length) }, (_, index) => /* @__PURE__ */ jsx("tr", { "aria-hidden": "true", style: { height: 58, background: (pageRows.length + index) % 2 ? C.rowAlt : "transparent" }, children: /* @__PURE__ */ jsx("td", { colSpan: 9, style: { ...tdStyle, color: "transparent" }, children: "\xA0" }) }, `empty-row-${index}`))
           ] })
         ] }) }),
-        !rows.length && /* @__PURE__ */ jsx("div", { style: { padding: 38, textAlign: "center", color: C.textMuted }, children: loading ? "\u6B63\u5728\u83B7\u53D6\u8BBE\u5907\u544A\u8B66..." : error || "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u6682\u65E0\u6570\u636E" }),
+        !rows.length && /* @__PURE__ */ jsx("div", { style: { padding: 38, textAlign: "center", color: C.textMuted }, children: loading ? "\u6B63\u5728\u83B7\u53D6\u8BBE\u5907\u544A\u8B66..." : displayError || "\u5F53\u524D\u65F6\u95F4\u8303\u56F4\u6682\u65E0\u6570\u636E" }),
         /* @__PURE__ */ jsx("div", { style: { position: "relative", zIndex: 10, display: "flex", justifyContent: "flex-end", alignItems: "center", height: 64, minHeight: 64, maxHeight: 64, boxSizing: "border-box", padding: "10px 18px", borderTop: `1px solid ${C.border}`, background: C.panel, flex: "0 0 auto", overflow: "visible" }, children: /* @__PURE__ */ jsx(Pager, { current: page, total: pages, totalItems: rows.length, pageSize, onChange: setPage, onPageSizeChange: (nextPageSize) => {
           setPageSize(nextPageSize);
           setPage(1);
@@ -1691,7 +1696,7 @@ function ReviewReport({ row, compact }) {
         ] })
       ] })
     ] }),
-    /* @__PURE__ */ jsx("div", { role: "tablist", "aria-label": "\u7814\u5224\u8BE6\u60C5\u5206\u7C7B", className: "dt-report-tabs", children: [["overview", "\u7814\u5224\u6982\u89C8"], ["evidence", "\u6D41\u91CF\u8BC1\u636E"], ["additional", "\u8865\u5145\u4FE1\u606F"]].map(([id, label]) => /* @__PURE__ */ jsx("button", { id: "review-tab-" + id, type: "button", role: "tab", "aria-selected": tab === id, "aria-controls": "review-panel-" + id, onClick: () => {
+    /* @__PURE__ */ jsx("div", { role: "tablist", "aria-label": ui("\u7814\u5224\u8BE6\u60C5\u5206\u7C7B"), className: "dt-report-tabs", children: [["overview", "\u7814\u5224\u6982\u89C8"], ["evidence", "\u6D41\u91CF\u8BC1\u636E"], ["additional", "\u8865\u5145\u4FE1\u606F"]].map(([id, label]) => /* @__PURE__ */ jsx("button", { id: "review-tab-" + id, type: "button", role: "tab", "aria-selected": tab === id, "aria-controls": "review-panel-" + id, onClick: () => {
       setTab(id);
       scrollRef.current?.scrollTo(0, 0);
     }, style: { minHeight: 44, padding: "0 3px", marginRight: 24, background: "transparent", border: "none", borderBottom: "2px solid " + (tab === id ? C.text : "transparent"), color: tab === id ? C.text : C.textDim, cursor: "pointer", fontSize: 13, fontWeight: tab === id ? 700 : 500 }, children: label }, id)) }),
@@ -1699,25 +1704,25 @@ function ReviewReport({ row, compact }) {
       tab === "overview" && /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsxs("div", { className: "dt-report-columns", children: [
           /* @__PURE__ */ jsxs("section", { style: { minWidth: 0 }, children: [
-            /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: "\u5206\u6790\u6458\u8981" }),
+            /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: ui("\u5206\u6790\u6458\u8981") }),
             /* @__PURE__ */ jsx("p", { style: { margin: "12px 0 0", fontSize: 14, color: C.textMid, lineHeight: 1.9, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }, children: row.ai_summary || row.ai_progress || row.ai_error || "\u5F53\u524D\u6682\u65E0\u7814\u5224\u7ED3\u8BBA\u3002" }),
-            /* @__PURE__ */ jsx(EvidenceSection, { title: "\u6838\u5FC3\u7814\u5224\u4F9D\u636E", items: row.ai_evidence, tone: "support" })
+            /* @__PURE__ */ jsx(EvidenceSection, { title: ui("\u6838\u5FC3\u7814\u5224\u4F9D\u636E"), items: row.ai_evidence, tone: "support" })
           ] }),
           /* @__PURE__ */ jsxs("section", { style: { minWidth: 0, paddingLeft: compact ? 0 : 24, borderLeft: compact ? "none" : "1px solid " + C.border }, children: [
-            /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: "\u5904\u7F6E\u5EFA\u8BAE" }),
+            /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: ui("\u5904\u7F6E\u5EFA\u8BAE") }),
             /* @__PURE__ */ jsx("p", { style: { margin: "12px 0 0", fontSize: 14, color: C.textMid, lineHeight: 1.9, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }, children: row.ai_recommended_action || "\u8BF7\u6839\u636E\u7814\u5224\u8BC1\u636E\u8FDB\u884C\u4EBA\u5DE5\u590D\u6838\u540E\u5904\u7F6E\u3002" }),
-            /* @__PURE__ */ jsx(EvidenceSection, { title: "\u6838\u67E5\u4E0E\u5904\u7F6E\u6E05\u5355", items: row.ai_human_checkpoints, tone: "check" })
+            /* @__PURE__ */ jsx(EvidenceSection, { title: ui("\u6838\u67E5\u4E0E\u5904\u7F6E\u6E05\u5355"), items: row.ai_human_checkpoints, tone: "check" })
           ] })
         ] }),
         /* @__PURE__ */ jsxs("section", { className: "dt-report-section", children: [
-          /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: "\u544A\u8B66\u4FE1\u606F" }),
+          /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: ui("\u544A\u8B66\u4FE1\u606F") }),
           /* @__PURE__ */ jsx(OverviewTable, { row, paths })
         ] }),
         /* @__PURE__ */ jsxs("section", { className: "dt-report-section", children: [
-          /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: "\u8BC1\u636E\u8BC4\u4F30" }),
+          /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: ui("\u8BC1\u636E\u8BC4\u4F30") }),
           /* @__PURE__ */ jsxs("div", { className: "dt-report-columns", children: [
-            /* @__PURE__ */ jsx(EvidenceSection, { title: "\u652F\u6301\u8BC1\u636E", items: row.ai_supporting_evidence, tone: "support" }),
-            /* @__PURE__ */ jsx(EvidenceSection, { title: "\u53CD\u8BC1\u4E0E\u7591\u70B9", items: row.ai_contradicting_evidence, tone: "oppose" })
+            /* @__PURE__ */ jsx(EvidenceSection, { title: ui("\u652F\u6301\u8BC1\u636E"), items: row.ai_supporting_evidence, tone: "support" }),
+            /* @__PURE__ */ jsx(EvidenceSection, { title: ui("\u53CD\u8BC1\u4E0E\u7591\u70B9"), items: row.ai_contradicting_evidence, tone: "oppose" })
           ] })
         ] })
       ] }),
@@ -1733,12 +1738,12 @@ function ReviewReport({ row, compact }) {
       ] }),
       tab === "additional" && /* @__PURE__ */ jsxs(Fragment2, { children: [
         /* @__PURE__ */ jsxs("section", { children: [
-          /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: "\u6838\u9A8C\u8303\u56F4" }),
-          /* @__PURE__ */ jsx(EvidenceSection, { title: "\u7F3A\u5931\u4FE1\u606F\u4E0E\u53D6\u8BC1\u9650\u5236", items: row.ai_missing_information, tone: "missing" })
+          /* @__PURE__ */ jsx("h2", { className: "dt-report-heading", children: ui("\u6838\u9A8C\u8303\u56F4") }),
+          /* @__PURE__ */ jsx(EvidenceSection, { title: ui("\u7F3A\u5931\u4FE1\u606F\u4E0E\u53D6\u8BC1\u9650\u5236"), items: row.ai_missing_information, tone: "missing" })
         ] }),
         /* @__PURE__ */ jsx("section", { className: "dt-report-section", children: /* @__PURE__ */ jsxs("div", { className: "dt-report-columns", children: [
-          /* @__PURE__ */ jsx(EvidenceSection, { title: "\u53D7\u5F71\u54CD\u76EE\u6807", items: row.ai_affected_targets, tone: "target" }),
-          /* @__PURE__ */ jsx(EvidenceSection, { title: "\u5173\u952E IOC", items: row.ai_key_iocs, tone: "ioc" })
+          /* @__PURE__ */ jsx(EvidenceSection, { title: ui("\u53D7\u5F71\u54CD\u76EE\u6807"), items: row.ai_affected_targets, tone: "target" }),
+          /* @__PURE__ */ jsx(EvidenceSection, { title: ui("\u5173\u952E IOC"), items: row.ai_key_iocs, tone: "ioc" })
         ] }) })
       ] })
     ] }, tab)

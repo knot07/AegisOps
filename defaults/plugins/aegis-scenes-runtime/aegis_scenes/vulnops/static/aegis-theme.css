@@ -57,12 +57,69 @@ tr[data-vuln-theme=medium]{--risk-accent:#a08f47!important;--risk-soft:#faf6e6!i
 /* Vivid emblems over soft, quiet surfaces. */
 .asset-card[data-asset-theme] .asset-icon,.linked-asset .linked-asset-icon,.detail-field .linked-asset .linked-asset-icon{color:var(--asset-icon-color);background:linear-gradient(140deg,#fff,color-mix(in srgb,var(--asset-icon-color) 13%,white));border-color:color-mix(in srgb,var(--asset-icon-color) 24%,white);box-shadow:0 3px 9px color-mix(in srgb,var(--asset-icon-color) 9%,transparent)}
 .asset-system-icon{stroke-width:1.7}
-.scene-tab[data-view=overview]>.icon{color:#00a578}.scene-tab[data-view=ledger]>.icon{color:#2474ef}.scene-tab[data-view=remediation]>.icon{color:#e99a08}.scene-tab[data-view=assets]>.icon{color:#7c3aed}.scene-tab[data-view=audit]>.icon{color:#009bc1}
 .metric:nth-child(1) .metric-label .icon{color:#2474ef}.metric:nth-child(2) .metric-label .icon{color:#ed7844}.metric:nth-child(3) .metric-label .icon{color:#e99a08}.metric:nth-child(4) .metric-label .icon{color:#00a578}
 .attachment .icon{color:#2474ef}.asset-search-input>.icon,.search>.icon{color:#00a578}
 /* Clear navigation hierarchy: neutral icons and a bold active label. */
 .scene-tab{font-weight:400}
 .scene-tab.active,.scene-tab[aria-pressed=true]{font-weight:650}
-.scene-tab[data-view=overview]>.icon{color:#00a578}
-.scene-tab:is([data-view=ledger],[data-view=remediation],[data-view=assets],[data-view=audit])>.icon{color:#88948b}
-.scene-tab:is([data-view=ledger],[data-view=remediation],[data-view=assets],[data-view=audit])[aria-pressed=true]>.icon{color:currentColor}
+.scene-tab > .icon {color:currentColor}
+
+/* Let the register use the space previously occupied by the scene footer. */
+#content:has(.ledger-scroll){padding-bottom:16px}
+#content .ledger-scroll{height:clamp(680px,70dvh,820px)}
+@media(max-width:600px){#content .ledger-scroll{height:500px}}
+
+/* Wide, independent plot and text axes keep numbers legible without squeezing the graph. */
+.vuln-trend-panel,.risk-overview-panel{--trend-found:#5a9514;--trend-closed:#bb5c00;--trend-border:var(--skin-border,var(--night-border,#dae2de));--trend-text:var(--skin-text,var(--night-text,#25342d));--trend-meta:var(--skin-secondary,var(--night-secondary,#53635e));--trend-surface:var(--skin-surface,var(--night-surface,#fff));--trend-raised:var(--skin-raised,var(--night-raised,#f3f7ed))}
+/* Saturated series keep the chart distinct in every skin; dashed still means closed. */
+html[data-theme-skin=blue] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#2563eb}
+html[data-theme-skin=teal] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#008371}
+html[data-theme-skin=violet] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#7c3aed}
+html[data-theme-skin=sand] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#b35d0f;--trend-closed:#00815e}
+html.dark :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#a5e95d;--trend-closed:#ffb347}
+html.dark[data-theme-skin=blue] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#65adff}
+html.dark[data-theme-skin=teal] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#4fe2b4}
+html.dark[data-theme-skin=violet] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#c697ff}
+html.dark[data-theme-skin=sand] :is(.vuln-trend-panel,.risk-overview-panel){--trend-found:#ffbe5f;--trend-closed:#54e2a4}
+.vuln-trend-panel .legend .trend-legend-found{background:var(--trend-found)}
+.vuln-trend-panel .legend .trend-legend-closed{background:var(--trend-closed)}
+.vuln-trend-panel .vuln-trend-layout{gap:clamp(16px,2.3vw,34px)}
+.vuln-trend-chart{min-width:0}
+.vuln-wave{box-sizing:border-box;width:100%;padding:14px 24px 28px 34px}
+.vuln-wave-plot{position:relative;height:clamp(210px,27dvh,300px)}
+.vuln-wave .vuln-wave-plot>svg,.vuln-wave .vuln-wave-series>svg{display:block;width:100%;max-width:none;height:100%;overflow:visible}
+.vuln-wave-series{position:absolute;inset:0}
+.vuln-wave-empty{position:absolute;inset:0;display:grid;place-items:center;color:var(--trend-meta);font-size:13px}
+@media(prefers-reduced-motion:no-preference){
+ .vuln-wave-series{animation:vuln-wave-reveal .9s cubic-bezier(.22,.61,.36,1) backwards}
+ .vuln-wave-series[data-reveal-pending]{animation-play-state:paused}
+}
+@keyframes vuln-wave-reveal{
+ from{clip-path:inset(-6px calc(100% + 6px) -6px -6px)}
+ to{clip-path:inset(-6px)}
+}
+.vuln-wave-grid{stroke:var(--trend-border);stroke-width:1;stroke-dasharray:4 5;fill:none}
+.vuln-wave-line{fill:none;stroke-linecap:round;stroke-linejoin:round;stroke-width:3}
+.vuln-wave .is-found{--series:var(--trend-found);stroke:var(--series)}
+.vuln-wave .is-closed{--series:var(--trend-closed);stroke:var(--series);stroke-dasharray:5 5}
+.vuln-wave-y,.vuln-wave-x{position:absolute;color:var(--trend-meta);font-size:11px;font-weight:500;font-variant-numeric:tabular-nums;line-height:1;white-space:nowrap}
+.vuln-wave-y{right:calc(100% + 9px);top:var(--at);transform:translateY(-50%)}
+.vuln-wave-x{left:var(--at);top:calc(100% + 12px);transform:translateX(-50%)}
+.vuln-wave-dot{position:absolute;left:var(--x);top:var(--y);width:7px;height:7px;transform:translate(-50%,-50%);border:1px solid var(--trend-surface);border-radius:50%;background:var(--series)}
+.vuln-wave-dot.is-closed{width:6px;height:6px}
+.vuln-wave-dot:hover{z-index:1;outline:2px solid var(--series);outline-offset:1px}
+.risk-overview-panel{display:flex;flex-direction:column}
+.risk-overview-panel .risk-body{flex:1}.risk-overview-panel .risk-row{font-size:12px}.risk-overview-panel .risk-row small{font-size:11px}
+.risk-remediation{margin:0 18px 18px;padding:15px 16px;border:1px solid var(--trend-border);border-radius:12px;background:var(--trend-raised);color:var(--trend-text)}
+.risk-remediation-head{display:flex;justify-content:space-between;align-items:center;gap:10px}
+.risk-remediation-head h3{font-size:14px;line-height:1.4;margin:0 0 2px;font-weight:650}
+.risk-remediation-head span,.risk-remediation-facts dt{font-size:11px;color:var(--trend-meta);line-height:1.4}
+.risk-remediation-head strong{color:var(--trend-found);font-size:21px;font-weight:700;font-variant-numeric:tabular-nums}
+.risk-remediation-meter{appearance:none;display:block;width:100%;height:7px;margin:12px 0;background:var(--trend-border);border:0;border-radius:8px;overflow:hidden}
+.risk-remediation-meter::-webkit-progress-bar{background:var(--trend-border)}
+.risk-remediation-meter::-webkit-progress-value{background:var(--trend-found);border-radius:8px}
+.risk-remediation-meter::-moz-progress-bar{background:var(--trend-found);border-radius:8px}
+.risk-remediation-facts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px;margin:0}
+.risk-remediation-facts>div{padding:7px 8px;background:var(--trend-surface);border-radius:7px}
+.risk-remediation-facts dd{margin:2px 0 0;font-size:15px;font-weight:650;font-variant-numeric:tabular-nums}
+@media(max-width:600px){.vuln-wave{padding-inline:27px 20px}.vuln-wave-plot{height:182px}.vuln-wave-x:not(.is-mobile){display:none}.risk-remediation{margin:0 12px 12px;padding:12px}.risk-remediation-facts>div{padding:6px}}

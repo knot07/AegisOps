@@ -66,7 +66,6 @@ html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] .yushu-
 html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] .yushu-task-overview>div>div:first-child{background:var(--skin-raised)!important;border-color:var(--skin-border)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] .yushu-task-overview>div:not(:last-child) svg{color:var(--skin-accent)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) [data-yushu-page=task] [class~="bg-gray-100"]>button[class~="bg-white"]{background:var(--skin-selected)!important;color:var(--skin-accent)!important}
-html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-task-filters button[type=submit]{background:var(--skin-button-background)!important;color:var(--skin-buttonText)!important;border:1px solid var(--skin-outline)}
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-date-trigger{background:linear-gradient(120deg,var(--skin-surface),var(--skin-raised))!important;color:var(--skin-secondary)!important;border-color:var(--skin-control)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) .aegis-date-trigger>svg{color:var(--skin-accent)!important}
 html[data-theme-skin]:not([data-theme-skin=sage]) :is(.aegis-date-trigger:hover,.aegis-date-trigger[aria-expanded=true]){border-color:var(--skin-outline)!important;box-shadow:0 0 0 3px color-mix(in srgb,var(--skin-outline) 14%,transparent)!important}

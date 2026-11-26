@@ -1,3 +1,4 @@
+import WorkspaceGlyph from '@/components/common/WorkspaceGlyph';
 import ThemeSkinPicker from '@/components/common/ThemeSkinPicker';
 import { Suspense, lazy, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import type { ChangeEvent, ComponentType, ReactNode } from 'react';
@@ -10,11 +11,9 @@ import {
   Monitor,
   Moon,
   RotateCcw,
-  Save,
   ShieldCheck,
   Sun,
   TextCursorInput,
-  Upload,
   type LucideIcon,
 } from 'lucide-react';
 import RoutePageSkeleton from '@/components/common/RoutePageSkeleton';
@@ -298,9 +297,9 @@ function PreferencesPanel() {
                 type="button"
                 onClick={() => void handleSaveDisplayName()}
                 disabled={savingDisplayName || !displayNameChanged}
-                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
+                className="aegis-bright-action inline-flex h-9 flex-1 items-center justify-center gap-2 px-3 text-sm font-semibold"
               >
-                <Save aria-hidden="true" className="h-4 w-4" />
+                <WorkspaceGlyph kind="save" size="xs" />
                 {t('saveDisplayName')}
               </button>
               <button
@@ -343,9 +342,9 @@ function PreferencesPanel() {
                 type="button"
                 onClick={() => faviconInputRef.current?.click()}
                 disabled={savingFavicon}
-                className="inline-flex h-9 flex-1 items-center justify-center gap-2 rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
+                className="aegis-bright-action inline-flex h-9 flex-1 items-center justify-center gap-2 px-3 text-sm font-semibold"
               >
-                <Upload aria-hidden="true" className="h-4 w-4" />
+                <WorkspaceGlyph kind="upload" size="xs" />
                 {t('uploadFavicon')}
               </button>
               <button

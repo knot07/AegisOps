@@ -309,6 +309,29 @@ describe('Layout chrome', () => {
     await waitFor(() => expect(activeProbe().textContent).toBe('/contracts/webui/workspaces/soc_ui'));
   });
 
+  it('opens the incident register from the scene picker instead of restoring the last case', async () => {
+    const incident = sceneWorkspace('incident_response', '应急响应');
+    const detail = `${incident.route}/${incident.defaultPageId}?case=IR-example`;
+    localStorage.setItem('aegisops_layout_workspace_paths', JSON.stringify({ 'scene:incident_response': detail }));
+    useWebUIContractPages.mockReturnValue({
+      pages: [], workspaces: [incident], loading: false, error: null, refetch: vi.fn(),
+    });
+    const openIncident = () => {
+      fireEvent.click(screen.getByRole('button', { name: '场景中心·切换工作空间' }));
+      fireEvent.click(screen.getByRole('menuitemradio', { name: '应急响应' }));
+    };
+
+    const view = renderAt('/');
+    openIncident();
+    await waitFor(() => expect(activeProbe().textContent).toBe(incident.route));
+    view.unmount();
+
+    renderAt(detail);
+    expect(activeProbe().textContent).toBe(detail);
+    openIncident();
+    await waitFor(() => expect(activeProbe().textContent).toBe(incident.route));
+  });
+
   it('separates code audit from SOC alert operations and restores its original page routes', async () => {
     const page = (workspaceId: string, id: string, title: string) => ({
       id, title, route: `/contracts/webui/${id}`, icon: 'ShieldCheck', order: 10, enabled: true,
@@ -741,7 +764,7 @@ describe('Layout chrome', () => {
     renderAt('/');
     fireEvent.click(screen.getByRole('button', { name: 'systemConfiguration' }));
     fireEvent.click(screen.getByRole('button', { name: 'logout' }));
-    await waitFor(() => expect(confirmMock).toHaveBeenCalled());
+    await waitFor(() => expect(confirmMock).toHaveBeenCalledWith(expect.objectContaining({ variant: 'logout' })));
     await waitFor(() => expect(logout).toHaveBeenCalled());
   });
 

@@ -8,7 +8,7 @@ export function StatusBadge({ status }: { status: TaskStatus }) {
   const { t } = useTranslation('task');
   const cfg = STATUS_CONFIG[status] ?? { icon: 'paused', color: 'text-ui-secondary' };
   return (
-    <span className={`inline-flex items-center gap-1 text-sm font-medium ${cfg.color}`}>
+    <span data-task-status={status} className={`inline-flex items-center gap-1 text-sm font-medium ${cfg.color}`}>
       <WorkspaceGlyph kind={cfg.icon} size="micro" /> {t(`status.${status}`, { defaultValue: status })}
     </span>
   );
@@ -16,14 +16,14 @@ export function StatusBadge({ status }: { status: TaskStatus }) {
 
 export function ExecutionTriggerBadge({ type }: { type: ExecutionTriggerType }) {
   const { t } = useTranslation('task');
-  return <span className="inline-flex rounded-full bg-ui-hover px-2 py-0.5 text-xs text-ui-secondary">{t(`executionTrigger.${type}`, { defaultValue: t('executionTrigger.unknown') })}</span>;
+  return <span data-task-trigger={type} className="inline-flex rounded-full bg-ui-hover px-2 py-0.5 text-xs text-ui-secondary">{t(`executionTrigger.${type}`, { defaultValue: t('executionTrigger.unknown') })}</span>;
 }
 
 export function PriorityBadge({ priority }: { priority: string }) {
   const { t } = useTranslation('task');
   const c = PRIORITY_CONFIG[priority] ?? { color: 'bg-gray-100 text-gray-600' };
   return (
-    <span className={`px-2 py-0.5 rounded-full text-xs font-medium ${c.color}`}>
+    <span data-task-priority={priority} className={`px-2 py-0.5 rounded-full text-xs font-medium ${c.color}`}>
       {t(`priority.${priority}`, { defaultValue: priority })}
     </span>
   );
@@ -33,7 +33,7 @@ export function SourceBadge({ sourceType }: { sourceType: string }) {
   const { t } = useTranslation('task');
   const c = SOURCE_CONFIG[sourceType] ?? { color: 'bg-gray-100 text-gray-600' };
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${c.color}`}>
+    <span data-task-source={sourceType} className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${c.color}`}>
       {t(`source.${sourceType}`, { defaultValue: sourceType })}
     </span>
   );
@@ -41,8 +41,8 @@ export function SourceBadge({ sourceType }: { sourceType: string }) {
 
 export function ModeBadge({ mode, agent }: { mode: ExecutionMode; agent: string }) {
   if (mode === 'workflow')
-    return <span className="inline-flex items-center gap-1 text-xs text-purple-600"><WorkspaceGlyph kind="flow" size="micro" /> Workflow</span>;
-  return <span className="inline-flex items-center gap-1 text-xs text-slate-600"><WorkspaceGlyph kind="agent" size="micro" /> {agent}</span>;
+    return <span data-task-mode="workflow" className="inline-flex items-center gap-1 text-xs text-purple-600"><WorkspaceGlyph kind="flow" size="micro" /> Workflow</span>;
+  return <span data-task-mode="agent" className="inline-flex items-center gap-1 text-xs text-slate-600"><WorkspaceGlyph kind="agent" size="micro" /> {agent}</span>;
 }
 
 export function ActionButton({ icon, label, onClick, color }: {

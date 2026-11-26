@@ -107,7 +107,7 @@ export default function AdminUsersPage() {
   return (
     <div data-yushu-page="adminusers" className="space-y-6">
       <form className="yushu-account-filters" onSubmit={event => { event.preventDefault(); setFilters({ keyword, status }); setPage(1); }}>
-        <label><span>{label('账号搜索', 'Search accounts')}</span><div className="yushu-search-field"><WorkspaceGlyph kind="search" size="xs" /><input value={keyword} onChange={event => setKeyword(event.target.value)} placeholder={label('输入账号名称', 'Enter account name')} /></div></label>
+        <label><span>{label('账号搜索', 'Search accounts')}</span><div className="yushu-search-field"><WorkspaceGlyph kind="search" size="xs" className="glyph-search-field" /><input value={keyword} onChange={event => setKeyword(event.target.value)} placeholder={label('输入账号名称', 'Enter account name')} /></div></label>
         <label><span>{label('账号状态', 'Account status')}</span><select value={status} onChange={event => setStatus(event.target.value)}><option value="all">{label('全部状态', 'All statuses')}</option><option value="active">{label('正常', 'Active')}</option><option value="disabled">{label('已停用', 'Disabled')}</option></select></label>
         <div className="yushu-filter-actions"><button type="submit" className="yushu-primary"><WorkspaceGlyph kind="search" size="xs" />{label('查询', 'Search')}</button><button type="button" onClick={() => { setKeyword(''); setStatus('all'); setFilters({ keyword: '', status: 'all' }); }}><WorkspaceGlyph kind="reset" size="xs" />{label('重置', 'Reset')}</button></div>
       </form>

@@ -1,0 +1,95 @@
+/* The provider palette is local to the wizard/drawer. The app-wide theme is not changed. */
+.aegis-provider-sheet,.aegis-default-model-dialog,.aegis-model-choice-group,.aegis-provider-check {
+  --brand-surface:rgb(var(--ui-surface));
+  --brand-label:rgb(var(--ui-text));
+  --brand-muted:rgb(var(--ui-secondary));
+  --brand-ink:color-mix(in srgb,var(--brand-accent) 56%,var(--brand-label));
+  --brand-edge:color-mix(in srgb,var(--brand-accent) 25%,rgb(var(--ui-border)));
+  --brand-tint:color-mix(in srgb,var(--brand-accent) 11%,var(--brand-surface));
+  --brand-fill:color-mix(in srgb,var(--brand-accent) 22%,var(--brand-surface));
+}
+html .aegis-provider-sheet:not(.has-provider-brand) { background:rgb(var(--ui-surface)) !important; }
+html .aegis-provider-sheet.has-provider-brand {
+  background:radial-gradient(ellipse at 5% 0%,var(--brand-tint),transparent 82%),var(--brand-surface) !important;
+  border-color:var(--brand-edge) !important;
+  --aegis-primary-background:var(--brand-fill);
+  --aegis-primary-hover-background:color-mix(in srgb,var(--brand-accent) 30%,var(--brand-surface));
+  --aegis-primary-border:var(--brand-edge);
+  --aegis-primary-text:var(--brand-label);
+}
+/* Match the sheet chrome, including the header's more specific dark default. */
+html .yushu-entity-sheet.aegis-provider-sheet.has-provider-brand > :is(.yushu-creation-header,.yushu-creation-footer) {
+  background:linear-gradient(115deg,color-mix(in srgb,var(--brand-accent) 19%,var(--brand-surface)),var(--brand-surface)) !important;
+  border-color:var(--brand-edge) !important;
+}
+html .yushu-entity-sheet.aegis-provider-sheet.has-provider-brand > .yushu-creation-body {
+  background:color-mix(in srgb,var(--brand-accent) 4%,var(--brand-surface)) !important;
+}
+html .aegis-provider-sheet .yushu-creation-icon { border:0;background:transparent;padding:0;box-shadow:none; }
+.aegis-provider-sheet .yushu-creation-icon>.aegis-module-emblem { width:34px;height:34px; }
+html .aegis-provider-sheet.has-provider-brand :is(input,select):focus { border-color:var(--brand-accent) !important;box-shadow:0 0 0 3px var(--brand-tint) !important; }
+.aegis-provider-check { background:var(--brand-fill);color:var(--brand-label);border:1px solid var(--brand-edge); }
+.aegis-provider-check:hover:not(:disabled) { background:color-mix(in srgb,var(--brand-accent) 30%,var(--brand-surface)); }
+.aegis-provider-check:focus-visible { outline:2px solid var(--brand-ink);outline-offset:2px; }
+html .aegis-default-model-dialog { background:var(--brand-surface);max-width:min(42rem,calc(100vw - 2rem)); }
+html .aegis-default-model-dialog>div:first-child { border-color:rgb(var(--ui-border)); }
+.aegis-model-choice-provider { display:flex;align-items:center;gap:8px;background:var(--brand-tint);color:var(--brand-ink);border-color:var(--brand-edge); }
+html .aegis-model-choice-group .aegis-model-choice-row { background:var(--brand-surface);border-color:rgb(var(--ui-border)); }
+html .aegis-model-choice-group .aegis-model-choice-row:hover { background:var(--brand-tint); }
+html .aegis-model-choice-group .aegis-model-choice-row[data-model-selected=true] { background:var(--brand-tint);box-shadow:inset 3px 0 var(--brand-accent); }
+.aegis-model-choice-row .aegis-model-choice-name { color:var(--brand-label); }
+.aegis-model-choice-row span[title] { color:var(--brand-muted); }
+.aegis-model-choice-row .lucide-check { color:var(--brand-ink); }
+
+/* Compact icon-only actions use theme ink rather than washed-out card text. */
+.aegis-model-icon-action {
+  --model-action-ink:color-mix(in srgb,var(--skin-accent,rgb(var(--ui-focus))) 45%,rgb(var(--ui-text)));
+  display:inline-grid;place-items:center;flex:none;width:32px;height:32px;
+  color:var(--model-action-ink);background:rgb(var(--ui-subtle));
+  border:1px solid rgb(var(--ui-border));border-radius:9px;
+  transition:background-color .16s ease-out,border-color .16s ease-out;
+}
+.aegis-model-icon-action:hover:not(:disabled) { background:rgb(var(--ui-hover));border-color:rgb(var(--ui-control)); }
+.aegis-model-icon-action:focus-visible { outline:2px solid rgb(var(--ui-focus));outline-offset:2px; }
+html .aegis-model-icon-action .workspace-glyph[data-tone] { background:none;--glyph-ink:var(--model-action-ink);--glyph-pigment:var(--model-action-ink); }
+.aegis-model-icon-action .workspace-glyph>svg { width:18px;height:18px; }
+@media (prefers-reduced-motion:reduce) { .aegis-model-icon-action { transition:none; } }
+
+/* Inventory rows are shared by provider creation and editing. The model tint
+   is mixed into the actual scheme surface so it never restores a white card. */
+.aegis-model-discovery .aegis-discovery-row {
+  --inventory-surface:rgb(var(--ui-surface));
+  --inventory-fill:color-mix(in srgb,var(--brand-accent) 8%,var(--inventory-surface));
+  --inventory-hover:color-mix(in srgb,var(--brand-accent) 14%,var(--inventory-surface));
+  --inventory-delete:#9c3b42;
+  --inventory-switch:color-mix(in srgb,var(--brand-accent) 62%,#171e28);
+  --inventory-thumb:#fff;
+  min-height:60px;padding:10px 12px;border-radius:12px;
+  border:1px solid color-mix(in srgb,var(--brand-accent) 23%,rgb(var(--ui-border)));
+  background:var(--inventory-fill);
+  color:rgb(var(--ui-text));
+}
+html.dark .aegis-model-discovery .aegis-discovery-row {
+  --inventory-delete:#ffb7bd;
+  --inventory-switch:color-mix(in srgb,var(--brand-accent) 62%,#fff);
+  --inventory-thumb:#18232f;
+}
+.aegis-model-discovery .aegis-discovery-row:is(:hover,:focus-within) { background:var(--inventory-hover); }
+.aegis-model-discovery .aegis-discovery-name { font-size:13px;line-height:1.6;color:rgb(var(--ui-text)); }
+.aegis-discovery-row .aegis-model-brand-icon { width:30px;height:30px;padding:6px; }
+.aegis-discovery-row .aegis-discovery-delete { --model-action-ink:var(--inventory-delete); }
+.aegis-model-icon-action:disabled,.aegis-discovery-toggle:disabled { cursor:not-allowed;opacity:.65; }
+.aegis-discovery-toggle {
+  position:relative;flex:none;width:36px;height:20px;margin-inline-start:3px;
+  border:1px solid rgb(var(--ui-control));border-radius:999px;
+  background:rgb(var(--ui-subtle));
+}
+.aegis-discovery-toggle[aria-checked=true] { background:var(--inventory-switch);border-color:var(--inventory-switch); }
+.aegis-discovery-toggle:focus-visible { outline:2px solid rgb(var(--ui-focus));outline-offset:2px; }
+.aegis-discovery-toggle-thumb {
+  position:absolute;top:2px;inset-inline-start:2px;width:14px;height:14px;
+  border-radius:50%;background:rgb(var(--ui-secondary));
+  transition:inset-inline-start .16s ease-out;
+}
+.aegis-discovery-toggle[aria-checked=true]>.aegis-discovery-toggle-thumb { inset-inline-start:calc(100% - 16px);background:var(--inventory-thumb); }
+@media (prefers-reduced-motion:reduce) { .aegis-discovery-toggle-thumb { transition:none; } }

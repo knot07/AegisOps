@@ -1,4 +1,7 @@
 'use strict';
+const sceneEnglish=()=>document.documentElement.lang.startsWith("en");
+const sceneTranslations={"新增按发现日期 · 关闭按当前关闭日期":"Discoveries use the discovery date · closures use the latest close date","登记漏洞后，自动展示发现与关闭趋势":"Add records to see discoveries and closures","暂无趋势数据":"No trend data","天":"days","项":"items","日均":"Daily average","峰值":"Peak","新增":"Discovered","持续跟踪风险流入与整改产出":"Track discoveries and remediation over time","漏洞发现与关闭趋势":"Discovery and closure trend","新增漏洞总量":"Vulnerabilities discovered","整改进度":"Remediation progress","运营总览":"Overview","漏洞台账":"Vulnerability register","资产目录":"Asset inventory","操作审计":"Audit log","漏洞运营功能":"Vulnerability operations","安全工作空间":"Security workspace","掌握风险全貌，让每一项整改都有进展。":"Track risk and remediation progress.","OVERVIEW / 风险与整改":"OVERVIEW / RISK & REMEDIATION","REGISTER / 风险档案":"REGISTER / RISK RECORDS","ASSETS / 风险归属":"ASSETS / RISK OWNERSHIP","AUDIT / 操作留痕":"AUDIT / HISTORY","导出台账":"Export register","登记漏洞":"Register vulnerability","累计登记漏洞":"Registered vulnerabilities","未关闭高危 / 严重":"Open high / critical","优先推进高风险漏洞整改":"Prioritize high-risk remediation","逾期未关闭":"Overdue and open","等待安全复测":"Awaiting retest","整改已提交，等待验证结果":"Remediation submitted, awaiting verification","需要关注":"Needs attention","当前无逾期":"No overdue records","查看逾期":"View overdue","当前风险分布":"Current risk distribution","仅统计未关闭漏洞":"Open vulnerabilities only","未关闭漏洞":"Open vulnerabilities","累计关闭率":"Closure rate","平均关闭周期":"Average close time","全部日期":"All dates","不限":"Any date","按发现日期筛选":"Filter by discovery date","今天":"Today","近 7 天":"Last 7 days","近 30 天":"Last 30 days","开始日期":"Start date","结束日期":"End date","选择日期":"Choose date","清除":"Clear","上个月":"Previous month","下个月":"Next month","应用筛选":"Apply filters","北京时间 · 起止日期均包含当天，留空表示不限。":"Beijing time · Both endpoints are inclusive. Leave empty for no limit.","取消":"Cancel","关闭":"Close","保存":"Save","严重":"Critical","高危":"High","中危":"Medium","低危":"Low","待分派":"Unassigned","待整改":"Pending remediation","整改中":"Remediating","待复测":"Awaiting retest","已整改的历史漏洞":"Remediated history","所有风险等级":"All risk levels","全部风险等级":"All risk levels","全部责任人":"All owners","查询":"Search","重置":"Reset","导出当前结果":"Export results","全部记录":"All records","仅逾期":"Overdue only","分配给我":"Assigned to me","搜索漏洞名称、编号、资产或 CVE":"Search name, ID, asset or CVE","漏洞名称 / 编号":"Vulnerability / ID","风险等级":"Severity","关联资产":"Related asset","责任人":"Owner","状态":"Status","整改期限":"Due date","操作":"Actions","查看详情":"View details","暂无符合条件的漏洞":"No matching vulnerabilities","上一页":"Previous","下一页":"Next","添加资产":"Add asset","搜索资产":"Search assets","搜索资产名称、域名 / IP、所属部门":"Search name, domain / IP or department","将每一项风险关联到明确的业务系统与所属部门。":"Link each risk to its business system and department.","保留关键操作与处理说明，让漏洞整改过程可追溯。":"Keep an auditable history of key actions and decisions.","刷新记录":"Refresh records","时间 / 操作人":"Time / Actor","关联漏洞":"Related vulnerability","记录内容":"Record","重新加载":"Reload","加载失败":"Loading failed"};
+const ui=label=>sceneEnglish()?(sceneTranslations[label]||label):label;
 const $ = (s, root = document) => root.querySelector(s);
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const roles = {admin:'系统管理员',security:'安全运营',owner:'整改负责人',viewer:'只读观察员'};
@@ -55,7 +58,7 @@ const paths = {
  plus:'M12 5v14M5 12h14', search:'M21 21l-5-5M18 10a8 8 0 1 1-16 0 8 8 0 0 1 16 0',
  download:'M12 3v12m-5-5 5 5 5-5M3 15v6h18v-6',
  arrow:'M5 12h14m-5-5 5 5-5 5', alert:'M12 3l10 18H2zM12 9v5m0 3h.01',
- calendar:'M4 5h16v16H4zM4 10h16M8 3v4M16 3v4', logout:'M9 21H3V3h6m5 4 5 5-5 5M8 12h13',
+ calendar:'M4 5h16v16H4zM4 10h16M8 3v4M16 3v4',left:'m14 6-6 6 6 6',right:'m10 6 6 6-6 6',down:'m6 10 6 6 6-6', logout:'M9 21H3V3h6m5 4 5 5-5 5M8 12h13',
  refresh:'M20 7v5h-5M4 17v-5h5M6 6a8 8 0 0 1 13 1M5 17a8 8 0 0 0 13 1',
  file:'M14 2H4v20h16V8zM14 2v6h6M8 13h8M8 17h6', lock:'M5 10h14v11H5zM8 10V6a4 4 0 0 1 8 0v4'
 };
@@ -66,6 +69,52 @@ let assetSearch='', me=null, users=[], assets=[], view=new URLSearchParams(locat
 const canManage=()=>['admin','security'].includes(me?.role);
 const canWrite=()=>me?.role!=='viewer';
 const localDate=()=>new Intl.DateTimeFormat('sv-SE',{timeZone:'Asia/Shanghai'}).format(new Date());
+let overviewDates={};
+const dateParams=dates=>new URLSearchParams(dates).toString();
+const dateLabel=dates=>dates.discovered_from===dates.discovered_to?(dates.discovered_from||ui('全部日期')):`${dates.discovered_from||ui('不限')} 至 ${dates.discovered_to||ui('不限')}`;
+const overviewDateFields={discovered_from:'开始日期',discovered_to:'结束日期'};
+const calendarDate=value=>new Date(`${value}T00:00:00Z`);
+const calendarKey=date=>date.toISOString().slice(0,10);
+const calendarLabel=new Intl.DateTimeFormat('zh-CN',{dateStyle:'full',timeZone:'UTC'});
+const calendarMonth=new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'long',timeZone:'UTC'});
+function overviewDateForm(){
+ const fields=Object.entries(overviewDateFields).map(([key,label])=>`<div class="overview-date-field"><span id="${key}-label">${ui(label)}</span><input type="hidden" name="${key}" value="${esc(overviewDates[key]||'')}"><button type="button" class="date-field-trigger" data-date-field="${key}" aria-expanded="false" aria-controls="overview-calendar" aria-labelledby="${key}-label ${key}-value">${icon('calendar')}<span id="${key}-value"></span>${icon('down')}</button></div>`).join('');
+ modal(ui('按发现日期筛选'),`<div class="overview-date-shortcuts"><button type="button" class="btn" data-overview-days="1">${ui("今天")}</button><button type="button" class="btn" data-overview-days="7">${ui("近 7 天")}</button><button type="button" class="btn" data-overview-days="30">${ui("近 30 天")}</button><button type="button" class="btn" data-overview-days="all">${ui("全部日期")}</button></div><div class="overview-date-fields">${fields}</div><section id="overview-calendar" class="overview-calendar" aria-label="${ui("选择日期")}" hidden></section>`, 'overview-date-form',ui('应用筛选'),ui('北京时间 · 起止日期均包含当天，留空表示不限。'));
+ const form=$('#overview-date-form'),panel=form.querySelector('#overview-calendar');
+ const triggers=[...form.querySelectorAll('[data-date-field]')];
+ let key='',cursor=localDate();
+ const sync=()=>{for(const trigger of triggers){const name=trigger.dataset.dateField;trigger.querySelector(`#${name}-value`).textContent=form.elements[name].value||ui('不限');trigger.setAttribute('aria-expanded',String(key===name));}};
+ const close=(focus=false)=>{const trigger=triggers.find(x=>x.dataset.dateField===key);key='';panel.hidden=true;sync();if(focus)trigger?.focus();};
+ function draw(focusSelector){
+  const max=localDate(),month=calendarDate(cursor);month.setUTCDate(1);
+  const start=month.toISOString().slice(0,7),gap=(month.getUTCDay()+6)%7,next=new Date(month);next.setUTCMonth(next.getUTCMonth()+1);
+  const count=Math.round((next-month)/86400000),selected=form.elements[key].value;
+  const cells=Array.from({length:count},(_,i)=>{const value=`${start}-${String(i+1).padStart(2,'0')}`;return `<button type="button" class="date-cell" data-date-value="${value}" aria-label="${esc(calendarLabel.format(calendarDate(value)))}" aria-pressed="${value===selected}" tabindex="${value===cursor?0:-1}"${value===max?' aria-current="date"':''}${value>max?' disabled':''}>${i+1}</button>`;}).join('');
+  panel.innerHTML=`<div class="overview-calendar-header"><div><small>${sceneEnglish()?'Select '+ui(overviewDateFields[key]):'选择'+overviewDateFields[key]}</small><strong aria-live="polite">${(sceneEnglish()?new Intl.DateTimeFormat('en-US',{year:'numeric',month:'long',timeZone:'UTC'}):calendarMonth).format(month)}</strong></div><div class="overview-calendar-nav"><button type="button" aria-label="${ui("上个月")}" data-date-month="-1"${start==='0001-01'?' disabled':''}>${icon('left')}</button><button type="button" aria-label="${ui("下个月")}" data-date-month="1"${start>=max.slice(0,7)?' disabled':''}>${icon('right')}</button></div></div><div class="overview-calendar-grid" role="group" aria-label="日期">${(sceneEnglish()?['Mon','Tue','Wed','Thu','Fri','Sat','Sun']:[...'一二三四五六日']).map(d=>`<span aria-hidden="true">${d}</span>`).join('')}${'<span aria-hidden="true"></span>'.repeat(gap)}${cells}</div><div class="overview-calendar-footer"><button type="button" data-date-value="">${ui("清除")}</button><button type="button" data-date-value="${max}">${ui("今天")}</button></div>`;
+  if(focusSelector) (panel.querySelector(`${focusSelector}:not(:disabled)`)||panel.querySelector('.date-cell[tabindex="0"]'))?.focus();
+ }
+ function moveMonth(delta){const day=calendarDate(cursor),index=day.getUTCDate();day.setUTCDate(1);day.setUTCMonth(day.getUTCMonth()+delta);const end=new Date(day);end.setUTCMonth(end.getUTCMonth()+1,0);day.setUTCDate(Math.min(index,end.getUTCDate()));return calendarKey(day);}
+ for(const trigger of triggers)trigger.addEventListener('click',()=>{const name=trigger.dataset.dateField;if(key===name)return close();key=name;cursor=form.elements[key].value||localDate();panel.hidden=false;sync();draw('.date-cell[tabindex="0"]');});
+ panel.addEventListener('click',e=>{
+  const control=e.target.closest('button');if(!control)return;
+  if(control.hasAttribute('data-date-value')){form.elements[key].value=control.dataset.dateValue;close(true);}
+  else if(control.dataset.dateMonth){cursor=moveMonth(Number(control.dataset.dateMonth));if(cursor>localDate())cursor=localDate();draw(`[data-date-month="${control.dataset.dateMonth}"]`);}
+ });
+ form.addEventListener('keydown',e=>{
+  if(!key)return;
+  if(e.key==='Escape'){e.preventDefault();e.stopPropagation();close(true);return;}
+  if(!e.target.matches('.date-cell'))return;
+  const d=calendarDate(e.target.dataset.dateValue),weekday=(d.getUTCDay()+6)%7;
+  if(d.getUTCFullYear()===1&&d.getUTCMonth()===0&&e.key==='PageUp')return;
+  const offsets={ArrowLeft:-1,ArrowRight:1,ArrowUp:-7,ArrowDown:7,Home:-weekday,End:6-weekday};
+  if(e.key==='PageUp'||e.key==='PageDown')cursor=moveMonth(e.key==='PageUp'?-1:1);
+  else if(Object.hasOwn(offsets,e.key)){d.setUTCDate(d.getUTCDate()+offsets[e.key]);cursor=calendarKey(d);}
+  else return;
+  e.preventDefault();cursor<'0001-01-01'?'0001-01-01':cursor>localDate()?localDate():cursor;draw('.date-cell[tabindex="0"]');
+ });
+ form.addEventListener('input',()=>close());
+ sync();
+}
 const stamp=v=>v?new Date(v).toLocaleString('zh-CN',{hour12:false,timeZone:'Asia/Shanghai'}):'—';
 function toast(message){$('#toast').textContent=message;$('#toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('show'),3500);}
 async function api(url, options={}){
@@ -79,15 +128,15 @@ async function api(url, options={}){
  }
  return res.json();
 }
-function level(v){return `<span class="badge severity-${esc(v)}"><i></i>${levels[v]||esc(v)}</span>`;}
-function state(v){return `<span class="badge status-${esc(v)}">${states[v]||esc(v)}</span>`;}
+function level(v){return `<span class="badge severity-${esc(v)}"><i></i>${levels[v]?ui(levels[v]):esc(v)}</span>`;}
+function state(v){return `<span class="badge status-${esc(v)}">${states[v]?ui(states[v]):esc(v)}</span>`;}
 function ownerCell(v){const name=v.owner_name;return `<span class="owner-label ${name?'':'is-unassigned'}"><span class="owner-monogram" aria-hidden="true">${name?esc([...name][0].toUpperCase()):'—'}</span><span>${esc(name||'待分派')}</span></span>`;}
 function due(v){return `<div class="deadline ${v.overdue_days?'is-overdue':''}">${v.overdue_days?`<span class="deadline-alert">逾期 ${v.overdue_days} 天</span>`:''}<span class="deadline-date"><svg aria-hidden="true" viewBox="0 0 16 16"><rect x="2.5" y="3.5" width="11" height="10" rx="2"/><path d="M5 2v3m6-3v3M3 7h10"/></svg>${esc(v.due_date||'未设置期限')}</span>${v.status==='closed'?'<small>已完成复测</small>':''}</div>`;}
 
 function options(values, selected, placeholder){return `${placeholder?`<option value="">${placeholder}</option>`:''}`+Object.entries(values).map(([v,t])=>`<option value="${esc(v)}" ${String(v)===String(selected)?'selected':''}>${esc(t)}</option>`).join('');}
 function ownerOptions(selected, optional=true){return options(Object.fromEntries(users.filter(u=>u.active&&u.role!=='viewer').map(u=>[u.id,`${u.name} · ${u.department||roles[u.role]}`])),selected,optional?'暂不分派':null);}
 function empty(title,text,button=''){return `<div class="empty"><div class="empty-icon">${icon('shield')}</div><h3>${esc(title)}</h3><p>${esc(text)}</p>${button}</div>`;}
-function btn(label,action,primary=false,ic='',extra=''){return `<button class="btn ${primary?'primary':''}" data-action="${action}" ${extra}>${ic?icon(ic):''}${label}</button>`;}
+function btn(label,action,primary=false,ic='',extra=''){return `<button class="btn ${primary?'primary':''}" data-action="${action}" ${extra}>${ic?icon(ic):''}${ui(label)}</button>`;}
 function auth(setup){
  $('#app').innerHTML=`<div class="auth"><aside class="auth-aside">${brand}<div class="auth-message"><div class="eyebrow">VISIBILITY. OWNERSHIP. RESOLUTION.</div><h1>看见每一处风险，<br>推动每一次<em>修复。</em></h1><p>从发现到复测，用一份清晰的漏洞台账，连接资产、责任人与整改进展。</p><div class="auth-flow"><span>发现风险</span>→<span>跟进整改</span>→<span>复测闭环</span></div></div><footer>VULNOPS / SECURITY OPERATIONS</footer></aside><main class="auth-form-wrap"><form class="auth-form" id="auth-form" data-setup="${setup}"><div class="eyebrow">${setup?'GET STARTED':'WELCOME BACK'}</div><h2>${setup?'创建你的运营空间':'登录工作空间'}</h2><p class="subtitle">${setup?'首次使用，请设置管理员账号。':'继续跟进漏洞与整改进度。'}</p><div class="error" role="alert"></div>${setup?'<label class="field">管理员姓名<input name="name" autocomplete="name" required maxlength="60" placeholder="你的姓名"></label>':''}<label class="field">账号<input name="username" autocomplete="username" required maxlength="60" placeholder="输入账号"></label><label class="field">密码<input name="password" type="password" autocomplete="${setup?'new-password':'current-password'}" required ${setup?'minlength="10"':''} maxlength="128" placeholder="${setup?'设置至少 10 位密码':'输入密码'}"></label><button class="btn primary" type="submit">${setup?'创建并进入系统':'登录系统'} ${icon('arrow')}</button><div class="auth-foot">${setup?'管理员可创建安全运营、整改负责人和只读账号。':'账号由系统管理员分配 · 会话有效期 8 小时'}</div></form></main></div>`;
  $('#auth-form input')?.focus();
@@ -96,9 +145,25 @@ async function boot(){try{try{me=await api('/me');await start();}catch{auth(fals
 async function start(){[users,assets]=await Promise.all([api('/users'),api('/assets')]);view=new URLSearchParams(location.search).get('view')||'overview';filter={};page=1;shell();await render();const vid=Number(new URLSearchParams(location.search).get('vulnerability'));if(vid>0)await showDetail(vid);}
 function shell(){
  const nav=[['overview','grid','运营总览'],['ledger','shield','漏洞台账'],['assets','box','资产目录'],...(canManage()?[['audit','clock','操作审计']]:[])];
- $('#app').innerHTML=`<div class="shell"><aside class="sidebar">${brand}<div class="nav-label">WORKSPACE</div><nav>${nav.map(([id,ic,title])=>`<button class="nav-btn ${view===id?'active':''}" data-view="${id}" title="${title}">${icon(ic)}<span>${title}</span></button>`).join('')}</nav><div class="sidebar-bottom"><div class="workspace-note"><strong><i class="status-dot"></i>风险有记录，整改有闭环</strong>发现 → 分派 → 整改 → 复测<br>所有进展，都有迹可循。</div></div></aside><main class="main"><header class="topbar"><div class="crumb">安全工作空间 <span>/</span> <span id="crumb-title">运营总览</span></div><div class="profile"><div class="avatar">${esc(me.name.slice(0,1))}</div><div class="profile-text">${esc(me.name)}<small>${roles[me.role]}</small></div></div></header><div class="scene-tab-wrap"><nav class="scene-tabs" aria-label="漏洞运营功能">${nav.map(([id,ic,title])=>`<button type="button" class="scene-tab ${view===id?'active':''}" data-view="${id}" aria-pressed="${view===id}">${icon(ic)}<span>${title}</span></button>`).join('')}</nav></div><div class="content" id="content"></div></main></div>`;
+ $('#app').innerHTML=`<div class="shell"><aside class="sidebar">${brand}<div class="nav-label">WORKSPACE</div><nav>${nav.map(([id,ic,title])=>`<button class="nav-btn ${view===id?'active':''}" data-view="${id}" title="${ui(title)}">${icon(ic)}<span>${ui(title)}</span></button>`).join('')}</nav><div class="sidebar-bottom"><div class="workspace-note"><strong><i class="status-dot"></i>风险有记录，整改有闭环</strong>发现 → 分派 → 整改 → 复测<br>所有进展，都有迹可循。</div></div></aside><main class="main"><header class="topbar"><div class="crumb">安全工作空间 <span>/</span> <span id="crumb-title">${ui("运营总览")}</span></div><div class="profile"><div class="avatar">${esc(me.name.slice(0,1))}</div><div class="profile-text">${esc(me.name)}<small>${ui(roles[me.role])}</small></div></div></header><div class="scene-tab-wrap"><nav class="scene-tabs" aria-label="${ui("漏洞运营功能")}">${nav.map(([id,ic,title])=>`<button type="button" class="scene-tab ${view===id?'active':''}" data-view="${id}" aria-pressed="${view===id}">${icon(ic)}<span>${ui(title)}</span></button>`).join('')}</nav></div><div class="content" id="content"></div></main></div>`;
 }
-function head(title,sub,actions='',eyebrow='SECURITY OPERATIONS'){return `<div class="page-head"><div class="scene-page-brand"><img class="scene-page-logo" src="/api/scenes/assistant/logos/vulnops.svg" alt="漏洞运营 Logo"><div><div class="eyebrow">${eyebrow}</div><h1>${title}</h1><div class="subtitle">${sub}</div></div></div><div class="actions">${actions}</div></div>`;}
+function head(title,sub,actions='',eyebrow='SECURITY OPERATIONS'){return `<div class="page-head"><div class="scene-page-brand"><img class="scene-page-logo" src="/api/scenes/assistant/logos/vulnops.svg" alt="漏洞运营 Logo"><div><div class="eyebrow">${ui(eyebrow)}</div><h1>${ui(title)}</h1><div class="subtitle">${ui(sub)}</div></div></div><div class="actions">${actions}</div></div>`;}
+let trendRevealObserver;
+function observeTrendReveal(series){
+ trendRevealObserver?.disconnect();
+ trendRevealObserver=null;
+ if(!series||!('IntersectionObserver' in window))return;
+ // Pause at the first frame until the plot scrolls into view, including in embedded scenes.
+ series.dataset.revealPending='';
+ const observer=new IntersectionObserver(([entry])=>{
+  if(!entry.isIntersecting)return;
+  delete series.dataset.revealPending;
+  observer.disconnect();
+  if(trendRevealObserver===observer)trendRevealObserver=null;
+ });
+ trendRevealObserver=observer;
+ observer.observe(series);
+}
 async function render(){
  if(view==='users')view='overview';
  const token=++loadVersion;
@@ -107,17 +172,18 @@ async function render(){
  parent.postMessage({type:'aegis:vuln-view',view},location.origin);
 
  const names={overview:'运营总览',ledger:'漏洞台账',remediation:'漏洞台账',assets:'资产目录',audit:'操作审计'};
- $('#crumb-title').textContent=names[view];
+ $('#crumb-title').textContent=ui(names[view]);
  try{
   let html='';
-  if(view==='overview') html=overview(await api('/dashboard'));
+  if(view==='overview'){const q=dateParams(overviewDates);html=overview(await api('/dashboard'+(q?'?'+q:'')));}
   if(['ledger','remediation'].includes(view)) html=ledger(await api('/vulnerabilities?'+query()));
   if(view==='assets'){assets=await api('/assets?q='+encodeURIComponent(assetSearch));html=assetPage();}
   if(view==='audit') html=auditView(await api('/audit?page='+auditPage));
   if(token!==loadVersion)return;
-  $('#content').innerHTML=html+`<div class="footer-note"><span>VulnOps · 漏洞运营系统</span><span>统计范围：${me.role==='owner'?'分配给我的漏洞':'全部可访问漏洞'} · 业务日期按北京时间 · ${localDate()}</span></div>`;
+  $('#content').innerHTML=html+(['ledger','remediation'].includes(view)?'':`<div class="footer-note"><span>VulnOps · 漏洞运营系统</span><span>统计范围：${me.role==='owner'?'分配给我的漏洞':'全部可访问漏洞'} · 业务日期按北京时间 · ${localDate()}</span></div>`);
+  observeTrendReveal($('#content .vuln-wave-series'));
   if(view==='assets'&&assetMode==='topology')window.mountAssetTopology($('#asset-topology'),assets);
- }catch(e){if(token===loadVersion&&$('#content'))$('#content').innerHTML=empty('加载失败',e.message,btn('重新加载','refresh',true));}
+ }catch(e){if(token===loadVersion&&$('#content')){observeTrendReveal(null);$('#content').innerHTML=empty('加载失败',e.message,btn('重新加载','refresh',true));}}
 }
 const overviewMetricArt = {
  shield:'<path class="metric-emblem-fill" d="M12 3 20 6v5c0 5-3.5 8-8 10-4.5-2-8-5-8-10V6Z"/><path d="M9 9h6m-6 3h6m-6 3h3"/>',
@@ -126,31 +192,86 @@ const overviewMetricArt = {
  check:'<path class="metric-emblem-fill" d="M7 5.5h10a2 2 0 0 1 2 2V19a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V7.5a2 2 0 0 1 2-2Z"/><rect class="metric-emblem-fill" x="9" y="3" width="6" height="5" rx="1.4"/><path d="m8.5 14 2.4 2.5 4.6-5"/>',
 };
 function overviewMetricIcon(kind){return `<span class="metric-emblem" data-metric-icon="${kind}" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="var(--metric-ink)" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" focusable="false">${overviewMetricArt[kind]}</svg></span>`;}
-function metric(label,value,foot,ic,go,featured=false){return `<button class="metric ${featured?'featured':''}" data-go="${go}"><div class="metric-label">${label}${overviewMetricIcon(ic)}</div><div class="metric-value">${value}<span>项</span></div><div class="metric-foot">${foot}</div></button>`;}
-function trendChart(trend){
- const max=Math.max(2,...trend.flatMap(d=>[d.new,d.closed]));
- const total=trend.reduce((n,d)=>n+d.new,0),peak=Math.max(0,...trend.map(d=>d.new)),average=trend.length?total/trend.length:0;
- const xs=i=>38+i*(470/Math.max(1,trend.length-1)),ys=n=>164-n/max*136;
- const points=field=>trend.map((d,i)=>`${i?'L':'M'}${xs(i)} ${ys(d[field])}`).join(' ');
- return `<div class="vuln-trend-layout"><div class="vuln-trend-summary"><span>新增漏洞总量</span><strong>${total}<small>项</small></strong><div class="vuln-trend-facts"><div>峰值<b>${peak}</b></div><div>日均<b>${average.toFixed(1)}</b></div></div><span class="vuln-trend-period"><i></i>最近 14 天</span></div><div class="chart vuln-trend-chart">${trend.some(d=>d.new||d.closed)?`<svg viewBox="0 0 540 200" role="img" aria-label="最近14天新增漏洞与关闭漏洞数量"><title>近14天新增 ${total} 项，单日峰值 ${peak} 项</title><defs><linearGradient id="vuln-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#a7da64" stop-opacity=".28"/><stop offset="100%" stop-color="#a7da64" stop-opacity="0"/></linearGradient></defs>${[0,1,2].map(n=>`<path class="grid" d="M30 ${ys(max*n/2)}H520"/><text x="8" y="${ys(max*n/2)+4}">${Number((max*n/2).toFixed(1))}</text>`).join('')}<path d="${points('new')} L${xs(trend.length-1)} 164 L38 164 Z" fill="url(#vuln-area)"/><path d="${points('new')}" fill="none" stroke="#91bf56" stroke-width="2.5"/><path d="${points('closed')}" fill="none" stroke="#425a39" stroke-width="2" stroke-dasharray="4 3"/>${trend.map((d,i)=>`<g><title>${d.date}：新增 ${d.new}，关闭 ${d.closed}</title><circle cx="${xs(i)}" cy="${ys(d.new)}" r="3" fill="#a7da64" stroke="#fff"/><circle cx="${xs(i)}" cy="${ys(d.closed)}" r="2" fill="#425a39"/>${i%3===0||i===trend.length-1?`<text x="${xs(i)}" y="188" text-anchor="middle">${d.date.slice(5)}</text>`:''}</g>`).join('')}</svg>`:'<div class="trend-empty">暂无趋势数据<small>登记漏洞后，自动展示发现与关闭趋势</small></div>'}<div class="chart-caption"><span>新增按发现日期 · 关闭按当前关闭日期</span></div></div></div>`;
+function metric(label,value,foot,ic,go,featured=false){return `<button class="metric ${featured?'featured':''}" data-go="${go}"><div class="metric-label">${label}${overviewMetricIcon(ic)}</div><div class="metric-value">${value}<span>${sceneEnglish()?"items":"项"}</span></div><div class="metric-foot">${foot}</div></button>`;}
+function trendChart(trend, range){
+ const max=Math.max(2,Math.ceil(Math.max(0,...trend.flatMap(d=>[d.new,d.closed]))/2)*2);
+ const total=trend.reduce((n,d)=>n+d.new,0),days=range?.days??trend.length;
+ const peak=range?.daily_peak??Math.max(0,...trend.map(d=>d.new)),average=days?total/days:0;
+ const english=sceneEnglish(),filtered=Boolean(overviewDates.discovered_from||overviewDates.discovered_to);
+ const start=range?.start_date??trend[0]?.date,end=range?.end_date??trend.at(-1)?.date;
+ const dateSpan=start&&end?(start===end?start:`${start} ${english?'to':'至'} ${end}`):'';
+ const period=english?`${filtered?'Selected range ·':'Last'} ${days} ${days===1?'day':'days'}`:`${filtered?'所选范围 · ':'最近 '}${days} 天`;
+ const bucketDays=range?.bucket_days??1;
+ const grouping=bucketDays>1?(english?`Grouped in ${bucketDays}-day intervals`:`每 ${bucketDays} 天汇总`):'';
+ const hasActivity=trend.some(d=>d.new||d.closed);
+ const tickDate=i=>{
+  const date=i===trend.length-1&&end?end:trend[i].date;
+  return (start?.slice(0,4)===end?.slice(0,4)?date.slice(5):date).replaceAll('-','/');
+ };
+ const x=i=>trend.length===1?50:100*i/(trend.length-1), y=n=>100-100*n/max;
+ // Horizontal tangents keep each segment between its measured endpoints (no negative overshoot).
+ const curve=field=>trend.map((d,i)=>{
+  const dx=x(i)*10,dy=y(d[field])*2;
+  if(!i)return `M${dx} ${dy}`;
+  const mid=(x(i-1)+x(i))*5,previous=y(trend[i-1][field])*2;
+  return `C${mid} ${previous} ${mid} ${dy} ${dx} ${dy}`;
+ }).join(' ');
+ const ticks=[...new Set(Array.from({length:6},(_,i)=>Math.round((trend.length-1)*i/5)))];
+ const mobileTicks=new Set([ticks[0],ticks[Math.floor(ticks.length/2)],ticks.at(-1)]);
+ const found=curve('new'), closed=curve('closed');
+ const description=english?`${dateSpan||period}: ${total} discovered, daily peak ${peak}`:`${dateSpan||period}，新增 ${total} 项，单日峰值 ${peak} 项`;
+ return `<div class="vuln-trend-layout">
+  <div class="vuln-trend-summary"><span>${ui('新增漏洞总量')}</span><strong>${total}<small>${ui('项')}</small></strong><div class="vuln-trend-facts"><div>${ui('峰值')}<b>${peak}</b></div><div>${ui('日均')}<b>${average.toFixed(1)}</b></div></div><span class="vuln-trend-period" title="${esc(dateSpan)}"><i></i>${period}</span></div>
+  <div class="chart vuln-trend-chart">${trend.length&&(hasActivity||filtered)?`<div class="vuln-wave" role="img" aria-label="${esc(description)}">
+   <div class="vuln-wave-plot">
+    <svg viewBox="0 0 1000 200" preserveAspectRatio="none" aria-hidden="true">
+     <path class="vuln-wave-grid" vector-effect="non-scaling-stroke" d="M0 0H1000 M0 100H1000 M0 200H1000"/>
+    </svg>
+    ${[0,max/2,max].map(n=>`<span class="vuln-wave-y" aria-hidden="true" style="--at:${y(n)}%">${n}</span>`).join('')}
+    ${ticks.map(i=>`<span class="vuln-wave-x${mobileTicks.has(i)?' is-mobile':''}" aria-hidden="true" style="--at:${x(i)}%">${esc(tickDate(i))}</span>`).join('')}
+    ${hasActivity?`<div class="vuln-wave-series" aria-hidden="true">
+     ${trend.length>1?`<svg viewBox="0 0 1000 200" preserveAspectRatio="none"><defs><linearGradient id="vuln-area" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--trend-found)" stop-opacity=".22"/><stop offset="100%" stop-color="var(--trend-found)" stop-opacity=".015"/></linearGradient></defs>
+      <path d="${found} L1000 200 L0 200Z" fill="url(#vuln-area)"/><path class="vuln-wave-line is-found" vector-effect="non-scaling-stroke" d="${found}"/><path class="vuln-wave-line is-closed" vector-effect="non-scaling-stroke" d="${closed}"/>
+     </svg>`:''}
+     ${trend.map((d,i)=>{
+      const bucket=d.end_date&&d.end_date!==d.date?`${d.date} ${english?'to':'至'} ${d.end_date}`:d.date;
+      const title=esc(english?`${bucket}: discovered ${d.new}, closed ${d.closed}`:`${bucket}：新增 ${d.new}，关闭 ${d.closed}`);
+      return ['new','closed'].map(key=>`<span class="vuln-wave-dot ${key==='new'?'is-found':'is-closed'}" title="${title}" style="--x:${x(i)}%;--y:${y(d[key])}%"></span>`).join('');
+     }).join('')}
+    </div>`:`<span class="vuln-wave-empty">${ui('暂无趋势数据')}</span>`}
+   </div>
+  </div>`:`<div class="trend-empty">${ui('暂无趋势数据')}<small>${ui('登记漏洞后，自动展示发现与关闭趋势')}</small></div>`}
+  <div class="chart-caption"><span>${ui('新增按发现日期 · 关闭按当前关闭日期')}${grouping?` · ${grouping}`:''}</span></div></div></div>`;
+}
+
+function remediationSummary(d){
+ const pct=Math.min(100,Math.max(0,Number(d.close_rate)||0));
+ const counts=sceneEnglish()?`${d.closed} of ${d.total} closed`:`已关闭 ${d.closed} / 共 ${d.total} 项`;
+ const cycle=d.avg_days==null?'—':`${d.avg_days} ${ui('天')}`;
+ return `<section class="risk-remediation" aria-label="${ui('整改进度')}">
+  <div class="risk-remediation-head"><div><h3>${ui('整改进度')}</h3><span>${counts}</span></div><strong>${pct}%</strong></div>
+  <progress class="risk-remediation-meter" max="100" value="${pct}" aria-label="${ui('累计关闭率')}">${pct}%</progress>
+  <dl class="risk-remediation-facts"><div><dt>${ui('逾期未关闭')}</dt><dd>${d.overdue}</dd></div><div><dt>${ui('等待安全复测')}</dt><dd>${d.retest}</dd></div><div><dt>${ui('平均关闭周期')}</dt><dd>${cycle}</dd></div></dl>
+ </section>`;
 }
 
 function overview(d){
  let angle=0;const stops=Object.entries(d.severity).map(([s,n])=>{const start=angle;angle+=d.open?n/d.open*100:0;return `${colors[s]} ${start}% ${angle}%`;}).join(',');
- return head('运营总览','掌握风险全貌，让每一项整改都有进展。',`<span class="date-pill">${icon('calendar')}${localDate()}</span>${btn('导出台账','export',false,'download')}${canManage()?btn('登记漏洞','new-vuln',true,'plus'):''}`,'OVERVIEW / 风险与整改')+
- `<div class="metric-grid">${metric('累计登记漏洞',d.total,`<b>${d.closed} 项已归档</b> 覆盖全生命周期`,'shield','all',true)}${metric('未关闭高危 / 严重',d.critical_high,'优先推进高风险漏洞整改','alert','high')}${metric('逾期未关闭',d.overdue,`<b class="warn">${d.overdue?'需要关注':'当前无逾期'}</b> 超过整改截止日`,'clock','overdue')}${metric('等待安全复测',d.retest,'整改已提交，等待验证结果','check','retest')}</div>`+
+ return head('运营总览','掌握风险全貌，让每一项整改都有进展。',`<button type="button" class="btn overview-date-trigger" data-action="overview-dates" aria-haspopup="dialog" aria-label="${ui('按发现日期筛选')}: ${esc(dateLabel(overviewDates))}">${icon('calendar')}${esc(dateLabel(overviewDates))}</button>${btn('导出台账','export',false,'download')}${canManage()?btn('登记漏洞','new-vuln',true,'plus'):''}`,'OVERVIEW / 风险与整改')+
+ `<div class="metric-grid">${metric(ui('累计登记漏洞'),d.total,`<b>${d.closed} 项已归档</b> 覆盖全生命周期`,'shield','all',true)}${metric(ui('未关闭高危 / 严重'),d.critical_high,'优先推进高风险漏洞整改','alert','high')}${metric(ui('逾期未关闭'),d.overdue,`<b class="warn">${ui(d.overdue?'需要关注':'当前无逾期')}</b> 超过整改截止日`,'clock','overdue')}${metric(ui('等待安全复测'),d.retest,'整改已提交，等待验证结果','check','retest')}</div>`+
  (d.overdue?`<div class="attention">${icon('alert')}<span>有 <b>${d.overdue}</b> 项漏洞已超过整改期限，请及时跟进责任人；待复测漏洞仍计入未关闭风险。</span><button data-go="overdue">查看逾期 ${icon('arrow')}</button></div>`:'')+
  (!d.total?`<div class="attention">${icon('shield')}<span>${canManage()?'从添加资产和整改负责人开始，再登记第一条漏洞。系统不会预填示例数据。':'当前暂无可访问的漏洞记录。'}</span>${canManage()?'<button data-action="new-asset">添加资产 →</button>':''}</div>`:'')+
- `<div class="overview-content"><section class="panel vuln-trend-panel"><div class="panel-head"><div><h2>漏洞发现与关闭趋势</h2><div class="panel-sub">持续跟踪风险流入与整改产出</div></div><div class="legend"><span><i style="background:#a5cd7f"></i>新增</span><span><i style="background:#6a8f48"></i>关闭</span></div></div>${trendChart(d.trend)}</section><section class="panel"><div class="panel-head"><div><h2>当前风险分布</h2><div class="panel-sub">仅统计未关闭漏洞</div></div><span class="badge overview-summary-badge">${d.open} 项风险</span></div><div class="risk-body"><div class="donut" style="background:${d.open?'conic-gradient('+stops+')':'#eef2e9'}"><div class="donut-value">${d.open}<small>未关闭漏洞</small></div></div><div class="risk-legend">${Object.entries(d.severity).map(([s,n])=>`<div class="risk-row"><i style="background:${colors[s]}"></i>${levels[s]}<b>${n}</b><small>${d.open?Math.round(n/d.open*100):0}%</small></div>`).join('')}</div></div><div class="risk-note"><span>累计关闭率 <b>${d.close_rate}%</b></span><span>平均关闭周期 <b>${d.avg_days===null?'—':d.avg_days+' 天'}</b></span></div></section>`+
- `<section class="panel priority-panel"><div class="panel-head"><div><h2>优先跟进</h2><div class="panel-sub">按整改期限排序，先处理临近与逾期风险</div></div><button class="table-link" data-go="all">全部漏洞 →</button></div>${d.urgent.length?`<div class="table-wrap"><table><thead><tr><th>漏洞 / 资产</th><th>风险等级</th><th>责任人</th><th>整改期限</th></tr></thead><tbody>${d.urgent.map(v=>`<tr ${riskThemeAttrs(v)}><td><button class="vuln-title" data-detail="${v.id}">${esc(v.title)}</button><small>${esc(v.code)} · ${esc(v.asset_name)}</small></td><td>${level(v.severity)}</td><td>${ownerCell(v)}</td><td>${due(v)}</td></tr>`).join('')}</tbody></table></div>`:empty('暂无待跟进风险','新增漏洞后，可在这里查看优先整改事项。')}</section><section class="panel"><div class="panel-head"><div><h2>部门整改进展</h2><div class="panel-sub">按资产所属部门统计</div></div><span class="badge overview-summary-badge">关闭 / 总量</span></div><div class="departments">${d.departments.length?d.departments.slice(0,5).map(x=>`<div class="department"><div class="department-top"><span>${esc(x.name)}</span><small>${x.closed} / ${x.total}</small></div><div class="progress"><span style="width:${x.total?x.closed/x.total*100:0}%"></span></div><div class="department-foot"><span>关闭率 ${Math.round(x.closed/x.total*100)}%</span><span>${x.overdue?'逾期 '+x.overdue+' 项':'无逾期'}</span></div></div>`).join(''):empty('暂无部门数据','登记资产时设置所属部门。')}</div></section></div>`;
+ `<div class="overview-content"><section class="panel vuln-trend-panel"><div class="panel-head"><div><h2>${ui("漏洞发现与关闭趋势")}</h2><div class="panel-sub">${ui("持续跟踪风险流入与整改产出")}</div></div><div class="legend"><span><i class="trend-legend-found"></i>${ui("新增")}</span><span><i class="trend-legend-closed"></i>${sceneEnglish()?"Closed":"关闭"}</span></div></div>${trendChart(d.trend,d.trend_range)}</section><section class="panel risk-overview-panel"><div class="panel-head"><div><h2>${ui("当前风险分布")}</h2><div class="panel-sub">${ui("仅统计未关闭漏洞")}</div></div><span class="badge overview-summary-badge">${d.open} 项风险</span></div><div class="risk-body"><div class="donut" style="background:${d.open?'conic-gradient('+stops+')':'#eef2e9'}"><div class="donut-value">${d.open}<small>${ui("未关闭漏洞")}</small></div></div><div class="risk-legend">${Object.entries(d.severity).map(([s,n])=>`<div class="risk-row"><i style="background:${colors[s]}"></i>${ui(levels[s])}<b>${n}</b><small>${d.open?Math.round(n/d.open*100):0}%</small></div>`).join('')}</div></div>${remediationSummary(d)}</section>`+
+ `<section class="panel priority-panel"><div class="panel-head"><div><h2>优先跟进</h2><div class="panel-sub">按整改期限排序，先处理临近与逾期风险</div></div><button class="table-link" data-go="all">全部漏洞 →</button></div>${d.urgent.length?`<div class="table-wrap"><table><thead><tr><th>漏洞 / 资产</th><th>${ui("风险等级")}</th><th>${ui("责任人")}</th><th>${ui("整改期限")}</th></tr></thead><tbody>${d.urgent.map(v=>`<tr ${riskThemeAttrs(v)}><td><button class="vuln-title" data-detail="${v.id}">${esc(v.title)}</button><small>${esc(v.code)} · ${esc(v.asset_name)}</small></td><td>${level(v.severity)}</td><td>${ownerCell(v)}</td><td>${due(v)}</td></tr>`).join('')}</tbody></table></div>`:empty('暂无待跟进风险','新增漏洞后，可在这里查看优先整改事项。')}</section><section class="panel"><div class="panel-head"><div><h2>部门整改进展</h2><div class="panel-sub">按资产所属部门统计</div></div><span class="badge overview-summary-badge">关闭 / 总量</span></div><div class="departments">${d.departments.length?d.departments.slice(0,5).map(x=>`<div class="department"><div class="department-top"><span>${esc(x.name)}</span><small>${x.closed} / ${x.total}</small></div><div class="progress"><span style="width:${x.total?x.closed/x.total*100:0}%"></span></div><div class="department-foot"><span>关闭率 ${Math.round(x.closed/x.total*100)}%</span><span>${x.overdue?'逾期 '+x.overdue+' 项':'无逾期'}</span></div></div>`).join(''):empty('暂无部门数据','登记资产时设置所属部门。')}</div></section></div>`;
 }
 function query(){return new URLSearchParams({...filter,page,page_size:10}).toString();}
 function ledger(d){
  const remedy=false;
  const activeAsset=filter.asset_id?assets.find(a=>String(a.id)===String(filter.asset_id)):null;
  return head(remedy?'整改工作台':'漏洞台账',remedy?'明确责任、跟进修复、完成复测，推动漏洞闭环。':`集中管理漏洞记录，共 ${d.total} 条符合当前筛选条件。`,`${btn('导出当前结果','export',false,'download')}${canManage()?btn('登记漏洞','new-vuln',true,'plus'):''}`,remedy?'REMEDIATION / 闭环跟踪':'REGISTER / 风险档案')+
+ (filter.discovered_from||filter.discovered_to?`<div class="attention"><span>发现日期：${esc(dateLabel(filter))}</span><button type="button" data-action="clear-discovered">清除日期筛选</button></div>`:'')+
  (activeAsset?`<div class="attention"><span>当前资产：${esc(activeAsset.name)}</span><button data-action="reset-filter">清除资产筛选</button></div>`:'')+
- `<section class="panel"><div class="tabs"><button class="tab ${!filter.status?'active':''}" data-status="">全部记录</button>${Object.entries(states).map(([s,n])=>`<button class="tab ${filter.status===s?'active':''}" data-status="${s}">${n}</button>`).join('')}</div><form class="toolbar" id="filter-form"><label class="search">${icon('search')}<input name="q" value="${esc(filter.q||'')}" placeholder="搜索漏洞名称、编号、资产或 CVE" aria-label="搜索漏洞"></label><select name="severity" aria-label="风险等级">${options({...levels,critical_high:'未关闭高危 / 严重'},filter.severity,'全部风险等级')}</select><select name="owner_id" aria-label="责任人">${options(Object.fromEntries(users.map(u=>[u.id,u.name])),filter.owner_id,'全部责任人')}</select><label class="check-label"><input type="checkbox" name="overdue" ${filter.overdue?'checked':''}>仅逾期</label>${me.role!=='owner'?`<label class="check-label"><input type="checkbox" name="mine" ${filter.mine?'checked':''}>分配给我</label>`:''}<button class="btn small" type="submit">查询</button><button class="text-btn" type="button" data-action="reset-filter">重置</button></form><div class="table-wrap ledger-scroll"><table><thead><tr><th>漏洞名称 / 编号</th><th>风险等级</th><th>关联资产</th><th>责任人</th><th>状态</th><th>整改期限</th><th>操作</th></tr></thead><tbody>${d.items.map(v=>`<tr ${riskThemeAttrs(v)}><td><button class="vuln-title" data-detail="${v.id}">${esc(v.title)}</button><small>${v.code} · ${esc(v.category)}</small></td><td>${level(v.severity)}</td><td>${linkedAsset(v)}</td><td>${ownerCell(v)}</td><td>${state(v.status)}</td><td>${due(v)}</td><td><button type="button" class="table-link detail-entry" data-detail="${v.id}"><span>查看详情</span><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h12m-5-5 5 5-5 5"/></svg></button></td></tr>`).join('')}</tbody></table>${!d.items.length?empty('暂无符合条件的漏洞','调整筛选条件，或登记一条新漏洞。'):''}</div><div class="pagination"><span>共 ${d.total} 条 · 每页 10 条</span><div class="actions"><button class="btn small" data-page="${page-1}" ${page<=1?'disabled':''}>上一页</button><span>${page} / ${Math.max(1,Math.ceil(d.total/10))}</span><button class="btn small" data-page="${page+1}" ${page*10>=d.total?'disabled':''}>下一页</button></div></div></section>`;
+ `<section class="panel"><div class="tabs"><button class="tab ${!filter.status?'active':''}" data-status="">${ui("全部记录")}</button>${Object.entries(states).map(([s,n])=>`<button class="tab ${filter.status===s?'active':''}" data-status="${s}">${ui(n)}</button>`).join('')}</div><form class="toolbar" id="filter-form"><label class="search">${icon('search')}<input name="q" value="${esc(filter.q||'')}" placeholder="${ui("搜索漏洞名称、编号、资产或 CVE")}" aria-label="搜索漏洞"></label><select name="severity" aria-label="${ui("风险等级")}">${options(Object.fromEntries(Object.entries({...levels,critical_high:'未关闭高危 / 严重'}).map(([id,name])=>[id,ui(name)])),filter.severity,ui('全部风险等级'))}</select><select name="owner_id" aria-label="${ui("责任人")}">${options(Object.fromEntries(users.map(u=>[u.id,u.name])),filter.owner_id,ui('全部责任人'))}</select><label class="check-label"><input type="checkbox" name="overdue" ${filter.overdue?'checked':''}>${ui("仅逾期")}</label>${me.role!=='owner'?`<label class="check-label"><input type="checkbox" name="mine" ${filter.mine?'checked':''}>${ui("分配给我")}</label>`:''}<button class="btn small" type="submit">${ui("查询")}</button><button class="text-btn" type="button" data-action="reset-filter">${ui("重置")}</button></form><div class="table-wrap ledger-scroll"><table><thead><tr><th>${ui("漏洞名称 / 编号")}</th><th>${ui("风险等级")}</th><th>${ui("关联资产")}</th><th>${ui("责任人")}</th><th>${ui("状态")}</th><th>${ui("整改期限")}</th><th>${ui("操作")}</th></tr></thead><tbody>${d.items.map(v=>`<tr ${riskThemeAttrs(v)}><td><button class="vuln-title" data-detail="${v.id}">${esc(v.title)}</button><small>${v.code} · ${esc(v.category)}</small></td><td>${level(v.severity)}</td><td>${linkedAsset(v)}</td><td>${ownerCell(v)}</td><td>${state(v.status)}</td><td>${due(v)}</td><td><button type="button" class="table-link detail-entry" data-detail="${v.id}"><span>${ui("查看详情")}</span><svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 10h12m-5-5 5 5-5 5"/></svg></button></td></tr>`).join('')}</tbody></table>${!d.items.length?empty('暂无符合条件的漏洞','调整筛选条件，或登记一条新漏洞。'):''}</div><div class="pagination"><span>共 ${d.total} 条 · 每页 10 条</span><div class="actions"><button class="btn small" data-page="${page-1}" ${page<=1?'disabled':''}>${ui("上一页")}</button><span>${page} / ${Math.max(1,Math.ceil(d.total/10))}</span><button class="btn small" data-page="${page+1}" ${page*10>=d.total?'disabled':''}>${ui("下一页")}</button></div></div></section>`;
 }
 function assetPage(){
  const html=assetCardPage(),at=html.indexOf('<div class="asset-grid">');
@@ -162,9 +283,9 @@ function assetCardPage(){return head('资产目录','将每一项风险关联到
 function auditView(d){return head('操作审计','保留关键操作与处理说明，让漏洞整改过程可追溯。',btn('刷新记录','refresh',false,'refresh'),'AUDIT / 操作留痕')+`<section class="panel"><div class="table-wrap"><table><thead><tr><th>时间 / 操作人</th><th>操作</th><th>关联漏洞</th><th>记录内容</th></tr></thead><tbody>${d.items.map(e=>`<tr><td>${stamp(e.created_at)}<small>${esc(e.actor)}</small></td><td>${esc(e.action)}</td><td>${e.vuln_id?`<button class="table-link" data-detail="${e.vuln_id}">VUL-${String(e.vuln_id).padStart(5,'0')}</button>`:'—'}</td><td><div class="audit-note">${esc(e.note)}</div></td></tr>`).join('')}</tbody></table></div><div class="pagination"><span>共 ${d.total} 条操作记录</span><div class="actions"><button class="btn small" data-audit-page="${auditPage-1}" ${auditPage<=1?'disabled':''}>上一页</button><span>${auditPage} / ${Math.max(1,Math.ceil(d.total/30))}</span><button class="btn small" data-audit-page="${auditPage+1}" ${auditPage*30>=d.total?'disabled':''}>下一页</button></div></div></section>`;}
 
 function openOverlay(html){if(!$('#overlay').innerHTML)lastFocus=document.activeElement;$('#overlay').innerHTML=html;document.body.style.overflow='hidden';$('#app').inert=true;requestAnimationFrame(()=>$('#overlay input:not([type=hidden]),#overlay textarea,#overlay select,#overlay button')?.focus());}
-function closeOverlay(){const returnId=modalReturn;modalReturn=null;$('#overlay').innerHTML='';document.body.style.overflow='';$('#app').inert=false;if(returnId&&me){showDetail(returnId);return;}lastFocus?.focus?.();}
+function closeOverlay(){const returnId=modalReturn;modalReturn=null;$('#overlay').innerHTML='';document.body.style.overflow='';$('#app').inert=false;if(returnId&&me){showDetail(returnId);return;}lastFocus?.focus?.();if(sceneLangPending)refreshSceneLanguage();}
 function modal(title,body,formId,submit='保存',subtitle=''){
- openOverlay(`<div class="backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header class="modal-head"><div><h2 id="modal-title">${title}</h2>${subtitle?`<div class="subtitle">${subtitle}</div>`:''}</div><button class="close-btn" data-action="close" aria-label="关闭">×</button></header><form id="${formId}" class="modal-body"><div class="error" role="alert"></div>${body}<div class="modal-footer"><button class="btn" type="button" data-action="close">取消</button><button class="btn primary" type="submit">${submit}</button></div></form></section></div>`);
+ openOverlay(`<div class="backdrop"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title"><header class="modal-head"><div><h2 id="modal-title">${ui(title)}</h2>${subtitle?`<div class="subtitle">${subtitle}</div>`:''}</div><button class="close-btn" data-action="close" aria-label="${ui('关闭')}">×</button></header><form id="${formId}" class="modal-body"><div class="error" role="alert"></div>${body}<div class="modal-footer"><button class="btn" type="button" data-action="close">${ui('取消')}</button><button class="btn primary" type="submit">${ui(submit)}</button></div></form></section></div>`);
  attachSceneAssistant(formId);
 }
 function attachSceneAssistant(formId){
@@ -198,7 +319,7 @@ async function showDetail(id){
  if(canManage()&&v.status==='closed')actions+=action('reopen','重新打开');
  if(canManage()&&v.status!=='closed')actions+=btn('编辑信息','edit-vuln');
  if(canWrite())actions+=action('comment','补充记录');
- openOverlay(`<div class="backdrop drawer-wrap"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header class="drawer-head"><div><span class="code">${v.code} / VULNERABILITY RECORD</span><h2 id="detail-title">${esc(v.title)}</h2><div class="detail-badges">${level(v.severity)}${state(v.status)}${v.overdue_days?`<span class="badge severity-high">逾期 ${v.overdue_days} 天</span>`:''}</div></div><button class="close-btn" data-action="close" aria-label="关闭">×</button></header><div class="drawer-body"><div class="detail-grid"><div class="detail-field"><small>关联资产</small>${linkedAsset(v)}</div>${df('所属部门',v.department)}${df('整改负责人',v.owner_name||'待分派')}${df('发现日期',v.discovered_at)}${df('整改期限',v.due_date)}${df('漏洞来源',v.source)}${df('漏洞类型',v.category)}${df('外部编号',v.cve)}${df('归档时间',v.closed_at?stamp(v.closed_at):'—')}</div>${v.location?`<section class="detail-section"><h3>受影响位置</h3><div class="prose">${esc(v.location)}</div></section>`:''}<section class="detail-section"><h3>漏洞描述与影响</h3><div class="prose">${esc(v.description)}</div></section><section class="detail-section"><h3>修复建议</h3><div class="prose">${esc(v.recommendation||'尚未填写修复建议')}</div></section>${actions?`<div class="detail-actions">${actions}</div>`:''}${v.status==='retest'&&ownSubmit&&canManage()&&me.role!=='admin'?'<div class="hint">你已提交本次整改，请由另一位安全运营人员或管理员完成复测。</div>':''}<section class="detail-section"><div class="actions" style="justify-content:space-between;margin-bottom:15px"><h3 style="margin:0">证据附件 <small>(${v.attachments.length})</small></h3>${canWrite()?btn('上传证据','upload',false,'plus'):''}<input type="file" id="evidence-file" class="hidden" accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.log,.csv,.docx,.xlsx,.zip"></div>${v.attachments.length?v.attachments.map(a=>`<div class="attachment"><a href="/api/scenes/vulnops/api/attachments/${a.id}" download>${icon('file')} ${esc(a.filename)}</a><small>${(a.size/1024).toFixed(1)} KB · ${esc(a.actor)}</small></div>`).join(''):'<div class="hint">尚未上传证据。可上传漏洞截图、整改说明和复测记录，单个文件最大 10 MB。</div>'}</section><section class="detail-section"><h3>处理时间线</h3><div class="timeline">${v.events.map(e=>`<div class="timeline-item"><div class="timeline-top"><b>${esc(e.action)}</b><small>${stamp(e.created_at)}</small></div><div class="timeline-actor">${esc(e.actor)}</div><div class="timeline-note">${esc(e.note)}</div></div>`).join('')}</div></section></div></section></div>`);
+ openOverlay(`<div class="backdrop drawer-wrap"><section class="drawer" role="dialog" aria-modal="true" aria-labelledby="detail-title"><header class="drawer-head"><div><span class="code">${v.code} / VULNERABILITY RECORD</span><h2 id="detail-title">${esc(v.title)}</h2><div class="detail-badges">${level(v.severity)}${state(v.status)}${v.overdue_days?`<span class="badge severity-high">逾期 ${v.overdue_days} 天</span>`:''}</div></div><button class="close-btn" data-action="close" aria-label="${ui('关闭')}">×</button></header><div class="drawer-body"><div class="detail-grid"><div class="detail-field"><small>关联资产</small>${linkedAsset(v)}</div>${df('所属部门',v.department)}${df('整改负责人',v.owner_name||'待分派')}${df('发现日期',v.discovered_at)}${df('整改期限',v.due_date)}${df('漏洞来源',v.source)}${df('漏洞类型',v.category)}${df('外部编号',v.cve)}${df('归档时间',v.closed_at?stamp(v.closed_at):'—')}</div>${v.location?`<section class="detail-section"><h3>受影响位置</h3><div class="prose">${esc(v.location)}</div></section>`:''}<section class="detail-section"><h3>漏洞描述与影响</h3><div class="prose">${esc(v.description)}</div></section><section class="detail-section"><h3>修复建议</h3><div class="prose">${esc(v.recommendation||'尚未填写修复建议')}</div></section>${actions?`<div class="detail-actions">${actions}</div>`:''}${v.status==='retest'&&ownSubmit&&canManage()&&me.role!=='admin'?'<div class="hint">你已提交本次整改，请由另一位安全运营人员或管理员完成复测。</div>':''}<section class="detail-section"><div class="actions" style="justify-content:space-between;margin-bottom:15px"><h3 style="margin:0">证据附件 <small>(${v.attachments.length})</small></h3>${canWrite()?btn('上传证据','upload',false,'plus'):''}<input type="file" id="evidence-file" class="hidden" accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.log,.csv,.docx,.xlsx,.zip"></div>${v.attachments.length?v.attachments.map(a=>`<div class="attachment"><a href="/api/scenes/vulnops/api/attachments/${a.id}" download>${icon('file')} ${esc(a.filename)}</a><small>${(a.size/1024).toFixed(1)} KB · ${esc(a.actor)}</small></div>`).join(''):'<div class="hint">尚未上传证据。可上传漏洞截图、整改说明和复测记录，单个文件最大 10 MB。</div>'}</section><section class="detail-section"><h3>处理时间线</h3><div class="timeline">${v.events.map(e=>`<div class="timeline-item"><div class="timeline-top"><b>${esc(e.action)}</b><small>${stamp(e.created_at)}</small></div><div class="timeline-actor">${esc(e.actor)}</div><div class="timeline-note">${esc(e.note)}</div></div>`).join('')}</div></section></div></section></div>`);
 }
 function actionForm(action){
  const labels={assign:'分派责任人',start:'开始整改',submit:'提交整改',pass:'提交复测并归档',reject:'复测未通过',reopen:'重新打开漏洞',comment:'补充处理记录'};
@@ -213,7 +334,7 @@ document.addEventListener('click',async e=>{
   if(el.dataset.assetMode){assetMode=el.dataset.assetMode;return await render();}
   if(el.dataset.view)return await navigate(el.dataset.view);
   if(el.dataset.detail)return await showDetail(Number(el.dataset.detail));
-  if(el.dataset.go){view='ledger';filter={};page=1;const go=el.dataset.go;if(go==='overdue')filter.overdue='true';if(go==='retest')filter.status='retest';if(go==='high')filter.severity='critical_high';return await render();}
+  if(el.dataset.go){filter=view==='overview'?{...overviewDates}:{};view='ledger';page=1;const go=el.dataset.go;if(go==='overdue')filter.overdue='true';if(go==='retest')filter.status='retest';if(go==='high')filter.severity='critical_high';return await render();}
   if(el.dataset.deleteAsset){const a=assets.find(item=>item.id===Number(el.dataset.deleteAsset));if(!a)return;modal('删除资产',`<input type="hidden" name="asset_id" value="${a.id}"><p class="asset-delete-name">${esc(a.name)}</p><p class="subtitle">${esc(a.address)}</p><div class="hint">确定删除此资产？删除后不可恢复；有关联漏洞的资产会被保护，需先将漏洞关联到其他资产。</div>`,'delete-asset-form','确认删除');return;}
   if(el.dataset.softwareAsset){window.top.location.href='/contracts/webui/workspaces/threat_intelligence/intelligence?asset='+encodeURIComponent(el.dataset.softwareAsset);return;}
   if(el.dataset.editAsset)return assetForm(Number(el.dataset.editAsset));
@@ -221,6 +342,13 @@ document.addEventListener('click',async e=>{
   if(el.hasAttribute('data-status')){if(el.dataset.status)filter.status=el.dataset.status;else delete filter.status;page=1;return await render();}
   if(el.dataset.page){page=Number(el.dataset.page);return await render();}
   if(el.dataset.auditPage){auditPage=Number(el.dataset.auditPage);return await render();}
+  if(el.dataset.overviewDays){
+   const form=$('#overview-date-form'), from=form.elements.discovered_from, to=form.elements.discovered_to;
+   if(el.dataset.overviewDays==='all'){from.value='';to.value='';}
+   else {to.value=localDate();const start=new Date(to.value+'T00:00:00Z');start.setUTCDate(start.getUTCDate()-Number(el.dataset.overviewDays)+1);from.value=start.toISOString().slice(0,10);}
+   form.dispatchEvent(new Event('input'));
+   return;
+  }
   switch(el.dataset.action){
    case 'reload':return location.reload();
    case 'refresh':return await render();
@@ -233,8 +361,10 @@ document.addEventListener('click',async e=>{
    case 'logout':await api('/logout',{method:'POST'});me=null;return auth(false);
    case 'workflow':return actionForm(el.dataset.workflow);
    case 'upload':return $('#evidence-file').click();
+   case 'overview-dates':return overviewDateForm();
+   case 'clear-discovered':delete filter.discovered_from;delete filter.discovered_to;page=1;return await render();
    case 'reset-filter':filter={};page=1;return await render();
-   case 'export':{const q=['ledger','remediation'].includes(view)?new URLSearchParams(filter).toString():'';const res=await fetch('/api/scenes/vulnops/api/export?'+q);if(!res.ok)throw new Error('导出失败，请重新登录后重试');const url=URL.createObjectURL(await res.blob());const a=document.createElement('a');a.href=url;a.download=`漏洞台账-${localDate()}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);return toast('已导出当前权限范围内的台账');}
+   case 'export':{const q=['ledger','remediation'].includes(view)?new URLSearchParams(filter).toString():view==='overview'?dateParams(overviewDates):'';const res=await fetch('/api/scenes/vulnops/api/export?'+q);if(!res.ok)throw new Error('导出失败，请重新登录后重试');const url=URL.createObjectURL(await res.blob());const a=document.createElement('a');a.href=url;a.download=`漏洞台账-${localDate()}.csv`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);return toast('已导出当前权限范围内的台账');}
   }
  }catch(err){toast(err.message);}
 });
@@ -245,7 +375,13 @@ document.addEventListener('submit',async e=>{
    if(form.dataset.setup==='true')await api('/setup',{method:'POST',body:{...data,role:'admin'}});
    me=await api('/login',{method:'POST',body:{username:data.username,password:data.password}});await start();return;
   }
-  if(form.id==='filter-form'){const preserved=filter.status;const assetId=filter.asset_id;filter={};if(assetId)filter.asset_id=assetId;for(const [k,v]of Object.entries(data))if(v)filter[k]=['mine','overdue'].includes(k)?'true':v;if(preserved)filter.status=preserved;page=1;await render();return;}
+  if(form.id==='overview-date-form'){
+   if([data.discovered_from,data.discovered_to].some(date=>date>localDate()))throw new Error('发现日期不能晚于今天');
+   if(data.discovered_from&&data.discovered_to&&data.discovered_from>data.discovered_to)throw new Error('开始日期不能晚于结束日期');
+   overviewDates=Object.fromEntries(Object.entries(data).filter(([,value])=>value));
+   closeOverlay();await render();$('#content .overview-date-trigger')?.focus({preventScroll:true});return;
+  }
+  if(form.id==='filter-form'){const preserved=filter.status;const assetId=filter.asset_id;const {discovered_from,discovered_to}=filter;filter={};if(discovered_from)filter.discovered_from=discovered_from;if(discovered_to)filter.discovered_to=discovered_to;if(assetId)filter.asset_id=assetId;for(const [k,v]of Object.entries(data))if(v)filter[k]=['mine','overdue'].includes(k)?'true':v;if(preserved)filter.status=preserved;page=1;await render();return;}
   if(form.id==='asset-filter-form'){assetSearch=String(data.q||'').trim();await render();return;}
   let reopen=null,message='保存成功';
   if(['vuln-form','edit-vuln-form'].includes(form.id)){
@@ -271,6 +407,9 @@ document.addEventListener('change',async e=>{
 document.addEventListener('keydown',e=>{
  if(!$('#overlay').innerHTML)return;
  if(e.key==='Escape'){e.preventDefault();closeOverlay();}
- if(e.key==='Tab'){const items=[...$('#overlay').querySelectorAll('button:not(:disabled),a[href],input:not([type=hidden]):not(:disabled),select:not(:disabled),textarea:not(:disabled)')].filter(x=>x.offsetParent!==null);const first=items[0],last=items.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
+ if(e.key==='Tab'){const items=[...$('#overlay').querySelectorAll('button:not(:disabled),a[href],input:not([type=hidden]):not(:disabled),select:not(:disabled),textarea:not(:disabled)')].filter(x=>x.tabIndex>=0&&x.offsetParent!==null);const first=items[0],last=items.at(-1);if(e.shiftKey&&document.activeElement===first){e.preventDefault();last?.focus();}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first?.focus();}}
 });
+let sceneLangPending=false;
+function refreshSceneLanguage(){if(!me||!$('#content'))return;if($('#overlay').innerHTML){sceneLangPending=true;return;}sceneLangPending=false;shell();void render();}
+window.addEventListener('aegis:scene-language',refreshSceneLanguage);
 boot();
